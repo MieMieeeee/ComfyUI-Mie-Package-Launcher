@@ -1,0 +1,46 @@
+{
+  "launch_options": {
+    "default_mode": "run_nvidia_gpu_hf_mirror.bat",
+    "custom_args": "",
+    "auto_launch": false,
+    "minimize_on_launch": false,
+    "default_compute_mode": "gpu",
+    "default_port": "8188",
+    "enable_hf_mirror": false,
+    "enable_git_proxy": false,
+    "enable_pypi_proxy": false,
+    "enable_fast_mode": false,
+    "enable_cors": false,
+    "listen_all": false,
+    "hf_mirror": "不使用镜像",
+    "pypi_mirror": "不使用镜像"
+  },
+  "ui_settings": {
+    "window_width": 800,
+    "window_height": 600,
+    "theme": "default",
+    "font_size": 9,
+    "log_max_lines": 1000,
+    "window_size": "500x650"
+  },
+  "paths": {
+    "comfyui_root": ".",
+    "python_embeded": "python_embeded",
+    "custom_nodes": "ComfyUI/custom_nodes",
+    "bat_files_directory": ".",
+    "comfyui_path": "ComfyUI",
+    "python_path": "python_embeded/python.exe",
+    
+  },
+  "advanced": {
+    "check_environment_changes": true,
+    "show_debug_info": false,
+    "auto_scroll_logs": true,
+    "save_logs": false
+  },
+  "proxy_settings": {
+    "git_proxy_url": "https://ghproxy.com/",
+    "pypi_proxy_url": "https://pypi.tuna.tsinghua.edu.cn/simple/",
+    "hf_mirror_url": "https://hf-mirror.com"
+  }
+}

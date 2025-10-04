@@ -1,0 +1,24 @@
+# ComfyUI启动器依赖包
+
+# 核心依赖（Python标准库）
+# tkinter - GUI框架（通常随Python安装）
+# subprocess - 进程管理
+# threading - 多线程支持
+# pathlib - 路径操作
+# json - JSON处理
+# datetime - 日期时间处理
+# hashlib - 哈希计算
+# shutil - 文件操作
+
+# 打包依赖
+pyinstaller>=5.0.0    # 用于打包成exe文件
+
+# 可选依赖（用于扩展功能）
+# GitPython==3.1.40  # Git操作（用于版本管理）
+# psutil==5.9.6      # 系统监控（用于进程管理）
+# requests==2.31.0   # HTTP请求（用于在线更新）
+
+# 注意：
+# 1. 本启动器主要使用Python标准库，无需额外安装包
+# 2. 如果要打包成exe文件，需要安装pyinstaller
+# 3. 如果运行时出现导入错误，请检查Python安装是否完整
