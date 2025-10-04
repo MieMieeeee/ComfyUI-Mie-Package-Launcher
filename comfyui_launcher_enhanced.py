@@ -66,6 +66,15 @@ class SingletonLock:
                 pass
             self.lock_file = None
 
+def run_hidden(cmd, **kwargs):
+    import sys
+    import subprocess
+    if sys.platform.startswith("win"):
+        si = subprocess.STARTUPINFO()
+        si.dwFlags |= subprocess.STARTF_USESHOWWINDOW
+        kwargs["startupinfo"] = si
+    return subprocess.run(cmd, **kwargs)
+
 # ================== 大启动按钮 ==================
 class BigLaunchButton(tk.Frame):
     def __init__(self, parent, text="一键启动", size=180,
@@ -869,11 +878,11 @@ class ComfyUILauncherEnhanced:
                 root = Path(self.config["paths"]["comfyui_path"]).resolve()
                 if root.exists():
                     try:
-                        r = subprocess.run(["git", "describe", "--tags", "--abbrev=0"],
+                        r = run_hidden(["git", "describe", "--tags", "--abbrev=0"],
                                            cwd=str(root), capture_output=True, text=True, timeout=10)
                         if r.returncode == 0:
                             tag = r.stdout.strip()
-                            r2 = subprocess.run(["git", "rev-parse", "--short", "HEAD"],
+                            r2 = run_hidden(["git", "rev-parse", "--short", "HEAD"],
                                                 cwd=str(root), capture_output=True, text=True, timeout=10)
                             commit = r2.stdout.strip() if r2.returncode == 0 else ""
                             self.comfyui_version.set(f"{tag} ({commit})")
@@ -885,7 +894,7 @@ class ComfyUILauncherEnhanced:
                     self.comfyui_version.set("ComfyUI未找到")
 
                 try:
-                    r = subprocess.run([self.config["paths"]["python_path"], "--version"],
+                    r = run_hidden([self.config["paths"]["python_path"], "--version"],
                                        capture_output=True, text=True, timeout=10)
                     if r.returncode == 0:
                         self.python_version.set(r.stdout.strip().replace("Python ", ""))
@@ -895,7 +904,7 @@ class ComfyUILauncherEnhanced:
                     self.python_version.set("获取失败")
 
                 try:
-                    r = subprocess.run([self.config["paths"]["python_path"], "-c", "import torch;print(torch.__version__)"],
+                    r = run_hidden([self.config["paths"]["python_path"], "-c", "import torch;print(torch.__version__)"],
                                        capture_output=True, text=True, timeout=15)
                     if r.returncode == 0:
                         self.torch_version.set(r.stdout.strip())
@@ -905,7 +914,7 @@ class ComfyUILauncherEnhanced:
                     self.torch_version.set("获取失败")
 
                 try:
-                    r = subprocess.run([self.config["paths"]["python_path"], "-m", "pip", "show", "comfyui-frontend-package"],
+                    r = run_hidden([self.config["paths"]["python_path"], "-m", "pip", "show", "comfyui-frontend-package"],
                                        capture_output=True, text=True, timeout=10)
                     if r.returncode == 0:
                         for line in r.stdout.splitlines():
@@ -920,7 +929,7 @@ class ComfyUILauncherEnhanced:
                     self.frontend_version.set("获取失败")
 
                 try:
-                    r = subprocess.run([self.config["paths"]["python_path"], "-m", "pip", "show", "comfyui-workflow-templates"],
+                    r = run_hidden([self.config["paths"]["python_path"], "-m", "pip", "show", "comfyui-workflow-templates"],
                                        capture_output=True, text=True, timeout=10)
                     if r.returncode == 0:
                         for line in r.stdout.splitlines():
@@ -947,7 +956,7 @@ class ComfyUILauncherEnhanced:
                 if self.update_core_var.get():
                     try:
                         root = Path(self.config["paths"]["comfyui_path"]).resolve()
-                        subprocess.run(["git", "pull"], cwd=str(root),
+                        run_hidden(["git", "pull"], cwd=str(root),
                                        capture_output=True, text=True)
                     except:
                         pass

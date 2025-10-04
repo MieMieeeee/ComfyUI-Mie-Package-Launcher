@@ -202,7 +202,7 @@ class VersionManager:
     # ---------- Git 基础 ----------
     def run_git_command(self, args, capture_output=True):
         try:
-            return subprocess.run(
+            return run_hidden(
                 ['git'] + args,
                 cwd=self.comfyui_path,
                 capture_output=capture_output,

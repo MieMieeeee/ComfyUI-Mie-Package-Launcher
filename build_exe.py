@@ -54,6 +54,7 @@ def build_exe():
         '--onefile',
         '--windowed',  # 改回窗口模式
         '--add-data=version_manager.py;.',
+        '--add-data=about_me.png;.',
         '--hidden-import=threading',
         '--hidden-import=json',
         '--hidden-import=pathlib',
