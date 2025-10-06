@@ -1,10 +1,12 @@
 import tkinter as tk
-from tkinter import ttk, messagebox
+from tkinter import ttk, messagebox, filedialog
 from tkinter import font as tkfont
 import subprocess, threading, json, os, sys, webbrowser, tempfile, atexit
 from pathlib import Path
 from PIL import Image, ImageTk
 from version_manager import VersionManager
+from utils import run_hidden, have_git, is_git_repo
+from logger_setup import install_logging
 
 # ================== 单实例锁 ==================
 try:
@@ -66,14 +68,7 @@ class SingletonLock:
                 pass
             self.lock_file = None
 
-def run_hidden(cmd, **kwargs):
-    import sys
-    import subprocess
-    if sys.platform.startswith("win"):
-        si = subprocess.STARTUPINFO()
-        si.dwFlags |= subprocess.STARTF_USESHOWWINDOW
-        kwargs["startupinfo"] = si
-    return subprocess.run(cmd, **kwargs)
+# 使用工具模块中的 run_hidden，移除重复定义
 
 # ================== 大启动按钮 ==================
 class BigLaunchButton(tk.Frame):
@@ -213,7 +208,7 @@ class ComfyUILauncherEnhanced:
             cls._instance = super().__new__(cls)
         return cls._instance
 
-    LAUNCH_BUTTON_CENTER = True
+    LAUNCH_BUTTON_CENTER = False
     CARD_BORDER_COLOR = "#E3E7EB"
     CARD_BG = "#FFFFFF"
     SEPARATOR_COLOR = "#E3E7EB"
@@ -234,16 +229,105 @@ class ComfyUILauncherEnhanced:
             return
         self._initialized = True
         self.root = tk.Tk()
+        # 安装日志记录与异常钩子，输出到 logs/launcher.log
+        self.logger = install_logging()
+        try:
+            self.logger.info("启动器初始化")
+        except Exception:
+            pass
         self.setup_window()
 
+        # 基础配置与变量需尽早初始化，避免后续保护性路径检查时出现属性缺失
         self.config_file = Path("launcher/config.json")
-        if not Path("ComfyUI").exists():
-            messagebox.showerror("错误", "请在 ComfyUI 根目录下运行此程序")
-            self.root.destroy()
-            return
-
         self.load_config()
         self.setup_variables()
+
+        # 允许在任意目录运行：如果未检测到有效的 ComfyUI 路径，则提示用户选择
+        def is_valid_comfy_path(p: Path) -> bool:
+            try:
+                return p.exists() and (
+                    (p / "main.py").exists() or (p / ".git").exists()
+                )
+            except Exception:
+                return False
+
+        # 当前配置中的路径或常见默认路径
+        comfy_path = Path(self.config["paths"].get("comfyui_path", "ComfyUI")).resolve()
+        if not is_valid_comfy_path(comfy_path):
+            # 尝试当前工作目录下的 ComfyUI 子目录
+            alt = Path("ComfyUI").resolve()
+            if is_valid_comfy_path(alt):
+                comfy_path = alt
+            else:
+                # 弹窗引导用户选择 ComfyUI 根目录
+                messagebox.showwarning(
+                    "未找到 ComfyUI",
+                    "未检测到有效的 ComfyUI 根目录。请手动选择安装目录。"
+                )
+                selected = filedialog.askdirectory(title="请选择 ComfyUI 根目录")
+                if selected:
+                    cand = Path(selected).resolve()
+                    if is_valid_comfy_path(cand):
+                        comfy_path = cand
+                    else:
+                        messagebox.showerror("错误", "所选目录似乎不是 ComfyUI 根目录（缺少 main.py 或 .git）")
+                # 如果仍然无效，则进入安全退出流程
+                if not is_valid_comfy_path(comfy_path):
+                    # 标记为致命启动失败，后续 run() 将直接退出，避免 AttributeError
+                    self._fatal_startup_error = True
+                    try:
+                        self.root.withdraw()
+                    except Exception:
+                        pass
+                    messagebox.showerror("错误", "未能定位 ComfyUI 根目录，程序将退出")
+                    # 不销毁 root，这样 run() 可以安全地返回；交由 run() 做最终退出处理
+                    return
+
+        # 写回配置以便后续使用
+        self.config["paths"]["comfyui_path"] = str(comfy_path)
+        try:
+            json.dump(self.config, open(self.config_file, 'w', encoding='utf-8'), indent=2, ensure_ascii=False)
+        except Exception:
+            pass
+
+        # 解析并固定 Python 可执行路径，避免相对路径在不同工作目录下失效
+        def resolve_python_exec() -> Path:
+            cfg_path = Path(self.config["paths"].get("python_path", "python_embeded/python.exe"))
+            candidates = []
+            # 已是绝对路径
+            if cfg_path.is_absolute():
+                candidates.append(cfg_path)
+            # 相对路径：尝试当前工作目录
+            candidates.append(Path.cwd() / cfg_path)
+            # 启动器目录（launcher 上级）
+            try:
+                app_root = Path(__file__).resolve().parent.parent
+                candidates.append(app_root / cfg_path)
+                candidates.append(app_root / "python_embeded" / "python.exe")
+            except Exception:
+                pass
+            # 以 ComfyUI 路径为基准（ComfyUI 的上级应是根目录）
+            try:
+                candidates.append(Path(comfy_path).resolve().parent / "python_embeded" / "python.exe")
+            except Exception:
+                pass
+            for c in candidates:
+                try:
+                    if c.exists():
+                        return c
+                except Exception:
+                    pass
+            return cfg_path
+
+        py_exec = resolve_python_exec()
+        self.python_exec = str(py_exec)
+        # 将解析后的绝对路径写回配置，后续运行更稳健
+        try:
+            self.config["paths"]["python_path"] = self.python_exec
+            json.dump(self.config, open(self.config_file, 'w', encoding='utf-8'), indent=2, ensure_ascii=False)
+        except Exception:
+            pass
+
         self.load_settings()
 
         self.version_manager = VersionManager(
@@ -259,8 +343,58 @@ class ComfyUILauncherEnhanced:
     # ---------- 样式 ----------
     def setup_window(self):
         self.root.title("ComfyUI启动器 - 黎黎原上咩")
-        self.root.geometry("1250x760")
-        self.root.minsize(1100, 660)
+        self.root.geometry("1250x820")
+        self.root.minsize(1100, 700)
+        # 窗口图标：优先使用 rabbit.ico，适配 PyInstaller (sys._MEIPASS) 环境；失败则回退到 rabbit.png
+        try:
+            base_paths = []
+            # 1) 运行时资源目录（PyInstaller）
+            try:
+                base_paths.append(Path(getattr(sys, '_MEIPASS', '')))
+            except Exception:
+                pass
+            # 2) 源码所在的 launcher 目录
+            try:
+                base_paths.append(Path(__file__).resolve().parent)
+            except Exception:
+                pass
+            # 3) 项目根目录下的 launcher 目录
+            base_paths.append(Path('launcher').resolve())
+            # 4) 可执行文件所在目录
+            try:
+                base_paths.append(Path(sys.executable).resolve().parent)
+            except Exception:
+                pass
+
+            icon_candidates = []
+            for b in base_paths:
+                if b and b.exists():
+                    icon_candidates.append(b / 'rabbit.ico')
+
+            icon_set = False
+            for p in icon_candidates:
+                if p.exists():
+                    try:
+                        self.root.iconbitmap(str(p))
+                        icon_set = True
+                        break
+                    except:
+                        pass
+            if not icon_set:
+                png_candidates = []
+                for b in base_paths:
+                    if b and b.exists():
+                        png_candidates.append(b / 'rabbit.png')
+                for p in png_candidates:
+                    if p.exists():
+                        try:
+                            self._icon_image = ImageTk.PhotoImage(file=str(p))
+                            self.root.iconphoto(True, self._icon_image)
+                            break
+                        except:
+                            pass
+        except:
+            pass
         self.style = ttk.Style()
         self.style.theme_use('clam')
         self.style.layout('Hidden.TNotebook.Tab', [])
@@ -335,44 +469,145 @@ class ComfyUILauncherEnhanced:
         self.template_version = tk.StringVar(value="获取中…")
         self.python_version = tk.StringVar(value="获取中…")
         self.torch_version = tk.StringVar(value="获取中…")
+        # Git 状态展示（使用系统Git / 使用整合包Git / 未找到Git命令 等）
+        self.git_status = tk.StringVar(value="检测中…")
+        # 解析后的 Git 命令路径（'git' 或绝对路径；None 表示不可用）
+        self.git_path = None
         self.update_core_var = tk.BooleanVar(value=True)
         self.update_frontend_var = tk.BooleanVar(value=True)
         self.update_template_var = tk.BooleanVar(value=True)
+
+        # PyPI 代理设置（用于前端与模板库更新）
+        proxy_cfg = self.config.get("proxy_settings", {}) if isinstance(self.config, dict) else {}
+        default_pypi_mode = proxy_cfg.get("pypi_proxy_mode", "aliyun")
+        default_pypi_url = proxy_cfg.get("pypi_proxy_url", "https://mirrors.aliyun.com/pypi/simple/")
+        self.pypi_proxy_mode = tk.StringVar(value=default_pypi_mode)
+        self.pypi_proxy_url = tk.StringVar(value=default_pypi_url)
+        # UI 展示值（中文）
+        def _pypi_mode_ui_text(mode: str):
+            return "阿里云" if mode == "aliyun" else ("自定义" if mode == "custom" else "不使用")
+        self.pypi_proxy_mode_ui = tk.StringVar(value=_pypi_mode_ui_text(default_pypi_mode))
+
+        # 变更时持久化
+        self.pypi_proxy_mode.trace_add("write", lambda *a: self.save_config())
+        self.pypi_proxy_url.trace_add("write", lambda *a: self.save_config())
 
         self.compute_mode.trace_add("write", lambda *a: self.save_config())
         self.use_fast_mode.trace_add("write", lambda *a: self.save_config())
         self.enable_cors.trace_add("write", lambda *a: self.save_config())
         self.listen_all.trace_add("write", lambda *a: self.save_config())
         self.custom_port.trace_add("write", lambda *a: self.save_config())
+        # HF 镜像 URL（新增）
+        default_hf_url = proxy_cfg.get("hf_mirror_url", "https://hf-mirror.com")
+        self.hf_mirror_url = tk.StringVar(value=default_hf_url)
         self.selected_hf_mirror.trace_add("write", lambda *a: self.save_config())
+        self.hf_mirror_url.trace_add("write", lambda *a: self.save_config())
 
     def load_config(self):
+        try:
+            self.logger.info("加载配置文件: %s (exists=%s)", str(self.config_file), self.config_file.exists())
+        except Exception:
+            pass
         default = {
-            "paths": {"comfyui_path": "ComfyUI", "python_path": "python_embeded/python.exe"},
-            "launch_options": {"default_compute_mode": "gpu", "default_port": "8188",
-                               "enable_fast_mode": False, "enable_cors": False, "listen_all": False}
+            "launch_options": {
+                "default_compute_mode": "gpu",
+                "default_port": "8188",
+                "enable_fast_mode": False,
+                "enable_cors": True,
+                "listen_all": True
+            },
+            "ui_settings": {
+                "window_width": 800,
+                "window_height": 600,
+                "theme": "default",
+                "font_size": 9,
+                "log_max_lines": 1000,
+                "window_size": "500x650"
+            },
+            "paths": {
+                "comfyui_root": ".",
+                "python_embeded": "python_embeded",
+                "custom_nodes": "ComfyUI/custom_nodes",
+                "bat_files_directory": ".",
+                "comfyui_path": "ComfyUI",
+                "python_path": "python_embeded/python.exe",
+                "hf_mirror": "hf-mirror"
+            },
+            "advanced": {
+                "check_environment_changes": True,
+                "show_debug_info": False,
+                "auto_scroll_logs": True,
+                "save_logs": False
+            },
+            "proxy_settings": {
+            "git_proxy_mode": "gh-proxy",
+            "git_proxy_url": "https://ghproxy.com/",
+            "pypi_proxy_mode": "aliyun",
+            "pypi_proxy_url": "https://mirrors.aliyun.com/pypi/simple/",
+            "hf_mirror_url": "https://hf-mirror.com"
+        }
         }
         self.config_file.parent.mkdir(exist_ok=True)
         if self.config_file.exists():
             try:
                 self.config = json.load(open(self.config_file, 'r', encoding='utf-8'))
+                try:
+                    self.logger.info("配置读取成功")
+                except Exception:
+                    pass
             except:
                 self.config = default
+                try:
+                    self.logger.warning("配置读取失败，使用默认值")
+                except Exception:
+                    pass
         else:
+            # 直接写入默认配置，避免在变量尚未初始化时调用 save_config
             self.config = default
-            self.save_config()
+            try:
+                with open(self.config_file, 'w', encoding='utf-8') as f:
+                    json.dump(self.config, f, indent=2, ensure_ascii=False)
+                try:
+                    self.logger.info("首次创建配置文件并写入默认值")
+                except Exception:
+                    pass
+            except:
+                pass
 
     def save_config(self):
+        try:
+            self.logger.info("保存配置到: %s", str(self.config_file))
+        except Exception:
+            pass
+        # 保护性获取变量，避免在初始化早期因为变量不存在而报错
+        def _get(var, default):
+            try:
+                return var.get()
+            except Exception:
+                return default
+
         self.config["launch_options"] = {
-            "default_compute_mode": self.compute_mode.get(),
-            "default_port": self.custom_port.get(),
-            "enable_fast_mode": self.use_fast_mode.get(),
-            "enable_cors": self.enable_cors.get(),
-            "listen_all": self.listen_all.get(),
+            "default_compute_mode": _get(self.compute_mode, "gpu"),
+            "default_port": _get(self.custom_port, "8188"),
+            "enable_fast_mode": _get(self.use_fast_mode, False),
+            "enable_cors": _get(self.enable_cors, True),
+            "listen_all": _get(self.listen_all, True),
         }
-        # 记录镜像选项
-        self.config["paths"]["hf_mirror"] = self.selected_hf_mirror.get()
+        # 记录镜像选项（模式与 URL）
+        self.config["paths"]["hf_mirror"] = _get(self.selected_hf_mirror, "hf-mirror")
+        # 保存代理设置
+        ps = self.config.setdefault("proxy_settings", {})
+        try:
+            ps["pypi_proxy_mode"] = _get(self.pypi_proxy_mode, "aliyun")
+            ps["pypi_proxy_url"] = _get(self.pypi_proxy_url, "https://mirrors.aliyun.com/pypi/simple/")
+            ps["hf_mirror_url"] = _get(self.hf_mirror_url, "https://hf-mirror.com")
+        except Exception:
+            pass
         json.dump(self.config, open(self.config_file, 'w', encoding='utf-8'), indent=2, ensure_ascii=False)
+        try:
+            self.logger.info("配置保存完成")
+        except Exception:
+            pass
 
     def load_settings(self):
         opt = self.config.get("launch_options", {})
@@ -480,8 +715,7 @@ class ComfyUILauncherEnhanced:
         c = self.COLORS
 
         header = tk.Frame(parent, bg=c["BG"])
-        header.pack(fill=tk.X, pady=(18, 10))
-        tk.Frame(header, height=1, bg=c["BORDER"]).pack(fill=tk.X, padx=2, pady=(8,8))
+        header.pack(fill=tk.X, pady=(6, 6))
 
         launch_card = SectionCard(parent, "启动控制", icon="⚙",
                                   border_color=self.CARD_BORDER_COLOR,
@@ -518,16 +752,18 @@ class ComfyUILauncherEnhanced:
                                    border_color=self.CARD_BORDER_COLOR,
                                    bg=self.CARD_BG,
                                    title_font=self.SECTION_TITLE_FONT,
-                                   padding=(20, 14, 20, 18))
-        version_card.pack(fill=tk.X, pady=(0, 16))
+                                   padding=(16, 12, 16, 12))
+        version_card.pack(fill=tk.X, pady=(0, 10))
         self._build_version_section(version_card.get_body())
 
         quick_card = SectionCard(parent, "快捷目录", icon="🗂",
                                  border_color=self.CARD_BORDER_COLOR,
                                  bg=self.CARD_BG,
                                  title_font=self.SECTION_TITLE_FONT,
-                                 padding=(20, 14, 20, 18))
-        quick_card.pack(fill=tk.X, pady=(0, 24))
+                                 # 轻微压缩顶部留白，并降低内容与标题间距
+                                 padding=(14, 8, 14, 10),
+                                 inner_gap=10)
+        quick_card.pack(fill=tk.X, pady=(0, 10))
         self._build_quick_links(quick_card.get_body(), path=self.config["paths"]["comfyui_path"])
 
         self.get_version_info()
@@ -535,7 +771,7 @@ class ComfyUILauncherEnhanced:
     def _build_start_button(self, parent):
         self.big_btn = BigLaunchButton(parent,
                                        text="一键启动",
-                                       size=190,
+                                       size=170,
                                        color=self.COLORS["ACCENT"],
                                        hover=self.COLORS["ACCENT_HOVER"],
                                        active=self.COLORS["ACCENT_ACTIVE"],
@@ -578,14 +814,24 @@ class ComfyUILauncherEnhanced:
 
         checks = tk.Frame(form, bg=self.CARD_BG)
         checks.grid(row=1, column=1, sticky="w", pady=(0, ROW_GAP))
-        ttk.Checkbutton(checks, text="快速模式 (fp16)",
-                        variable=self.use_fast_mode) \
+        # 改用原生 tk.Checkbutton，Windows 下选中为对号，更贴近用户预期
+        tk.Checkbutton(checks, text="快速模式 (fp16)",
+                       variable=self.use_fast_mode,
+                       bg=self.CARD_BG, fg=self.COLORS["TEXT"],
+                       activebackground=self.CARD_BG, activeforeground=self.COLORS["TEXT"],
+                       selectcolor=self.CARD_BG) \
             .pack(side=tk.LEFT, padx=(0, INLINE_GAP))
-        ttk.Checkbutton(checks, text="启用 CORS",
-                        variable=self.enable_cors) \
+        tk.Checkbutton(checks, text="启用 CORS",
+                       variable=self.enable_cors,
+                       bg=self.CARD_BG, fg=self.COLORS["TEXT"],
+                       activebackground=self.CARD_BG, activeforeground=self.COLORS["TEXT"],
+                       selectcolor=self.CARD_BG) \
             .pack(side=tk.LEFT, padx=(0, INLINE_GAP))
-        ttk.Checkbutton(checks, text="监听 0.0.0.0",
-                        variable=self.listen_all) \
+        tk.Checkbutton(checks, text="监听 0.0.0.0",
+                       variable=self.listen_all,
+                       bg=self.CARD_BG, fg=self.COLORS["TEXT"],
+                       activebackground=self.CARD_BG, activeforeground=self.COLORS["TEXT"],
+                       selectcolor=self.CARD_BG) \
             .pack(side=tk.LEFT)
 
         spacer = tk.Frame(form, bg=self.CARD_BG, width=1, height=1)
@@ -600,15 +846,24 @@ class ComfyUILauncherEnhanced:
 
         tk.Label(port_row, text="HF 镜像:", bg=self.CARD_BG, fg=c["TEXT"], font=BODY_FONT) \
             .pack(side=tk.LEFT, padx=(0, 8))
+        # 增加“自定义”选项并添加输入框
         self.hf_mirror_combobox = ttk.Combobox(
             port_row,
             textvariable=self.selected_hf_mirror,
-            values=list(self.hf_mirror_options.keys()),
+            values=["不使用镜像", "hf-mirror", "自定义"],
             state="readonly",
-            width=16
+            width=12
         )
         self.hf_mirror_combobox.pack(side=tk.LEFT)
+        # HF 镜像 URL 输入框（与 GitHub 代理行为一致）
+        self.hf_mirror_entry = ttk.Entry(port_row, textvariable=self.hf_mirror_url, width=26)
+        self.hf_mirror_entry.pack(side=tk.LEFT, padx=(8, 0))
         self.hf_mirror_combobox.bind("<<ComboboxSelected>>", self.on_hf_mirror_selected)
+        # 初始化输入框状态
+        try:
+            self.on_hf_mirror_selected()
+        except Exception:
+            pass
 
         btn_row = tk.Frame(form, bg=self.CARD_BG)
         btn_row.grid(row=3, column=1, sticky="w", pady=(BUTTON_TOP_GAP, 0))
@@ -621,13 +876,19 @@ class ComfyUILauncherEnhanced:
     # ====== 版本与更新 ======
     def _build_version_section(self, container):
         c = self.COLORS
-        grid = tk.Frame(container, bg=self.CARD_BG)
-        grid.pack(fill=tk.X)
+        # —— 当前版本 ——
+        tk.Label(container, text="当前版本:", bg=self.CARD_BG, fg=c["TEXT"],
+                 font=self.INTERNAL_HEAD_LABEL_FONT).pack(anchor='w')
+        current_frame = tk.Frame(container, bg=self.CARD_BG)
+        current_frame.pack(fill=tk.X, pady=(6, 0))
         items = [("内核", self.comfyui_version),
                  ("前端", self.frontend_version),
                  ("模板库", self.template_version),
                  ("Python", self.python_version),
-                 ("Torch", self.torch_version)]
+                 ("Torch", self.torch_version),
+                 ("Git", self.git_status)]
+        grid = tk.Frame(current_frame, bg=self.CARD_BG)
+        grid.pack(fill=tk.X)
         for i, (lbl, var) in enumerate(items):
             col = tk.Frame(grid, bg=self.CARD_BG)
             col.grid(row=0, column=i, padx=8, sticky='w')
@@ -636,40 +897,222 @@ class ComfyUILauncherEnhanced:
                      font=self.BODY_FONT).pack(anchor='w')
             tk.Label(col, textvariable=var, bg=self.CARD_BG, fg=c["TEXT"],
                      font=("Consolas", 11)).pack(anchor='w', pady=(2, 0))
-        batch = tk.Frame(container, bg=self.CARD_BG)
-        batch.pack(fill=tk.X, pady=(12, 0))
-        tk.Label(batch, text="批量更新:", bg=self.CARD_BG, fg=c["TEXT"],
-                 font=self.INTERNAL_HEAD_LABEL_FONT).pack(side=tk.LEFT, padx=(0, 8))
-        self.core_btn = ttk.Button(batch, text="", style='Secondary.TButton', command=lambda: self._toggle_batch('core'))
-        self.front_btn = ttk.Button(batch, text="", style='Secondary.TButton', command=lambda: self._toggle_batch('front'))
-        self.tpl_btn = ttk.Button(batch, text="", style='Secondary.TButton', command=lambda: self._toggle_batch('tpl'))
-        for b in (self.core_btn, self.front_btn, self.tpl_btn):
-            b.pack(side=tk.LEFT, padx=5)
-        self.batch_update_btn = ttk.Button(batch, text="更新", style='Accent.TButton',
-                                           command=self.perform_batch_update)
-        self.batch_update_btn.pack(side=tk.RIGHT)
+
+        # —— 批量更新 ——
+        batch_card = tk.Frame(container, bg=self.CARD_BG)
+        batch_card.pack(fill=tk.X, pady=(16, 0))
+        tk.Label(batch_card, text="批量更新:", bg=self.CARD_BG, fg=c["TEXT"],
+                 font=self.INTERNAL_HEAD_LABEL_FONT).pack(anchor='w', padx=(0, 8))
+
+        # 表单与按钮并排：左侧为统一表单（复选与代理），右侧为更新按钮
+        proxy_area = tk.Frame(batch_card, bg=self.CARD_BG)
+        proxy_area.pack(fill=tk.X, pady=(8, 0))
+
+        # 左侧表单区（不超过内容区一半宽度）
+        form_frame = tk.Frame(proxy_area, bg=self.CARD_BG)
+        form_frame.pack(side=tk.LEFT, fill=tk.X, expand=True)
+        form_frame.grid_columnconfigure(0, weight=0)
+        form_frame.grid_columnconfigure(1, weight=0)
+        # 缩短输入框并避免过度拉伸：不让第2列随父容器扩展
+        form_frame.grid_columnconfigure(2, weight=0)
+
+        # 保持自然宽度布局：不强制限制为 50%，避免子控件被裁剪
+        # 如需限制最大宽度，可后续改为在父容器上使用网格两列分布来控制比例
+
+        # 第0行：更新项（复选框）
+        # 统一与启动控制中“快速模式”等勾选项的字号：去掉自定义字体，使用系统默认字体
+        tk.Label(form_frame, text="更新项:", bg=self.CARD_BG, fg=c["TEXT"]).grid(
+            row=0, column=0, sticky='w', padx=(0, 10), pady=(0, 6)
+        )
+        opts = tk.Frame(form_frame, bg=self.CARD_BG)
+        opts.grid(row=0, column=1, columnspan=2, sticky='w', pady=(0, 6))
+        self.core_chk = tk.Checkbutton(
+            opts, text="内核", variable=self.update_core_var,
+            bg=self.CARD_BG, fg=c["TEXT"],
+            activebackground=self.CARD_BG, activeforeground=c["TEXT"],
+            selectcolor=self.CARD_BG
+        )
+        self.front_chk = tk.Checkbutton(
+            opts, text="前端", variable=self.update_frontend_var,
+            bg=self.CARD_BG, fg=c["TEXT"],
+            activebackground=self.CARD_BG, activeforeground=c["TEXT"],
+            selectcolor=self.CARD_BG
+        )
+        self.tpl_chk = tk.Checkbutton(
+            opts, text="模板库", variable=self.update_template_var,
+            bg=self.CARD_BG, fg=c["TEXT"],
+            activebackground=self.CARD_BG, activeforeground=c["TEXT"],
+            selectcolor=self.CARD_BG
+        )
+        self.core_chk.pack(side=tk.LEFT, padx=(0, 10))
+        self.front_chk.pack(side=tk.LEFT, padx=(0, 10))
+        self.tpl_chk.pack(side=tk.LEFT)
+
+        # 第1行：GitHub 代理
+        # 与勾选项统一字号，使用系统默认字体
+        tk.Label(form_frame, text="GitHub代理:", bg=self.CARD_BG, fg=c["TEXT"]).grid(
+            row=1, column=0, sticky='w', padx=(0, 10), pady=(0, 6)
+        )
+        self.github_proxy_mode_combo = ttk.Combobox(
+            form_frame,
+            textvariable=self.version_manager.proxy_mode_ui_var,
+            values=["不使用", "gh-proxy", "自定义"],
+            state='readonly',
+            width=12
+        )
+        self.github_proxy_mode_combo.grid(row=1, column=1, sticky='w', padx=(0, 8), pady=(0, 6))
+        self.github_proxy_url_entry = ttk.Entry(
+            form_frame,
+            textvariable=self.version_manager.proxy_url_var,
+            width=24
+        )
+        # 不随列扩展，保持较短宽度
+        self.github_proxy_url_entry.grid(row=1, column=2, sticky='w', padx=(0, 8), pady=(0, 6))
+
+        def _set_github_entry_visibility():
+            try:
+                mode = self.version_manager.proxy_mode_var.get()
+                if mode == 'custom':
+                    if not self.github_proxy_url_entry.winfo_ismapped():
+                        self.github_proxy_url_entry.grid(row=1, column=2, sticky='w', padx=(0, 8), pady=(0, 6))
+                    self.github_proxy_url_entry.configure(state='normal')
+                else:
+                    self.github_proxy_url_entry.grid_remove()
+                    self.github_proxy_url_entry.configure(state='disabled')
+            except Exception:
+                pass
+
+        def _on_mode_change_local(_evt=None):
+            try:
+                vm = self.version_manager
+                vm.proxy_mode_var.set(vm._get_mode_internal(vm.proxy_mode_ui_var.get()))
+                if vm.proxy_mode_var.get() == 'gh-proxy':
+                    vm.proxy_url_var.set('https://ghproxy.com/')
+                _set_github_entry_visibility()
+                vm.save_proxy_settings()
+            except Exception:
+                pass
+
+        try:
+            self.github_proxy_mode_combo.bind('<<ComboboxSelected>>', _on_mode_change_local)
+            _set_github_entry_visibility()
+        except Exception:
+            pass
+
+        # 第2行：PyPI 代理
+        # 与勾选项统一字号，使用系统默认字体
+        tk.Label(form_frame, text="PyPI代理:", bg=self.CARD_BG, fg=c["TEXT"]).grid(
+            row=2, column=0, sticky='w', padx=(0, 10)
+        )
+        self.pypi_proxy_mode_combo = ttk.Combobox(
+            form_frame,
+            textvariable=self.pypi_proxy_mode_ui,
+            values=["不使用", "阿里云", "自定义"],
+            state='readonly',
+            width=12
+        )
+        self.pypi_proxy_mode_combo.grid(row=2, column=1, sticky='w', padx=(0, 8))
+        self.pypi_proxy_url_entry = ttk.Entry(
+            form_frame,
+            textvariable=self.pypi_proxy_url,
+            width=24
+        )
+        self.pypi_proxy_url_entry.grid(row=2, column=2, sticky='w', padx=(0, 8))
+
+        def _set_pypi_entry_visibility():
+            try:
+                mode = self.pypi_proxy_mode.get()
+                if mode == 'custom':
+                    if not self.pypi_proxy_url_entry.winfo_ismapped():
+                        self.pypi_proxy_url_entry.grid(row=2, column=2, sticky='w', padx=(0, 8))
+                    self.pypi_proxy_url_entry.configure(state='normal')
+                else:
+                    self.pypi_proxy_url_entry.grid_remove()
+                    self.pypi_proxy_url_entry.configure(state='disabled')
+            except Exception:
+                pass
+
+        def _pypi_mode_internal(ui_text: str) -> str:
+            if ui_text == "阿里云":
+                return "aliyun"
+            if ui_text == "自定义":
+                return "custom"
+            return "none"
+
+        def _on_pypi_mode_change(_evt=None):
+            try:
+                self.pypi_proxy_mode.set(_pypi_mode_internal(self.pypi_proxy_mode_ui.get()))
+                if self.pypi_proxy_mode.get() == 'aliyun':
+                    self.pypi_proxy_url.set('https://mirrors.aliyun.com/pypi/simple/')
+                _set_pypi_entry_visibility()
+                self.save_config()
+            except Exception:
+                pass
+
+        try:
+            self.pypi_proxy_mode_combo.bind('<<ComboboxSelected>>', _on_pypi_mode_change)
+            _set_pypi_entry_visibility()
+        except Exception:
+            pass
+
+        # 右侧小号“更新”按钮（仿照一键启动样式）
+        update_btn_container = tk.Frame(proxy_area, bg=self.CARD_BG)
+        update_btn_container.pack(side=tk.RIGHT, padx=(48, 0))
+        self.batch_update_btn = BigLaunchButton(update_btn_container, text="更新",
+                                                size=110, radius=20,
+                                                color="#2F6EF6", hover="#2760DB", active="#1F52BE",
+                                                command=self.perform_batch_update)
+        self.batch_update_btn.pack()
         self.frontend_update_btn = self.batch_update_btn
         self.template_update_btn = self.batch_update_btn
-        self._refresh_batch_labels()
+        self.batch_updating = False
 
     def _build_quick_links(self, container, path=None):
         c = self.COLORS
         if path:
-            tk.Label(container,
-                    text=f"路径: {Path(path).resolve()}",
-                    bg=c["BG"], fg=c["TEXT_MUTED"],
-                    font=self.BODY_FONT).pack(anchor='w', padx=(4, 0), pady=(0, 8))
+            self.path_label = tk.Label(
+                container,
+                text=f"路径: {Path(path).resolve()}",
+                bg=self.CARD_BG, fg=c["TEXT_MUTED"],
+                font=self.BODY_FONT
+            )
+            self.path_label.pack(anchor='w', padx=(4, 0), pady=(0, 6))
 
-        row = tk.Frame(container, bg=c["BG"])
-        row.pack(fill=tk.X)
+        # 容器：自然高度的自适应网格（不强制滚动，高度随内容扩展）
+        grid = tk.Frame(container, bg=self.CARD_BG)
+        grid.pack(fill=tk.X)
+        self.quick_grid_frame = grid
+
+        self.quick_buttons = []
         for txt, cmd in [
             ("根目录", self.open_root_dir),
             ("日志文件", self.open_logs_dir),
             ("输入目录", self.open_input_dir),
             ("输出目录", self.open_output_dir),
             ("插件目录", self.open_plugins_dir),
+            ("重设ComfyUI目录", self.reset_comfyui_path),
         ]:
-            ttk.Button(row, text=txt, style='Secondary.TButton', command=cmd).pack(side=tk.LEFT, padx=6)
+            btn_style = 'Accent.TButton' if '重新设置' in txt else 'Secondary.TButton'
+            btn = ttk.Button(grid, text=txt, style=btn_style, command=cmd)
+            self.quick_buttons.append(btn)
+
+        def _relayout(_evt=None):
+            # 计算列数并网格布局（自动换行）
+            try:
+                width = max(0, grid.winfo_width())
+            except Exception:
+                width = 800
+            min_btn = 120  # 单按钮最小占位宽度（含左右间距）
+            cols = max(3, min(6, max(1, width // min_btn)))
+            for i, btn in enumerate(self.quick_buttons):
+                r, cidx = divmod(i, cols)
+                # 进一步压缩垂直间距，并使按钮在单元格内充分扩展
+                btn.grid(row=r, column=cidx, padx=6, pady=(4, 6), sticky='nsew')
+            for ci in range(cols):
+                grid.grid_columnconfigure(ci, weight=1, uniform='quick')
+
+        grid.bind('<Configure>', _relayout)
+        self.root.after(0, _relayout)
 
     # ---------- Version / About ----------
     def build_version_tab(self, parent):
@@ -740,6 +1183,10 @@ class ComfyUILauncherEnhanced:
 
     # ---------- 启动逻辑 ----------
     def toggle_comfyui(self):
+        try:
+            self.logger.info("点击一键启动/停止")
+        except Exception:
+            pass
         if getattr(self, "comfyui_process", None) and self.comfyui_process.poll() is None:
             self.stop_comfyui()
         else:
@@ -767,12 +1214,21 @@ class ComfyUILauncherEnhanced:
                 cmd.extend(["--port", port])
             if self.enable_cors.get():
                 cmd.extend(["--enable-cors-header", "*"])
+            try:
+                self.logger.info("启动命令: %s", " ".join(cmd))
+            except Exception:
+                pass
             env = os.environ.copy()
             sel = self.selected_hf_mirror.get()
             if sel != "不使用镜像":
-                endpoint = self.hf_mirror_options.get(sel, "")
+                # 使用输入框的 URL；当选择“hf-mirror”时已自动填充默认值
+                endpoint = (self.hf_mirror_url.get() or "").strip()
                 if endpoint:
                     env["HF_ENDPOINT"] = endpoint
+            try:
+                self.logger.info("环境变量(HF_ENDPOINT): %s", env.get("HF_ENDPOINT", ""))
+            except Exception:
+                pass
             self.big_btn.set_state("starting")
             self.big_btn.set_text("启动中…")
 
@@ -795,15 +1251,27 @@ class ComfyUILauncherEnhanced:
             self.on_start_failed(str(e))
 
     def on_start_success(self):
+        try:
+            self.logger.info("ComfyUI 启动成功")
+        except Exception:
+            pass
         self.big_btn.set_state("running")
         self.big_btn.set_text("停止")
 
     def on_start_failed(self, error):
+        try:
+            self.logger.error("ComfyUI 启动失败: %s", error)
+        except Exception:
+            pass
         self.big_btn.set_state("idle")
         self.big_btn.set_text("一键启动")
         self.comfyui_process = None
 
     def stop_comfyui(self):
+        try:
+            self.logger.info("尝试停止 ComfyUI 进程")
+        except Exception:
+            pass
         if getattr(self, "comfyui_process", None) and self.comfyui_process.poll() is None:
             try:
                 self.comfyui_process.terminate()
@@ -825,12 +1293,20 @@ class ComfyUILauncherEnhanced:
                 break
 
     def on_process_ended(self):
+        try:
+            self.logger.info("ComfyUI 进程结束")
+        except Exception:
+            pass
         self.comfyui_process = None
         self.big_btn.set_state("idle")
         self.big_btn.set_text("一键启动")
 
     # ---------- 目录 ----------
     def _open_dir(self, path: Path):
+        try:
+            self.logger.info("打开目录: %s", str(path))
+        except Exception:
+            pass
         path.mkdir(parents=True, exist_ok=True)
         if path.exists():
             os.startfile(str(path))
@@ -839,6 +1315,10 @@ class ComfyUILauncherEnhanced:
 
     # ---------- 文件 ----------
     def _open_file(self, path: Path):
+        try:
+            self.logger.info("打开文件: %s", str(path))
+        except Exception:
+            pass
         if path.exists():
             os.startfile(str(path))
         else:
@@ -851,7 +1331,12 @@ class ComfyUILauncherEnhanced:
     def open_plugins_dir(self): self._open_dir(Path(self.config["paths"]["comfyui_path"]).resolve() / "custom_nodes")
 
     def open_comfyui_web(self):
-        webbrowser.open(f"http://127.0.0.1:{self.custom_port.get() or '8188'}")
+        url = f"http://127.0.0.1:{self.custom_port.get() or '8188'}"
+        try:
+            self.logger.info("打开网页: %s", url)
+        except Exception:
+            pass
+        webbrowser.open(url)
 
     def reset_settings(self):
         if messagebox.askyesno("确认", "确定恢复默认设置?"):
@@ -862,10 +1347,71 @@ class ComfyUILauncherEnhanced:
             self.listen_all.set(True)
             self.selected_hf_mirror.set("hf-mirror")
             self.save_config()
+            try:
+                self.logger.info("已恢复默认设置")
+            except Exception:
+                pass
             messagebox.showinfo("完成", "已恢复默认设置")
+
+    def reset_comfyui_path(self):
+        # 选择新的 ComfyUI 根目录
+        selected = filedialog.askdirectory(title="请选择 ComfyUI 根目录")
+        if not selected:
+            return
+        new_path = Path(selected).resolve()
+        try:
+            self.logger.info("设置 ComfyUI 路径: %s", str(new_path))
+        except Exception:
+            pass
+        # 校验：存在且包含 main.py 或 .git
+        if not (new_path.exists() and ((new_path / "main.py").exists() or (new_path / ".git").exists())):
+            messagebox.showerror("错误", "所选目录似乎不是 ComfyUI 根目录（缺少 main.py 或 .git）")
+            return
+
+        # 更新配置并保存
+        self.config["paths"]["comfyui_path"] = str(new_path)
+        try:
+            self.save_config()
+        except Exception:
+            pass
+
+        # 更新路径标签
+        try:
+            if hasattr(self, 'path_label') and self.path_label.winfo_exists():
+                self.path_label.config(text=f"路径: {new_path}")
+        except Exception:
+            pass
+
+        # 更新 VersionManager 的路径并刷新信息（若已创建）
+        try:
+            if hasattr(self, 'version_manager') and self.version_manager:
+                self.version_manager.comfyui_path = new_path
+                # 如果版本页已嵌入或窗口打开，尝试刷新
+                try:
+                    self.version_manager.refresh_git_info()
+                except Exception:
+                    pass
+        except Exception:
+            pass
+
+        # 重新获取版本信息，更新“版本与更新”区域状态
+        try:
+            try:
+                self.logger.info("刷新版本信息（因路径更新）")
+            except Exception:
+                pass
+            self.get_version_info()
+        except Exception:
+            pass
+
+        messagebox.showinfo("完成", "ComfyUI 目录已更新")
 
     # ---------- 版本 ----------
     def get_version_info(self):
+        try:
+            self.logger.info("开始获取版本信息")
+        except Exception:
+            pass
         if getattr(self, '_version_info_loading', False):
             return
         self._version_info_loading = True
@@ -876,87 +1422,179 @@ class ComfyUILauncherEnhanced:
         def worker():
             try:
                 root = Path(self.config["paths"]["comfyui_path"]).resolve()
-                if root.exists():
+                # 解析 Git 路径与来源（不直接更新 UI）
+                git_cmd, git_source_text = self.resolve_git()
+                # 目录存在性与仓库状态
+                repo_state = ""
+                if git_cmd is None:
+                    repo_state = "未找到Git命令"
+                elif not root.exists():
+                    repo_state = "ComfyUI未找到"
+                else:
                     try:
-                        r = run_hidden(["git", "describe", "--tags", "--abbrev=0"],
+                        r_repo = run_hidden([git_cmd, "rev-parse", "--is-inside-work-tree"],
+                                            cwd=str(root), capture_output=True, text=True, timeout=5)
+                        repo_state = "Git正常" if (r_repo.returncode == 0 and r_repo.stdout.strip() == "true") else "非Git仓库"
+                    except Exception:
+                        repo_state = "非Git仓库"
+
+                # Git 文案：优先来源文本；遇到异常则显示具体错误
+                git_text_to_show = repo_state if repo_state in ("未找到Git命令", "非Git仓库", "ComfyUI未找到") else git_source_text
+                self.root.after(0, lambda: self.git_status.set(git_text_to_show))
+
+                # 更新按钮可用性
+                def _update_git_controls():
+                    status = self.git_status.get()
+                    disable = status in ("未安装Git", "非Git仓库", "ComfyUI未找到", "未找到Git命令")
+                    try:
+                        # 新的复选框控件
+                        if hasattr(self, 'core_chk'):
+                            self.core_chk.config(state='disabled' if disable else 'normal')
+                        if hasattr(self, 'front_chk'):
+                            self.front_chk.config(state='disabled' if disable else 'normal')
+                        if hasattr(self, 'tpl_chk'):
+                            self.tpl_chk.config(state='disabled' if disable else 'normal')
+                        if hasattr(self, 'batch_update_btn'):
+                            self.batch_update_btn.config(state='disabled' if disable else 'normal')
+                    except:
+                        pass
+                self.root.after(0, _update_git_controls)
+
+                if root.exists() and self.git_path:
+                    try:
+                        r = run_hidden([self.git_path, "describe", "--tags", "--abbrev=0"],
                                            cwd=str(root), capture_output=True, text=True, timeout=10)
                         if r.returncode == 0:
                             tag = r.stdout.strip()
-                            r2 = run_hidden(["git", "rev-parse", "--short", "HEAD"],
+                            r2 = run_hidden([self.git_path, "rev-parse", "--short", "HEAD"],
                                                 cwd=str(root), capture_output=True, text=True, timeout=10)
                             commit = r2.stdout.strip() if r2.returncode == 0 else ""
-                            self.comfyui_version.set(f"{tag} ({commit})")
+                            self.root.after(0, lambda t=tag, c=commit: self.comfyui_version.set(f"{t} ({c})"))
                         else:
-                            self.comfyui_version.set("未找到")
+                            self.root.after(0, lambda: self.comfyui_version.set("未找到"))
                     except:
-                        self.comfyui_version.set("未找到")
+                        self.root.after(0, lambda: self.comfyui_version.set("未找到"))
                 else:
-                    self.comfyui_version.set("ComfyUI未找到")
+                    self.root.after(0, lambda: self.comfyui_version.set("ComfyUI未找到"))
 
                 try:
-                    r = run_hidden([self.config["paths"]["python_path"], "--version"],
+                    r = run_hidden([self.python_exec, "--version"],
                                        capture_output=True, text=True, timeout=10)
                     if r.returncode == 0:
-                        self.python_version.set(r.stdout.strip().replace("Python ", ""))
+                        self.root.after(0, lambda v=r.stdout.strip().replace("Python ", ""): self.python_version.set(v))
                     else:
-                        self.python_version.set("无法获取")
+                        self.root.after(0, lambda: self.python_version.set("无法获取"))
                 except:
-                    self.python_version.set("获取失败")
+                    self.root.after(0, lambda: self.python_version.set("获取失败"))
 
                 try:
-                    r = run_hidden([self.config["paths"]["python_path"], "-c", "import torch;print(torch.__version__)"],
+                    r = run_hidden([self.python_exec, "-c", "import torch;print(torch.__version__)"],
                                        capture_output=True, text=True, timeout=15)
                     if r.returncode == 0:
-                        self.torch_version.set(r.stdout.strip())
+                        self.root.after(0, lambda v=r.stdout.strip(): self.torch_version.set(v))
                     else:
-                        self.torch_version.set("未安装")
+                        self.root.after(0, lambda: self.torch_version.set("未安装"))
                 except:
-                    self.torch_version.set("获取失败")
+                    self.root.after(0, lambda: self.torch_version.set("获取失败"))
 
                 try:
-                    r = run_hidden([self.config["paths"]["python_path"], "-m", "pip", "show", "comfyui-frontend-package"],
+                    # 优先使用 python -m pip
+                    r = run_hidden([self.python_exec, "-m", "pip", "show", "comfyui-frontend-package"],
                                        capture_output=True, text=True, timeout=10)
                     if r.returncode == 0:
                         for line in r.stdout.splitlines():
                             if line.startswith("Version:"):
-                                self.frontend_version.set("v" + line.split(":")[1].strip())
+                                ver = "v" + line.split(":")[1].strip()
+                                self.root.after(0, lambda v=ver: self.frontend_version.set(v))
                                 break
                         else:
-                            self.frontend_version.set("未安装")
+                            self.root.after(0, lambda: self.frontend_version.set("未安装"))
                     else:
-                        self.frontend_version.set("未安装")
+                        # 备用：直接调用 Scripts\pip.exe
+                        try:
+                            pip_exe = Path(self.python_exec).resolve().parent.parent / "Scripts" / "pip.exe"
+                            if pip_exe.exists():
+                                r2 = run_hidden([str(pip_exe), "show", "comfyui-frontend-package"],
+                                                capture_output=True, text=True, timeout=10)
+                                if r2.returncode == 0:
+                                    for line in r2.stdout.splitlines():
+                                        if line.startswith("Version:"):
+                                            ver = "v" + line.split(":")[1].strip()
+                                            self.root.after(0, lambda v=ver: self.frontend_version.set(v))
+                                            break
+                                    else:
+                                        self.root.after(0, lambda: self.frontend_version.set("未安装"))
+                                else:
+                                    self.root.after(0, lambda: self.frontend_version.set("未安装"))
+                            else:
+                                self.root.after(0, lambda: self.frontend_version.set("未安装"))
+                        except:
+                            self.root.after(0, lambda: self.frontend_version.set("未安装"))
                 except:
-                    self.frontend_version.set("获取失败")
+                    self.root.after(0, lambda: self.frontend_version.set("获取失败"))
 
                 try:
-                    r = run_hidden([self.config["paths"]["python_path"], "-m", "pip", "show", "comfyui-workflow-templates"],
+                    r = run_hidden([self.python_exec, "-m", "pip", "show", "comfyui-workflow-templates"],
                                        capture_output=True, text=True, timeout=10)
                     if r.returncode == 0:
                         for line in r.stdout.splitlines():
                             if line.startswith("Version:"):
-                                self.template_version.set("v" + line.split(":")[1].strip())
+                                ver = "v" + line.split(":")[1].strip()
+                                self.root.after(0, lambda v=ver: self.template_version.set(v))
                                 break
                         else:
-                            self.template_version.set("未安装")
+                            self.root.after(0, lambda: self.template_version.set("未安装"))
                     else:
-                        self.template_version.set("未安装")
+                        # 备用：直接调用 Scripts\pip.exe
+                        try:
+                            pip_exe = Path(self.python_exec).resolve().parent.parent / "Scripts" / "pip.exe"
+                            if pip_exe.exists():
+                                r2 = run_hidden([str(pip_exe), "show", "comfyui-workflow-templates"],
+                                                capture_output=True, text=True, timeout=10)
+                                if r2.returncode == 0:
+                                    for line in r2.stdout.splitlines():
+                                        if line.startswith("Version:"):
+                                            ver = "v" + line.split(":")[1].strip()
+                                            self.root.after(0, lambda v=ver: self.template_version.set(v))
+                                            break
+                                    else:
+                                        self.root.after(0, lambda: self.template_version.set("未安装"))
+                                else:
+                                    self.root.after(0, lambda: self.template_version.set("未安装"))
+                            else:
+                                self.root.after(0, lambda: self.template_version.set("未安装"))
+                        except:
+                            self.root.after(0, lambda: self.template_version.set("未安装"))
                 except:
-                    self.template_version.set("获取失败")
+                    self.root.after(0, lambda: self.template_version.set("获取失败"))
             finally:
                 self._version_info_loading = False
 
         threading.Thread(target=worker, daemon=True).start()
 
     def perform_batch_update(self):
+        # 已在更新中则忽略重复点击
+        if getattr(self, 'batch_updating', False):
+            return
+        self.batch_updating = True
         if hasattr(self, 'batch_update_btn'):
-            self.batch_update_btn.config(text="更新中...", state="disabled")
+            # 更新按钮视觉为忙碌状态（BigLaunchButton 优先）
+            try:
+                if isinstance(self.batch_update_btn, BigLaunchButton):
+                    self.batch_update_btn.set_text("更新中…")
+                    self.batch_update_btn.set_state('starting')
+                else:
+                    self.batch_update_btn.config(text="更新中...", cursor='watch')
+            except Exception:
+                pass
 
         def worker():
             try:
                 if self.update_core_var.get():
                     try:
                         root = Path(self.config["paths"]["comfyui_path"]).resolve()
-                        run_hidden(["git", "pull"], cwd=str(root),
+                        if getattr(self, 'git_path', None):
+                            run_hidden([self.git_path, "pull"], cwd=str(root),
                                        capture_output=True, text=True)
                     except:
                         pass
@@ -975,23 +1613,137 @@ class ComfyUILauncherEnhanced:
                 except:
                     pass
             finally:
-                self.root.after(0, lambda: self.batch_update_btn.config(text="更新", state="normal"))
+                def _reset_btn():
+                    self.batch_updating = False
+                    if hasattr(self, 'batch_update_btn'):
+                        try:
+                            if isinstance(self.batch_update_btn, BigLaunchButton):
+                                self.batch_update_btn.set_text("更新")
+                                self.batch_update_btn.set_state('idle')
+                            else:
+                                self.batch_update_btn.config(text="更新", cursor='')
+                        except Exception:
+                            pass
+                self.root.after(0, _reset_btn)
 
         threading.Thread(target=worker, daemon=True).start()
 
     def update_frontend(self):
-        pass
+        # 使用 PyPI 代理更新前端包 comfyui-frontend-package
+        try:
+            idx = None
+            mode = self.pypi_proxy_mode.get()
+            if mode == 'aliyun':
+                idx = 'https://mirrors.aliyun.com/pypi/simple/'
+            elif mode == 'custom':
+                u = (self.pypi_proxy_url.get() or '').strip()
+                if u:
+                    idx = u
+            # 优先使用嵌入的 pip
+            pip_exe = Path(self.python_exec).resolve().parent.parent / "Scripts" / "pip.exe"
+            cmd = [str(pip_exe if pip_exe.exists() else self.python_exec), "-m", "pip", "install", "-U", "comfyui-frontend-package"]
+            if idx:
+                cmd.extend(["-i", idx])
+            run_hidden(cmd, capture_output=True, text=True)
+        except Exception:
+            pass
 
     def update_template_library(self):
-        pass
+        # 使用 PyPI 代理更新模板库 comfyui-workflow-templates
+        try:
+            idx = None
+            mode = self.pypi_proxy_mode.get()
+            if mode == 'aliyun':
+                idx = 'https://mirrors.aliyun.com/pypi/simple/'
+            elif mode == 'custom':
+                u = (self.pypi_proxy_url.get() or '').strip()
+                if u:
+                    idx = u
+            pip_exe = Path(self.python_exec).resolve().parent.parent / "Scripts" / "pip.exe"
+            cmd = [str(pip_exe if pip_exe.exists() else self.python_exec), "-m", "pip", "install", "-U", "comfyui-workflow-templates"]
+            if idx:
+                cmd.extend(["-i", idx])
+            run_hidden(cmd, capture_output=True, text=True)
+        except Exception:
+            pass
+
+    # ---------- Git 解析 ----------
+    def resolve_git(self):
+        """解析应使用的 Git 可执行文件（线程安全：不直接更新 Tk 变量）。
+        返回 (git_cmd_or_none, 来源文本)：来源文本为“使用系统Git”“使用整合包Git”或“未找到Git命令”。
+        """
+        # 1) 尝试系统 Git
+        try:
+            r_sys = run_hidden(["git", "--version"], capture_output=True, text=True, timeout=5)
+            if r_sys.returncode == 0:
+                self.git_path = "git"
+                return self.git_path, "使用系统Git"
+        except Exception:
+            pass
+
+        # 2) 尝试整合包 Git：tools/git.exe
+        candidates = []
+        try:
+            candidates.append(Path(sys.executable).resolve().parent / "tools" / "git.exe")
+        except Exception:
+            pass
+        try:
+            candidates.append(Path(__file__).resolve().parent / "tools" / "git.exe")
+        except Exception:
+            pass
+        candidates.append(Path.cwd() / "tools" / "git.exe")
+
+        for c in candidates:
+            try:
+                if c.exists():
+                    r_pkg = run_hidden([str(c), "--version"], capture_output=True, text=True, timeout=5)
+                    if r_pkg.returncode == 0:
+                        self.git_path = str(c)
+                        return self.git_path, "使用整合包Git"
+            except Exception:
+                pass
+
+        # 3) 未找到
+        self.git_path = None
+        return None, "未找到Git命令"
 
     # ---------- 运行 ----------
     def run(self):
+        # 如果启动阶段已经判定为致命错误，则直接安全退出
+        if getattr(self, "_fatal_startup_error", False):
+            try:
+                self.root.destroy()
+            except Exception:
+                pass
+            return
+        # 正常路径：加载版本信息并进入消息循环
         self.get_version_info()
         self.root.mainloop()
 
     def on_hf_mirror_selected(self, _=None):
-        pass
+        try:
+            sel = self.selected_hf_mirror.get()
+            # 自定义时显示并可编辑；其他模式隐藏并禁用
+            if sel == "自定义":
+                try:
+                    # 若未显示，则重新显示
+                    if not self.hf_mirror_entry.winfo_ismapped():
+                        self.hf_mirror_entry.pack(side=tk.LEFT, padx=(8, 0))
+                except Exception:
+                    pass
+                self.hf_mirror_entry.configure(state='normal')
+            else:
+                if sel == "hf-mirror":
+                    # 选择预设镜像时填充默认 URL
+                    self.hf_mirror_url.set("https://hf-mirror.com")
+                self.hf_mirror_entry.configure(state='disabled')
+                try:
+                    self.hf_mirror_entry.pack_forget()
+                except Exception:
+                    pass
+            self.save_config()
+        except Exception:
+            pass
 
     def on_closing(self):
         if getattr(self, "comfyui_process", None) and self.comfyui_process.poll() is None:
@@ -1011,3 +1763,5 @@ if __name__ == "__main__":
         app.run()
     finally:
         lock.release()
+
+    # 注意：resolve_git 已移动到 ComfyUILauncherEnhanced 类中

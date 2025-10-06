@@ -55,6 +55,8 @@ def build_exe():
         '--windowed',  # 改回窗口模式
         '--add-data=version_manager.py;.',
         '--add-data=about_me.png;.',
+        '--add-data=rabbit.ico;.',
+        '--add-data=rabbit.png;.',
         '--hidden-import=threading',
         '--hidden-import=json',
         '--hidden-import=pathlib',
@@ -75,7 +77,7 @@ def build_exe():
     ]
     
     # 检查图标文件是否存在
-    icon_path = os.path.join(current_dir, 'icon.ico')
+    icon_path = os.path.join(current_dir, 'rabbit.ico')
     if os.path.exists(icon_path):
         args.insert(-1, f'--icon={icon_path}')
     
