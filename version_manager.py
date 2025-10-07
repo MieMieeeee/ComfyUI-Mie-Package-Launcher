@@ -57,7 +57,9 @@ class VersionManager:
 
         self._vm_styles_applied = False
         self.style = getattr(parent, "style", ttk.Style())
-        self.COLORS = getattr(parent, "COLORS", {
+        # 先取父对象的颜色表，若不存在则使用默认
+        parent_colors = getattr(parent, "COLORS", None)
+        base_colors = {
             "bg": "#F6F7F9",
             "card": "#FFFFFF",
             "subtle": "#F1F3F5",
@@ -70,7 +72,28 @@ class VersionManager:
             "border_alt": "#C9CFD6",
             "badge_bg": "#E7F0FF",
             "danger": "#D92D41"
-        })
+        }
+        # 归一化父对象颜色键（父对象使用大写键名）
+        if isinstance(parent_colors, dict):
+            try:
+                self.COLORS = {
+                    "bg": parent_colors.get("BG", base_colors["bg"]),
+                    "card": getattr(parent, "CARD_BG", None) or parent_colors.get("CARD", parent_colors.get("BG", base_colors["card"])),
+                    "subtle": parent_colors.get("SUBTLE", base_colors["subtle"]),
+                    "accent": parent_colors.get("ACCENT", base_colors["accent"]),
+                    "accent_hover": parent_colors.get("ACCENT_HOVER", base_colors["accent_hover"]),
+                    "accent_active": parent_colors.get("ACCENT_ACTIVE", base_colors["accent_active"]),
+                    "text": parent_colors.get("TEXT", base_colors["text"]),
+                    "text_muted": parent_colors.get("TEXT_MUTED", base_colors["text_muted"]),
+                    "border": parent_colors.get("BORDER", base_colors["border"]),
+                    "border_alt": parent_colors.get("BORDER_ALT", base_colors["border_alt"]),
+                    "badge_bg": parent_colors.get("BADGE_BG", base_colors["badge_bg"]),
+                    "danger": parent_colors.get("DANGER", base_colors["danger"]),
+                }
+            except Exception:
+                self.COLORS = base_colors
+        else:
+            self.COLORS = base_colors
 
         # 确保日志器已安装并写入文件，避免日志为空
         try:
@@ -145,7 +168,9 @@ class VersionManager:
                 pass
         self.apply_vm_styles()
         self.embedded = False
-        self.window = tk.Toplevel(self.parent)
+        # 父对象可能为启动器实例，优先使用其 root 作为顶层窗口父级
+        _top_master = getattr(self.parent, "root", self.parent)
+        self.window = tk.Toplevel(_top_master)
         self.window.title("内核版本管理")
         self.window.geometry("880x600")
         try:
@@ -268,7 +293,9 @@ class VersionManager:
 
         self.commit_tree.bind('<Double-1>', self.on_commit_double_click)
 
-        self.context_menu = tk.Menu(self.parent, tearoff=0)
+        # 兼容父对象为启动器实例的情况，优先使用其 root 作为菜单父级
+        _menu_master = getattr(self.parent, "root", self.parent)
+        self.context_menu = tk.Menu(_menu_master, tearoff=0)
         self.context_menu.add_command(label="切换到此提交", command=self.checkout_selected_commit)
         self.context_menu.add_command(label="查看提交详情", command=self.show_commit_details)
         self.commit_tree.bind('<Button-3>', self.show_context_menu)
@@ -280,8 +307,35 @@ class VersionManager:
     # ---------- Git 基础 ----------
     def run_git_command(self, args, capture_output=True):
         try:
+            # 优先使用启动器解析到的 Git 路径；若尚未解析则尝试解析
+            logger = logging.getLogger("comfyui_launcher")
+            git_cmd = None
+            try:
+                git_cmd = getattr(self.parent, 'git_path', None)
+            except Exception:
+                git_cmd = None
+            if not git_cmd:
+                try:
+                    if hasattr(self.parent, 'resolve_git'):
+                        cmd, src = self.parent.resolve_git()
+                        git_cmd = cmd or 'git'
+                        try:
+                            logger.info(f"VersionManager Git解析: {src}, path={git_cmd}")
+                        except Exception:
+                            pass
+                    else:
+                        git_cmd = 'git'
+                except Exception:
+                    git_cmd = 'git'
+            else:
+                try:
+                    src_text = '使用整合包Git' if git_cmd != 'git' else '使用系统Git'
+                    logger.info(f"VersionManager Git来源: {src_text}, path={git_cmd}")
+                except Exception:
+                    pass
+
             return run_hidden(
-                ['git'] + args,
+                [git_cmd] + args,
                 cwd=self.comfyui_path,
                 capture_output=capture_output,
                 text=True,

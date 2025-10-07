@@ -331,8 +331,10 @@ class ComfyUILauncherEnhanced:
 
         self.load_settings()
 
+        # 将父对象传入自身实例而非 Tk root，以便 VersionManager
+        # 能访问启动器的 resolve_git() 与 git_path 等方法/属性
         self.version_manager = VersionManager(
-            self.root,
+            self,
             self.config["paths"]["comfyui_path"],
             self.config["paths"]["python_path"]
         )
@@ -714,7 +716,19 @@ class ComfyUILauncherEnhanced:
             btn.configure(style='NavSelected.TButton' if k == name else 'Nav.TButton')
         self.current_tab_name = name
         if name == 'version' and not getattr(self, '_vm_embedded', False):
-            self.version_manager.attach_to_container(self.version_container)
+            try:
+                self.version_manager.attach_to_container(self.version_container)
+            except Exception as e:
+                # 将异常记录到启动器日志，便于诊断
+                try:
+                    self.logger.exception(f"切换到内核版本管理出错: {e}")
+                except Exception:
+                    pass
+                # 同时弹出错误提示，避免静默失败
+                try:
+                    messagebox.showerror("错误", f"切换到内核版本管理失败: {e}")
+                except Exception:
+                    pass
             self._vm_embedded = True
 
     # ---------- Launch Tab ----------
@@ -1716,41 +1730,59 @@ class ComfyUILauncherEnhanced:
     # ---------- Git 解析 ----------
     def resolve_git(self):
         """解析应使用的 Git 可执行文件（线程安全：不直接更新 Tk 变量）。
-        返回 (git_cmd_or_none, 来源文本)：来源文本为“使用系统Git”“使用整合包Git”或“未找到Git命令”。
+        返回 (git_cmd_or_none, 来源文本)：来源文本为“使用整合包Git”“使用系统Git”或“未找到Git命令”。
         """
-        # 1) 尝试系统 Git
+        # 1) 优先尝试便携 Git：tools/PortableGit/bin/git.exe（相对于启动器目录）
+        pg_candidates = []
         try:
-            r_sys = run_hidden(["git", "--version"], capture_output=True, text=True, timeout=5)
-            if r_sys.returncode == 0:
-                self.git_path = "git"
-                return self.git_path, "使用系统Git"
+            pg_candidates.append(Path(sys.executable).resolve().parent / "tools" / "PortableGit" / "bin" / "git.exe")
         except Exception:
             pass
+        try:
+            # 优先查找启动器同级目录（launcher 的上一级）下的 tools/PortableGit/bin/git.exe
+            pg_candidates.append(Path(__file__).resolve().parent.parent / "tools" / "PortableGit" / "bin" / "git.exe")
+        except Exception:
+            pass
+        try:
+            # 其次查找当前脚本所在目录下的 tools/PortableGit/bin/git.exe（兼容某些打包结构）
+            pg_candidates.append(Path(__file__).resolve().parent / "tools" / "PortableGit" / "bin" / "git.exe")
+        except Exception:
+            pass
+        pg_candidates.append(Path.cwd() / "tools" / "PortableGit" / "bin" / "git.exe")
 
-        # 2) 尝试整合包 Git：tools/git.exe
-        candidates = []
-        try:
-            candidates.append(Path(sys.executable).resolve().parent / "tools" / "git.exe")
-        except Exception:
-            pass
-        try:
-            candidates.append(Path(__file__).resolve().parent / "tools" / "git.exe")
-        except Exception:
-            pass
-        candidates.append(Path.cwd() / "tools" / "git.exe")
-
-        for c in candidates:
+        for c in pg_candidates:
             try:
                 if c.exists():
                     r_pkg = run_hidden([str(c), "--version"], capture_output=True, text=True, timeout=5)
                     if r_pkg.returncode == 0:
                         self.git_path = str(c)
+                        try:
+                            self.logger.info(f"Git解析: 使用整合包Git path={self.git_path}")
+                        except Exception:
+                            pass
                         return self.git_path, "使用整合包Git"
             except Exception:
                 pass
 
+        # 2) 回退到系统 Git
+        try:
+            r_sys = run_hidden(["git", "--version"], capture_output=True, text=True, timeout=5)
+            if r_sys.returncode == 0:
+                self.git_path = "git"
+                try:
+                    self.logger.info("Git解析: 使用系统Git path=git")
+                except Exception:
+                    pass
+                return self.git_path, "使用系统Git"
+        except Exception:
+            pass
+
         # 3) 未找到
         self.git_path = None
+        try:
+            self.logger.warning("Git解析: 未找到Git命令")
+        except Exception:
+            pass
         return None, "未找到Git命令"
 
     # ---------- 运行 ----------
