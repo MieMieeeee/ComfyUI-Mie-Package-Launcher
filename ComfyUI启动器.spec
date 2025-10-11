@@ -35,5 +35,5 @@ exe = EXE(
     target_arch=None,
     codesign_identity=None,
     entitlements_file=None,
-    icon=['F:\\ComfyUI_Mie_V7.0\\launcher\\rabbit.ico'],
+    icon=['F:\\ComfyUI_Mie_V7.0_O\\launcher\\rabbit.ico'],
 )

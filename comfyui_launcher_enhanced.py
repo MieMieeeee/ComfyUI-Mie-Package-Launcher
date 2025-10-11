@@ -9,6 +9,7 @@ from PIL import Image, ImageTk
 from version_manager import VersionManager
 from utils import run_hidden, have_git, is_git_repo
 from logger_setup import install_logging
+import locale
 
 # ================== 单实例锁 ==================
 try:
@@ -1589,7 +1590,16 @@ class ComfyUILauncherEnhanced:
             self.logger.info("点击一键启动/停止")
         except Exception:
             pass
-        if getattr(self, "comfyui_process", None) and self.comfyui_process.poll() is None:
+        # 判断是否已有运行中的 ComfyUI（包括外部启动的同端口实例）
+        running = False
+        try:
+            if getattr(self, "comfyui_process", None) and self.comfyui_process.poll() is None:
+                running = True
+            else:
+                running = self._is_http_reachable()
+        except Exception:
+            running = False
+        if running:
             self.stop_comfyui()
         else:
             self.start_comfyui()
@@ -1661,9 +1671,16 @@ class ComfyUILauncherEnhanced:
 
             def worker():
                 try:
-                    self.comfyui_process = subprocess.Popen(
-                        cmd, env=env, cwd=os.getcwd(),
-                        creationflags=subprocess.CREATE_NEW_CONSOLE if os.name == 'nt' else 0)
+                    if os.name == 'nt':
+                        # 始终显示控制台窗口
+                        self.comfyui_process = subprocess.Popen(
+                            cmd, env=env, cwd=os.getcwd(),
+                            creationflags=subprocess.CREATE_NEW_CONSOLE,
+                        )
+                    else:
+                        self.comfyui_process = subprocess.Popen(
+                            cmd, env=env, cwd=os.getcwd()
+                        )
                     threading.Event().wait(2)
                     if self.comfyui_process.poll() is None:
                         self.root.after(0, self.on_start_success)
@@ -1791,7 +1808,15 @@ class ComfyUILauncherEnhanced:
             import subprocess
             import re
             cmd = ["netstat", "-ano"]
-            r = subprocess.run(cmd, capture_output=True, text=True, encoding='utf-8', creationflags=subprocess.CREATE_NO_WINDOW if os.name == 'nt' else 0)
+            # 使用系统首选编码并忽略解码错误，且隐藏子进程窗口
+            preferred_enc = locale.getpreferredencoding(False) or "utf-8"
+            r = run_hidden(
+                cmd,
+                capture_output=True,
+                text=True,
+                encoding=preferred_enc,
+                errors="ignore",
+            )
             if r.returncode == 0 and r.stdout:
                 pids = set()
                 pattern = re.compile(rf"^\s*TCP\s+[^:]+:{port}\s+.*?\s+(\d+)\s*$", re.IGNORECASE)
@@ -1850,9 +1875,10 @@ class ComfyUILauncherEnhanced:
             try:
                 import subprocess
                 comfy_root = str(Path(self.config["paths"]["comfyui_path"]).resolve()).lower()
-                r = subprocess.run([
+                preferred_enc = locale.getpreferredencoding(False) or "utf-8"
+                r = run_hidden([
                     "wmic", "process", "where", f"ProcessId={pid}", "get", "CommandLine", "/format:list"
-                ], capture_output=True, text=True)
+                ], capture_output=True, text=True, encoding=preferred_enc, errors="ignore")
                 if r.returncode == 0 and r.stdout:
                     out = r.stdout.lower()
                     if ("comfyui" in out) or ("main.py" in out) or (comfy_root and comfy_root in out):
@@ -1884,7 +1910,7 @@ class ComfyUILauncherEnhanced:
         if os.name == 'nt':
             try:
                 for pid in pids:
-                    subprocess.run(["taskkill", "/PID", str(pid), "/T", "/F"], capture_output=True, text=True)
+                    run_hidden(["taskkill", "/PID", str(pid), "/T", "/F"], capture_output=True, text=True)
                 killed_any = True
             except Exception:
                 pass
@@ -1892,14 +1918,24 @@ class ComfyUILauncherEnhanced:
             raise RuntimeError("无法终止目标进程")
 
     def _is_http_reachable(self) -> bool:
-        # 通过端口探测判断 ComfyUI 是否仍在运行（即便由 Manager 重启）
+        """非侵入式运行探测：不发起实际 HTTP 请求，改用端口与 PID 映射判断。
+
+        原实现会向后端发起请求，可能导致后端在特定平台/事件循环下出现连接关闭的异常日志。
+        为避免干扰后端，这里通过系统连接表与进程特征识别来判断 ComfyUI 是否在运行。
+        """
         try:
-            import urllib.request
             port = (self.custom_port.get() or "8188").strip()
-            url = f"http://127.0.0.1:{port}/"
-            req = urllib.request.Request(url, headers={"User-Agent": "ComfyUI-Launcher"})
-            with urllib.request.urlopen(req, timeout=0.8) as resp:
-                return 200 <= getattr(resp, 'status', 200) < 400
+            pids = self._find_pids_by_port_safe(port)
+            if not pids:
+                return False
+            # 仅当检测到与 ComfyUI 特征匹配的进程时，认为运行中
+            for pid in pids:
+                try:
+                    if self._is_comfyui_pid(pid):
+                        return True
+                except Exception:
+                    pass
+            return False
         except Exception:
             return False
 
@@ -1923,6 +1959,9 @@ class ComfyUILauncherEnhanced:
     def monitor_process(self):
         while True:
             try:
+                # 若处于关闭流程，则停止监控循环，避免销毁窗口前的 UI 冲突
+                if getattr(self, "_shutting_down", False):
+                    break
                 # 进程结束时，置空句柄并根据端口探测决定按钮显示
                 if getattr(self, "comfyui_process", None) and self.comfyui_process.poll() is not None:
                     self.comfyui_process = None

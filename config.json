@@ -4,7 +4,8 @@
     "default_port": "8188",
     "enable_fast_mode": false,
     "enable_cors": true,
-    "listen_all": true
+    "listen_all": true,
+    "extra_args": ""
   },
   "ui_settings": {
     "window_width": 800,
@@ -19,8 +20,8 @@
     "python_embeded": "python_embeded",
     "custom_nodes": "ComfyUI/custom_nodes",
     "bat_files_directory": ".",
-    "comfyui_path": "ComfyUI",
-    "python_path": "python_embeded/python.exe",
+    "comfyui_path": "F:\\ComfyUI_Mie_V6.0\\ComfyUI",
+    "python_path": "F:\\ComfyUI_Mie_V7.0\\python_embeded\\python.exe",
     "hf_mirror": "hf-mirror"
   },
   "advanced": {
@@ -30,8 +31,14 @@
     "save_logs": false
   },
   "proxy_settings": {
-    "git_proxy_url": "https://ghproxy.com/",
-    "pypi_proxy_url": "https://pypi.tuna.tsinghua.edu.cn/simple/",
+    "git_proxy_mode": "gh-proxy",
+    "git_proxy_url": "https://gh-proxy.com/",
+    "pypi_proxy_mode": "aliyun",
+    "pypi_proxy_url": "https://mirrors.aliyun.com/pypi/simple/",
     "hf_mirror_url": "https://hf-mirror.com"
+  },
+  "integrations": {
+    "comfyui_manager_git_set": true,
+    "comfyui_manager_git_path": "F:\\ComfyUI_Mie_V7.0\\tools\\PortableGit\\bin\\git.exe"
   }
 }
