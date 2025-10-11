@@ -10,6 +10,7 @@ from version_manager import VersionManager
 from utils import run_hidden, have_git, is_git_repo
 from logger_setup import install_logging
 import locale
+import logging
 
 # ================== 单实例锁 ==================
 try:
@@ -369,6 +370,37 @@ class ComfyUILauncherEnhanced:
         except Exception:
             self.config_file = Path("launcher/config.json")
         self.load_config()
+        # 根据配置或文件开关切换调试模式与日志级别（优先使用 launcher/is_debug 文件）
+        try:
+            dbg_cfg = False
+            try:
+                dbg_cfg = bool(self.config.get("advanced", {}).get("show_debug_info", False))
+            except Exception:
+                dbg_cfg = False
+            is_debug_path = Path.cwd() / "launcher" / "is_debug"
+            dbg_file = False
+            try:
+                dbg_file = is_debug_path.exists()
+            except Exception:
+                dbg_file = False
+            # 如果配置要求调试，确保文件存在（不强制删除用户手动创建的调试标记）
+            if dbg_cfg:
+                try:
+                    is_debug_path.parent.mkdir(parents=True, exist_ok=True)
+                except Exception:
+                    pass
+                try:
+                    is_debug_path.write_text("debug\n", encoding="utf-8")
+                except Exception:
+                    pass
+                dbg_file = True
+            dbg_any = bool(dbg_cfg or dbg_file)
+            try:
+                self.logger.setLevel(logging.DEBUG if dbg_any else logging.INFO)
+            except Exception:
+                pass
+        except Exception:
+            pass
         self.setup_variables()
 
         # 允许在任意目录运行：如果未检测到有效的 ComfyUI 路径，则提示用户选择

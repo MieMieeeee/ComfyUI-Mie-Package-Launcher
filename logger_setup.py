@@ -1,4 +1,5 @@
 import logging
+import os
 from logging.handlers import RotatingFileHandler
 from pathlib import Path
 import sys
@@ -14,7 +15,26 @@ def install_logging(app_name: str = "comfyui_launcher", log_root=None) -> loggin
     - Returns the configured logger for optional direct use.
     """
     logger = logging.getLogger(app_name)
-    logger.setLevel(logging.INFO)
+    # Set level from env: COMFYUI_LAUNCHER_DEBUG or COMFYUI_LAUNCHER_LOG_LEVEL
+    try:
+        # Prefer file-based debug toggle under launcher/is_debug
+        try:
+            if (Path.cwd() / "launcher" / "is_debug").exists():
+                logger.setLevel(logging.DEBUG)
+            else:
+                level_env = (os.environ.get("COMFYUI_LAUNCHER_LOG_LEVEL") or "").strip().upper()
+                debug_env = (os.environ.get("COMFYUI_LAUNCHER_DEBUG") or "").strip().lower()
+                if level_env:
+                    lvl = getattr(logging, level_env, logging.INFO)
+                    logger.setLevel(lvl)
+                elif debug_env in ("1", "true", "yes", "on", "debug"):
+                    logger.setLevel(logging.DEBUG)
+                else:
+                    logger.setLevel(logging.INFO)
+        except Exception:
+            logger.setLevel(logging.INFO)
+    except Exception:
+        logger.setLevel(logging.INFO)
 
     try:
         # Prefer a caller-provided root (e.g., the parent of ComfyUI) for deterministic placement

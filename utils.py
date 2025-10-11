@@ -23,6 +23,27 @@ def _truncate_text(text, limit: int) -> str:
     return s[:limit] + f"\n...[truncated {len(s) - limit} chars]"
 
 
+def _truncate_lines(text, max_lines: int) -> str:
+    if text is None:
+        return ""
+    try:
+        s = str(text)
+    except Exception:
+        s = ""
+    lines = s.splitlines()
+    if max_lines is None or max_lines <= 0:
+        return s
+    if len(lines) <= max_lines:
+        return s
+    return "\n".join(lines[:max_lines]) + f"\n...[truncated {len(lines) - max_lines} lines]"
+
+def _is_debug_file_present() -> bool:
+    try:
+        return (Path.cwd() / "launcher" / "is_debug").exists()
+    except Exception:
+        return False
+
+
 def run_hidden(cmd, **kwargs):
     """Run a subprocess with hidden window on Windows, normal elsewhere.
 
@@ -54,6 +75,14 @@ def run_hidden(cmd, **kwargs):
         output_limit = int(os.environ.get("COMFYUI_LAUNCHER_LOG_OUTPUT_LIMIT", "4000"))
     except Exception:
         output_limit = 4000
+    # Lines limit for non-debug mode (default 10 lines), configurable via env
+    try:
+        output_lines_limit = int(os.environ.get("COMFYUI_LAUNCHER_LOG_LINES_LIMIT", "10"))
+    except Exception:
+        output_lines_limit = 10
+    # Debug mode toggle via env
+    # Debug mode: prefer file flag over environment variable
+    debug_mode = _is_debug_file_present() or ((os.environ.get("COMFYUI_LAUNCHER_DEBUG") or "").strip().lower() in ("1", "true", "yes", "on", "debug"))
     # Simple proxy hint for GitHub URLs
     cmd_lower = (cmd_display if isinstance(cmd_display, str) else str(cmd_display)).lower()
     proxy_hint = ("github.com" in cmd_lower) and ("ghproxy" in cmd_lower or "gh-proxy" in cmd_lower)
@@ -80,8 +109,22 @@ def run_hidden(cmd, **kwargs):
                 if isinstance(stderr, (bytes, bytearray)):
                     stderr = stderr.decode("utf-8", errors="ignore")
             try:
+                # Suppress extremely verbose output from `netstat -ano`, log summary only
+                if " netstat " in cmd_lower and " -ano" in cmd_lower:
+                    try:
+                        slines = len((stdout or "").splitlines())
+                    except Exception:
+                        slines = 0
+                    try:
+                        elines = len((stderr or "").splitlines())
+                    except Exception:
+                        elines = 0
+                    logger.info(
+                        f"run_hidden[{cmd_id}]: rc={result.returncode} (netstat -ano output suppressed) "
+                        f"stdout_lines={slines} stderr_lines={elines}"
+                    )
                 # Special handling for pip show to avoid excessively long logs
-                if " pip show " in cmd_lower or cmd_lower.strip().endswith("pip show"):
+                elif " pip show " in cmd_lower or cmd_lower.strip().endswith("pip show"):
                     name_val = None
                     ver_val = None
                     try:
@@ -99,9 +142,14 @@ def run_hidden(cmd, **kwargs):
                             f"run_hidden[{cmd_id}]: rc={result.returncode} (pip_show)\nstdout:\n{_truncate_text(stdout, 512)}\nstderr:\n{_truncate_text(stderr, 512)}"
                         )
                 else:
-                    logger.info(
-                        f"run_hidden[{cmd_id}]: rc={result.returncode}\nstdout:\n{_truncate_text(stdout, output_limit)}\nstderr:\n{_truncate_text(stderr, output_limit)}"
-                    )
+                    if debug_mode:
+                        logger.info(
+                            f"run_hidden[{cmd_id}]: rc={result.returncode}\nstdout:\n{_truncate_text(stdout, output_limit)}\nstderr:\n{_truncate_text(stderr, output_limit)}"
+                        )
+                    else:
+                        logger.info(
+                            f"run_hidden[{cmd_id}]: rc={result.returncode}\nstdout:\n{_truncate_lines(stdout, output_lines_limit)}\nstderr:\n{_truncate_lines(stderr, output_lines_limit)}"
+                        )
             except Exception:
                 pass
         else:
