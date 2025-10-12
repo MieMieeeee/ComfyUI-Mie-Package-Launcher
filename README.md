@@ -34,6 +34,9 @@ python launcher/comfyui_launcher_enhanced.py
 - 点击“一键启动”，启动器会按配置构造命令并启动 ComfyUI。
 - 若设置了镜像或代理，会注入相关环境变量（如 `HF_ENDPOINT`、`GITHUB_ENDPOINT`）。
 - 检测到便携版 Git（`tools/PortableGit/bin/git.exe`）时，会在启动时注入 `GIT_PYTHON_GIT_EXECUTABLE` 并前置其 `bin` 到 `PATH`，无需手动设置系统环境。
+ - 若目标端口已被占用，启动器会提示是否直接打开网页而不启动新的实例；默认取消启动。
+ - 点击“停止”，会直接终止占用当前设置端口（默认 `8188`）的所有相关进程。
+ - 关闭窗口时，自动执行与“停止”一致的逻辑后退出。
 
 ### 快速操作
 - 一键启动 ComfyUI
@@ -54,19 +57,32 @@ python launcher/comfyui_launcher_enhanced.py
   - 调试模式下的字符截断长度可通过 `COMFYUI_LAUNCHER_LOG_OUTPUT_LIMIT` 设置，例如：`2000`。
   - 配置文件 `launcher/config.json` 中的 `advanced.show_debug_info` 为 `true` 时，会自动创建 `launcher/is_debug` 文件以便开启调试模式（不会自动删除你手动创建的标记文件）。
 
-## 文件结构
+## 项目结构（重构后）
 
 ```
-launcher/
-├── comfyui_launcher_enhanced.py  # 增强版主启动器界面
-├── version_manager.py            # 版本管理器（仅内核相关）
-├── requirements.txt             # 依赖列表
-├── logger_setup.py              # 日志安装与级别控制（支持 is_debug 文件）
-├── utils.py                     # 命令执行与日志输出（支持按行/字符截断）
-├── assets/                      # 启动器图片资源（about_me.png / comfyui.png / rabbit.*）
-├── config.json                  # 启动器配置（已移除，启动器将使用默认配置）
-├── is_debug                     # 可选：存在即开启调试模式
-└── README.md                   # 说明文档
+ComfyUI_Mie_V7.0_O/
+├── ComfyUI/                     # ComfyUI 内核与前端（包含 main.py）
+├── launcher/                    # 启动器代码与资源
+│   ├── comfyui_launcher_enhanced.py  # 主界面与逻辑
+│   ├── ui/                          # 子面板与主题
+│   │   ├── theme.py
+│   │   ├── about_tab.py
+│   │   ├── comfyui_tab.py
+│   │   └── start_button_panel.py
+│   ├── assets.py
+│   ├── assets/                      # 图标与图片资源
+│   ├── paths.py
+│   ├── net_utils.py
+│   ├── utils.py
+│   ├── version_manager.py           # 内核更新管理
+│   ├── logger_setup.py              # 日志与调试开关
+│   ├── config.json                  # 启动器配置（路径、端口、UI 设置等）
+│   └── README.md
+├── python_embeded/              # 便携式 Python（默认解析为运行时 Python）
+├── tools/PortableGit/           # 便携式 Git（可选，自动注入 PATH）
+├── dist/                        # 打包输出（ComfyUI启动器.exe）
+├── build/                       # 打包中间产物
+└── ComfyUI启动器.exe            # 复制到根目录的发布版（脚本构建后）
 ```
 
 ## 技术实现
@@ -78,7 +94,9 @@ launcher/
 
 ## 注意事项
 
-1. 启动器可在任意目录运行；首次或路径无效时会弹窗选择 ComfyUI 根目录。当前版本不再使用 `launcher/config.json`，将采用内置默认值或运行时选择保存。
+1. 启动器可在任意目录运行；首次或路径无效时会弹窗选择 ComfyUI 根目录。当前版本使用 `launcher/config.json` 保存解析后的 `comfyui_path` 与 `python_path`、端口与 UI 设置等。
+2. “停止”与“退出”会直接终止占用配置端口的相关进程；若该端口被其他程序使用，也会被结束，请谨慎设置端口。
+3. 端口被占用时，点击“一键启动”将提示是否直接打开网页而不启动新的实例。
 
 ## 兼容性
 
