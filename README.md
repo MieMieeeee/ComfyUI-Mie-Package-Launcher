@@ -19,9 +19,21 @@
 
 ### 启动启动器
 ```bash
-# 在 ComfyUI 根目录下运行（增强版界面）
+# 在任意目录运行（增强版界面）
 python launcher/comfyui_launcher_enhanced.py
+
+# 或直接运行已打包的可执行文件（若已构建）
+# 双击项目根目录或 launcher\dist 下的 ComfyUI启动器.exe
 ```
+
+### 使用流程
+- 启动后，启动器会自动读取 `launcher/config.json`：
+  - `paths.comfyui_path`：作为 ComfyUI 根目录；若未配置或无效，会弹窗提示选择 ComfyUI 根目录（包含 `main.py` 或 `.git`）。选择后会保存到配置文件。
+  - `paths.python_path`：作为 Python 可执行路径；若未配置或无效，会按常见候选自动解析（如 `python_embeded/python.exe`）。
+- 在“启动与更新”页配置启动选项（CPU/GPU、端口、CORS、镜像与代理等）。
+- 点击“一键启动”，启动器会按配置构造命令并启动 ComfyUI。
+- 若设置了镜像或代理，会注入相关环境变量（如 `HF_ENDPOINT`、`GITHUB_ENDPOINT`）。
+- 检测到便携版 Git（`tools/PortableGit/bin/git.exe`）时，会在启动时注入 `GIT_PYTHON_GIT_EXECUTABLE` 并前置其 `bin` 到 `PATH`，无需手动设置系统环境。
 
 ### 快速操作
 - 一键启动 ComfyUI
@@ -65,10 +77,7 @@ launcher/
 
 ## 注意事项
 
-1. 确保在 ComfyUI 根目录下运行启动器
-2. 备份操作可能需要较长时间，请耐心等待
-3. 恢复备份前请确保 ComfyUI 已停止运行
-4. 备份文件存储在 `backups` 目录下
+1. 启动器可在任意目录运行；首次或路径无效时会弹窗选择 ComfyUI 根目录并保存到 `launcher/config.json`。
 
 ## 兼容性
 
