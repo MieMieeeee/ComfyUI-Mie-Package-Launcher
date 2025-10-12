@@ -2609,7 +2609,22 @@ class ComfyUILauncherEnhanced:
             self.use_fast_mode.set(False)
             self.enable_cors.set(True)
             self.listen_all.set(True)
-            self.selected_hf_mirror.set("hf-mirror")
+            # 恢复 HF 镜像为预设，并同步默认 URL 与输入框可见性
+            try:
+                self.selected_hf_mirror.set("hf-mirror")
+                self.hf_mirror_url.set("https://hf-mirror.com")
+                try:
+                    # 触发一次可见性更新，隐藏自定义输入框
+                    self.on_hf_mirror_selected()
+                except Exception:
+                    # 兜底：直接隐藏并禁用输入框
+                    try:
+                        self.hf_mirror_entry.grid_remove()
+                        self.hf_mirror_entry.configure(state='disabled')
+                    except Exception:
+                        pass
+            except Exception:
+                pass
             # 恢复默认：PyPI 使用阿里云
             try:
                 if hasattr(self, 'pypi_proxy_mode_ui'):
@@ -2618,6 +2633,13 @@ class ComfyUILauncherEnhanced:
                     self.pypi_proxy_mode.set("aliyun")
                 if hasattr(self, 'pypi_proxy_url'):
                     self.pypi_proxy_url.set("https://mirrors.aliyun.com/pypi/simple/")
+                # 隐藏并禁用自定义输入框
+                try:
+                    if hasattr(self, 'pypi_proxy_url_entry') and self.pypi_proxy_url_entry:
+                        self.pypi_proxy_url_entry.grid_remove()
+                        self.pypi_proxy_url_entry.configure(state='disabled')
+                except Exception:
+                    pass
                 # 立即应用到 pip.ini
                 try:
                     self.apply_pip_proxy_settings()
@@ -2625,6 +2647,31 @@ class ComfyUILauncherEnhanced:
                     pass
                 try:
                     self.logger.info("恢复默认设置：PyPI=阿里云，已更新 pip.ini")
+                except Exception:
+                    pass
+            except Exception:
+                pass
+            # 恢复默认：GitHub 代理使用 gh-proxy
+            try:
+                vm = getattr(self, 'version_manager', None)
+                if vm:
+                    try:
+                        # 更新下拉框显示与内部模式
+                        vm.proxy_mode_ui_var.set('gh-proxy')
+                        vm.proxy_mode_var.set('gh-proxy')
+                        vm.proxy_url_var.set('https://gh-proxy.com/')
+                        vm.save_proxy_settings()
+                    except Exception:
+                        pass
+                # 隐藏并禁用自定义 URL 输入框
+                try:
+                    if hasattr(self, 'github_proxy_url_entry') and self.github_proxy_url_entry:
+                        self.github_proxy_url_entry.grid_remove()
+                        self.github_proxy_url_entry.configure(state='disabled')
+                except Exception:
+                    pass
+                try:
+                    self.logger.info("恢复默认设置：GitHub代理=gh-proxy")
                 except Exception:
                     pass
             except Exception:
