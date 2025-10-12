@@ -597,8 +597,8 @@ class ComfyUILauncherEnhanced:
                         pass
 
                 icon_set = False
-                # 默认禁用 iconbitmap 以规避部分环境下 .ico 触发的原生崩溃；可用开关强制启用
-                enable_ico = ASSETS.enable_ico()
+                # Windows 上优先启用 .ico 以显示任务栏与标题栏图标；仍保留开关与回退逻辑
+                enable_ico = ASSETS.enable_ico() or (os.name == 'nt')
                 if not skip_icons and enable_ico:
                     for p in icon_candidates:
                         if p.exists():
@@ -1130,6 +1130,36 @@ class ComfyUILauncherEnhanced:
         if running:
             self.stop_comfyui()
         else:
+            # 启动前追加端口占用检测：若任何进程占用目标端口，则避免重复启动
+            try:
+                port = (self.custom_port.get() or "8188").strip()
+                pids = self._find_pids_by_port_safe(port)
+            except Exception:
+                pids = []
+            if pids:
+                try:
+                    from tkinter import messagebox
+                    # 若端口被占用，优先提示并提供直接打开网页的选项；默认取消启动
+                    proceed_open = messagebox.askyesno(
+                        "端口被占用",
+                        f"检测到端口 {port} 已被占用 (PID: {', '.join(map(str, pids))}).\n\n是否直接打开网页而不启动新的实例?"
+                    )
+                except Exception:
+                    proceed_open = True
+                if proceed_open:
+                    try:
+                        self.open_comfyui_web()
+                    except Exception:
+                        pass
+                    return
+                else:
+                    # 取消启动，维持按钮状态为“启动”
+                    try:
+                        self.logger.warning("端口占用，已取消启动: %s", port)
+                    except Exception:
+                        pass
+                    return
+            # 未占用则正常启动
             self.start_comfyui()
 
     def start_comfyui(self):
@@ -1299,20 +1329,11 @@ class ComfyUILauncherEnhanced:
             port = (self.custom_port.get() or "8188").strip()
             pids = self._find_pids_by_port_safe(port)
             if pids:
-                # 仅筛选识别为 ComfyUI 的进程，避免误杀其它程序
-                comfy_pids = [pid for pid in pids if self._is_comfyui_pid(pid)]
-                if comfy_pids:
-                    try:
-                        self._kill_pids(comfy_pids)
-                        killed = True
-                    except Exception as e:
-                        messagebox.showerror("错误", f"强制停止失败: {e}")
-                else:
-                    messagebox.showwarning(
-                        "警告",
-                        "检测到端口占用，但未识别为 ComfyUI 进程，已取消强制停止。\n\n"
-                        "如端口被其它程序占用，请修改 ComfyUI 端口或手动关闭该程序。"
-                    )
+                try:
+                    self._kill_pids(pids)
+                    killed = True
+                except Exception as e:
+                    messagebox.showerror("错误", f"强制停止失败: {e}")
             else:
                 messagebox.showwarning("警告", f"未找到端口 {port} 上运行的进程")
 
@@ -1401,7 +1422,6 @@ class ComfyUILauncherEnhanced:
         # 通过 cmdline/exe/cwd 多重特征判断是否为 ComfyUI 相关进程
         try:
             import psutil  # type: ignore
-            comfy_root = str(Path(self.config["paths"]["comfyui_path"]).resolve()).lower()
             try:
                 p = psutil.Process(pid)
                 cmdline = " ".join(p.cmdline()).lower()
@@ -1415,10 +1435,7 @@ class ComfyUILauncherEnhanced:
                 cwd = (p.cwd() or "").lower()
             except Exception:
                 cwd = ""
-
-            # 关键特征：main.py、comfyui 字样、路径命中 ComfyUI 根目录
-            if comfy_root and (comfy_root in cmdline or comfy_root in exe or comfy_root in cwd):
-                return True
+            # 关键特征：main.py、comfyui 字样。移除配置路径匹配，避免因路径不一致误判
             if ("main.py" in cmdline and ("comfyui" in cmdline or "windows-standalone-build" in cmdline)):
                 return True
             if ("comfyui" in cmdline or "comfyui" in exe or "comfyui" in cwd):
@@ -1487,24 +1504,17 @@ class ComfyUILauncherEnhanced:
             raise RuntimeError("无法终止目标进程")
 
     def _is_http_reachable(self) -> bool:
-        """非侵入式运行探测：不发起实际 HTTP 请求，改用端口与 PID 映射判断。
+        """运行探测：只要目标端口上有监听/连接即视为“运行中”。
 
-        原实现会向后端发起请求，可能导致后端在特定平台/事件循环下出现连接关闭的异常日志。
-        为避免干扰后端，这里通过系统连接表与进程特征识别来判断 ComfyUI 是否在运行。
+        说明：
+        - 之前版本仅当端口 PID 被识别为 ComfyUI 才认为运行中，导致在部分环境下（命令行/路径特征不一致）无法识别。
+        - 为符合用户直觉与避免误判，这里放宽为：端口上存在任何 PID 列表即认为运行中；
+          停止流程仍使用 `_is_comfyui_pid` 进行安全过滤，避免误杀其它程序。
         """
         try:
             port = (self.custom_port.get() or "8188").strip()
             pids = self._find_pids_by_port_safe(port)
-            if not pids:
-                return False
-            # 仅当检测到与 ComfyUI 特征匹配的进程时，认为运行中
-            for pid in pids:
-                try:
-                    if self._is_comfyui_pid(pid):
-                        return True
-                except Exception:
-                    pass
-            return False
+            return bool(pids)
         except Exception:
             return False
 
@@ -2489,22 +2499,12 @@ class ComfyUILauncherEnhanced:
             pass
 
         if running_tracked or externally_running:
-            # 加强提示：可选择关闭所有 ComfyUI 实例（包括外部启动的）
-            if messagebox.askyesno("确认", "检测到 ComfyUI 正在运行。是否关闭所有 ComfyUI 实例并退出？\n\n提示：即使不是由本启动器启动的 ComfyUI，也会尝试关闭。"):
-                try:
-                    # 优先正常停止当前跟踪的进程
-                    self.stop_comfyui()
-                    # 进一步扫描并尝试关闭其它可能的 ComfyUI 进程
-                    self.stop_all_comfyui_instances()
-                except Exception:
-                    pass
-                finally:
-                    try:
-                        self.root.destroy()
-                    except Exception:
-                        pass
-            else:
-                # 用户选择不关闭，直接退出窗口
+            # 与“停止”按钮一致：直接尝试停止端口上的所有相关进程后退出
+            try:
+                self.stop_comfyui()
+            except Exception:
+                pass
+            finally:
                 try:
                     self.root.destroy()
                 except Exception:
