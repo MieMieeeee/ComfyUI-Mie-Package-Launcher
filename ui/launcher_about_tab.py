@@ -67,7 +67,7 @@ def build_about_launcher(app, parent):
     version_wrap = tk.Frame(container, bg=BG)
     version_wrap.grid(row=2, column=0, sticky="n")
     badge = tk.Label(
-        version_wrap, text="版本 v1.0.0", bg="#EEF2F7", fg=TEXT,
+        version_wrap, text="版本 v1.0.1", bg="#EEF2F7", fg=TEXT,
         font=("Microsoft YaHei", 11, "bold"), padx=10, pady=4, bd=1, relief="solid"
     )
     badge.pack(pady=(0, 12))

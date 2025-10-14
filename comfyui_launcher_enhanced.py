@@ -99,6 +99,8 @@ class BigLaunchButton(tk.Frame):
         self.active = active
         self.command = command
         self.state = "idle"
+        self._pressed = False
+        self._last_click_at = 0.0
         self.canvas = tk.Canvas(self, width=size, height=size, bd=0, highlightthickness=0,
                                 bg=parent.cget("bg"))
         self.canvas.pack(fill=tk.BOTH, expand=True)
@@ -131,10 +133,27 @@ class BigLaunchButton(tk.Frame):
             self.label.config(bg=self.hover)
 
     def _on_press(self):
+        self._pressed = True
         self._draw(self.active)
         self.label.config(bg=self.active)
 
     def _on_release(self):
+        # 防止事件在 label 与 canvas 上重复触发：仅响应一次
+        if not self._pressed:
+            return
+        self._pressed = False
+        # 防止在“启动中”状态被重复点击
+        if self.state == "starting":
+            return
+        # 简单防抖：双击间隔 < 400ms 则忽略第二次
+        try:
+            import time
+            now = time.time()
+            if (now - getattr(self, "_last_click_at", 0.0)) < 0.4:
+                return
+            self._last_click_at = now
+        except Exception:
+            pass
         if self.command:
             self.command()
         self._refresh()
@@ -653,6 +672,69 @@ class ComfyUILauncherEnhanced:
                                 break
                             except:
                                 pass
+
+                # Windows 任务栏图标兜底：使用 Win32 WM_SETICON 强制设置大/小图标，避免显示羽毛
+                try:
+                    if os.name == 'nt' and not skip_icons:
+                        # 选取第一个存在的 ICO 作为来源
+                        ico_path = None
+                        for p in icon_candidates:
+                            try:
+                                if p.exists():
+                                    ico_path = str(p)
+                                    break
+                            except Exception:
+                                pass
+                        if ico_path:
+                            try:
+                                WM_SETICON = 0x0080
+                                IMAGE_ICON = 1
+                                ICON_SMALL = 0
+                                ICON_BIG = 1
+                                LR_LOADFROMFILE = 0x00000010
+                                LR_DEFAULTSIZE = 0x00000040
+                                # 通过窗口标题查找 hwnd（需在设置标题后执行）
+                                hwnd = ctypes.windll.user32.FindWindowW(None, self.root.title())
+                                if hwnd:
+                                    hicon = ctypes.windll.user32.LoadImageW(None, ico_path, IMAGE_ICON, 0, 0, LR_LOADFROMFILE | LR_DEFAULTSIZE)
+                                    if hicon:
+                                        ctypes.windll.user32.SendMessageW(hwnd, WM_SETICON, ICON_BIG, hicon)
+                                        ctypes.windll.user32.SendMessageW(hwnd, WM_SETICON, ICON_SMALL, hicon)
+                                        try:
+                                            self.logger.info("样式阶段: Win32 WM_SETICON 已应用到任务栏图标=%s", ico_path)
+                                        except Exception:
+                                            pass
+                            except Exception:
+                                try:
+                                    self.logger.info("样式阶段: Win32 WM_SETICON 应用失败，继续使用 Tk 图标")
+                                except Exception:
+                                    pass
+                except Exception:
+                    pass
+
+                # macOS: 设置 Dock 图标，避免默认的蓝色羽毛（Wish）
+                try:
+                    if sys.platform == 'darwin' and not skip_icons:
+                        try:
+                            from AppKit import NSApplication, NSImage
+                            # 同时尝试 icns 与 png，两者任一存在即可
+                            icn_path = ASSETS.resolve_asset_variants(['rabbit.icns', 'rabbit.png'])
+                            if icn_path and icn_path.exists():
+                                img = NSImage.alloc().initWithContentsOfFile_(str(icn_path))
+                                if img is not None:
+                                    NSApplication.sharedApplication().setApplicationIconImage_(img)
+                                    try:
+                                        self.logger.info("样式阶段: macOS Dock 图标已设置为 %s", str(icn_path))
+                                    except Exception:
+                                        pass
+                        except Exception:
+                            # PyObjC 不可用或设置失败时静默回退为默认图标
+                            try:
+                                self.logger.info("样式阶段: macOS Dock 图标设置失败或 PyObjC 不可用，保持默认图标")
+                            except Exception:
+                                pass
+                except Exception:
+                    pass
             except:
                 pass
 
@@ -1126,6 +1208,16 @@ class ComfyUILauncherEnhanced:
 
     # ---------- 启动逻辑 ----------
     def toggle_comfyui(self):
+        # 防抖与状态保护：启动进行中时忽略重复点击
+        try:
+            if getattr(self, '_launching', False):
+                try:
+                    self.logger.warning("忽略重复点击：正在启动中")
+                except Exception:
+                    pass
+                return
+        except Exception:
+            pass
         try:
             self.logger.info("点击一键启动/停止")
         except Exception:
@@ -1302,6 +1394,7 @@ class ComfyUILauncherEnhanced:
                 pass
             self.big_btn.set_state("starting")
             self.big_btn.set_text("启动中…")
+            self._launching = True
 
             def worker():
                 try:
@@ -1345,6 +1438,7 @@ class ComfyUILauncherEnhanced:
             self.on_start_failed(msg)
 
     def on_start_success(self):
+        self._launching = False
         try:
             self.logger.info("ComfyUI 启动成功")
         except Exception:
@@ -1353,6 +1447,7 @@ class ComfyUILauncherEnhanced:
         self.big_btn.set_text("停止")
 
     def on_start_failed(self, error):
+        self._launching = False
         try:
             self.logger.error("ComfyUI 启动失败: %s", error)
         except Exception:
@@ -1363,35 +1458,147 @@ class ComfyUILauncherEnhanced:
 
     def stop_comfyui(self):
         try:
-            self.logger.info("尝试停止 ComfyUI 进程")
+            self.logger.info("用户点击停止：开始关闭 ComfyUI")
         except Exception:
             pass
+        # 停止过程中也避免重复点击触发启动
+        self._launching = False
         killed = False
         # 1) 优先停止当前已跟踪的进程
         if getattr(self, "comfyui_process", None) and self.comfyui_process.poll() is None:
             try:
-                self.comfyui_process.terminate()
-                self.comfyui_process.wait(timeout=5)
-                killed = True
-            except subprocess.TimeoutExpired:
+                self.logger.info("检测到已跟踪进程，PID=%s，按平台策略终止", str(self.comfyui_process.pid))
+            except Exception:
+                pass
+            pid_str = str(self.comfyui_process.pid)
+            if os.name == 'nt':
+                # Windows：按序尝试 /T、/T /F，然后回退到 terminate/kill，避免残留控制台窗口
                 try:
-                    self.comfyui_process.kill()
-                    killed = True
+                    r_soft = run_hidden(["taskkill", "/PID", pid_str, "/T"], capture_output=True, text=True)
+                    try:
+                        self.logger.info("Windows 停止阶段: taskkill /T 返回码=%s", str(r_soft.returncode))
+                    except Exception:
+                        pass
+                    if r_soft.returncode == 0:
+                        killed = True
+                        try:
+                            self.logger.info("Windows 停止阶段: 已通过 taskkill /T 终止 PID=%s (含控制台)", pid_str)
+                        except Exception:
+                            pass
+                    else:
+                        r_hard = run_hidden(["taskkill", "/PID", pid_str, "/T", "/F"], capture_output=True, text=True)
+                        try:
+                            self.logger.info("Windows 停止阶段: taskkill /T /F 返回码=%s", str(r_hard.returncode))
+                        except Exception:
+                            pass
+                        if r_hard.returncode == 0:
+                            killed = True
+                            try:
+                                self.logger.info("Windows 停止阶段: 已通过 taskkill /T /F 强制终止 PID=%s", pid_str)
+                            except Exception:
+                                pass
+                        else:
+                            # taskkill 未能终止，改用 Popen API
+                            try:
+                                self.comfyui_process.terminate()
+                                self.comfyui_process.wait(timeout=5)
+                                killed = True
+                                try:
+                                    self.logger.warning("Windows 停止阶段: taskkill 失败，已回退到 terminate+wait，PID=%s", pid_str)
+                                except Exception:
+                                    pass
+                            except subprocess.TimeoutExpired:
+                                try:
+                                    self.comfyui_process.kill()
+                                    killed = True
+                                    try:
+                                        self.logger.warning("Windows 停止阶段: terminate 超时，已 kill，PID=%s", pid_str)
+                                    except Exception:
+                                        pass
+                                except Exception as e3:
+                                    try:
+                                        self.logger.error("Windows 停止阶段: 回退强制结束失败: %s", str(e3))
+                                    except Exception:
+                                        pass
+                                    messagebox.showerror("错误", f"停止失败: {e3}")
                 except Exception as e:
-                    messagebox.showerror("错误", f"停止失败: {e}")
-            except Exception as e:
-                messagebox.showerror("错误", f"停止失败: {e}")
+                    try:
+                        self.logger.error("Windows 停止阶段: taskkill 执行异常: %s，回退到 terminate/kill", str(e))
+                    except Exception:
+                        pass
+                    try:
+                        self.comfyui_process.terminate()
+                        self.comfyui_process.wait(timeout=5)
+                        killed = True
+                        try:
+                            self.logger.warning("Windows 停止阶段: 已回退到 terminate+wait，PID=%s", pid_str)
+                        except Exception:
+                            pass
+                    except subprocess.TimeoutExpired:
+                        try:
+                            self.comfyui_process.kill()
+                            killed = True
+                            try:
+                                self.logger.warning("Windows 停止阶段: 回退 terminate 超时，已 kill，PID=%s", pid_str)
+                            except Exception:
+                                pass
+                        except Exception as e2:
+                            try:
+                                self.logger.error("Windows 停止阶段: 回退强制结束失败: %s", str(e2))
+                            except Exception:
+                                pass
+                            messagebox.showerror("错误", f"停止失败: {e2}")
+            else:
+                # 非 Windows：沿用 terminate -> wait -> kill
+                try:
+                    self.comfyui_process.terminate()
+                    self.comfyui_process.wait(timeout=5)
+                    killed = True
+                    try:
+                        self.logger.info("已终止跟踪进程，PID=%s", pid_str)
+                    except Exception:
+                        pass
+                except subprocess.TimeoutExpired:
+                    try:
+                        self.comfyui_process.kill()
+                        killed = True
+                        try:
+                            self.logger.warning("优雅终止超时，已强制结束，PID=%s", pid_str)
+                        except Exception:
+                            pass
+                    except Exception as e:
+                        try:
+                            self.logger.error("强制结束失败: %s", str(e))
+                        except Exception:
+                            pass
+                        messagebox.showerror("错误", f"停止失败: {e}")
         else:
             # 2) 未跟踪到句柄：根据端口查找并强制终止对应进程
             port = (self.custom_port.get() or "8188").strip()
             pids = self._find_pids_by_port_safe(port)
+            try:
+                self.logger.info("未跟踪到句柄；端口 %s 的PID列表: %s", port, ", ".join(map(str, pids)) or "<空>")
+            except Exception:
+                pass
             if pids:
                 try:
                     self._kill_pids(pids)
                     killed = True
+                    try:
+                        self.logger.info("已强制终止端口 %s 上的相关进程: %s", port, ", ".join(map(str, pids)))
+                    except Exception:
+                        pass
                 except Exception as e:
+                    try:
+                        self.logger.error("强制停止失败: %s", str(e))
+                    except Exception:
+                        pass
                     messagebox.showerror("错误", f"强制停止失败: {e}")
             else:
+                try:
+                    self.logger.warning("未找到端口 %s 上运行的进程，可能已外部关闭或端口设置不一致", port)
+                except Exception:
+                    pass
                 messagebox.showwarning("警告", f"未找到端口 {port} 上运行的进程")
 
         # 根据结果刷新按钮
@@ -1399,10 +1606,19 @@ class ComfyUILauncherEnhanced:
             self.big_btn.set_state("idle")
             self.big_btn.set_text("一键启动")
             self.comfyui_process = None
+            try:
+                self.logger.info("停止流程完成：已关闭 ComfyUI")
+            except Exception:
+                pass
         else:
             # 若仍被判定为运行中，保持“停止”以避免误导
             try:
-                if self._is_http_reachable():
+                reachable = self._is_http_reachable()
+                try:
+                    self.logger.warning("停止未成功：端口可达=%s。可能原因：外部启动的实例、权限不足、端口配置不同。", str(reachable))
+                except Exception:
+                    pass
+                if reachable:
                     self.big_btn.set_state("running")
                     self.big_btn.set_text("停止")
                 else:
@@ -1453,23 +1669,19 @@ class ComfyUILauncherEnhanced:
             )
             if r.returncode == 0 and r.stdout:
                 pids = set()
-                pattern = re.compile(rf"^\s*TCP\s+[^:]+:{port}\s+.*?\s+(\d+)\s*$", re.IGNORECASE)
+                # 只认 TCP 的 LISTENING 或 ESTABLISHED，避免 TIME_WAIT/Close 等状态误判
+                pattern_tcp = re.compile(
+                    rf"^\s*TCP\s+\S+:{port}\s+\S+:\S+\s+(LISTENING|ESTABLISHED)\s+(\d+)\s*$",
+                    re.IGNORECASE,
+                )
                 for line in r.stdout.splitlines():
-                    m = pattern.match(line)
+                    m = pattern_tcp.match(line)
                     if m:
                         try:
-                            pids.add(int(m.group(1)))
+                            pids.add(int(m.group(2)))
                         except Exception:
                             pass
-                # 也匹配 UDP（少见，但兜底）
-                pattern_udp = re.compile(rf"^\s*UDP\s+[^:]+:{port}\s+.*?\s+(\d+)\s*$", re.IGNORECASE)
-                for line in r.stdout.splitlines():
-                    m = pattern_udp.match(line)
-                    if m:
-                        try:
-                            pids.add(int(m.group(1)))
-                        except Exception:
-                            pass
+                # 不再统计 UDP（ComfyUI 使用 HTTP/TCP），以减少误判
                 return list(pids)
         except Exception:
             pass
@@ -1533,6 +1745,10 @@ class ComfyUILauncherEnhanced:
 
     def _kill_pids(self, pids):
         # 优先使用 psutil 优雅终止，失败则回退到 taskkill
+        try:
+            self.logger.info("准备终止进程列表: %s", ", ".join(map(str, pids)))
+        except Exception:
+            pass
         killed_any = False
         try:
             import psutil  # type: ignore
@@ -1540,11 +1756,19 @@ class ComfyUILauncherEnhanced:
                 try:
                     p = psutil.Process(pid)
                     p.terminate()
+                    try:
+                        self.logger.info("发送terminate信号: PID=%s", str(pid))
+                    except Exception:
+                        pass
                 except Exception:
                     pass
             try:
                 psutil.wait_procs([psutil.Process(pid) for pid in pids], timeout=3)
                 killed_any = True
+                try:
+                    self.logger.info("psutil 等待结束：已终止部分或全部进程")
+                except Exception:
+                    pass
             except Exception:
                 pass
         except Exception:
@@ -1555,22 +1779,42 @@ class ComfyUILauncherEnhanced:
                 for pid in pids:
                     run_hidden(["taskkill", "/PID", str(pid), "/T", "/F"], capture_output=True, text=True)
                 killed_any = True
+                try:
+                    self.logger.info("taskkill 强制终止：%s", ", ".join(map(str, pids)))
+                except Exception:
+                    pass
             except Exception:
                 pass
         if not killed_any:
+            try:
+                self.logger.error("无法终止目标进程：%s", ", ".join(map(str, pids)))
+            except Exception:
+                pass
             raise RuntimeError("无法终止目标进程")
 
     def _is_http_reachable(self) -> bool:
-        """运行探测：只要目标端口上有监听/连接即视为“运行中”。
+        """运行探测：优先使用 TCP 直连判断端口监听，其次回退到进程/端口解析。
 
-        说明：
-        - 之前版本仅当端口 PID 被识别为 ComfyUI 才认为运行中，导致在部分环境下（命令行/路径特征不一致）无法识别。
-        - 为符合用户直觉与避免误判，这里放宽为：端口上存在任何 PID 列表即认为运行中；
-          停止流程仍使用 `_is_comfyui_pid` 进行安全过滤，避免误杀其它程序。
+        - 首选尝试 `socket.create_connection((127.0.0.1, port))`，成功即认为“运行中”。
+        - 若直连失败，回退到 `_find_pids_by_port_safe` 的 psutil/netstat 解析。
         """
         try:
-            port = (self.custom_port.get() or "8188").strip()
-            pids = self._find_pids_by_port_safe(port)
+            port_str = (self.custom_port.get() or "8188").strip()
+            port = int(port_str)
+        except Exception:
+            return False
+
+        # 首选：TCP 直连判断监听
+        try:
+            import socket
+            with socket.create_connection(("127.0.0.1", port), timeout=0.4):
+                return True
+        except Exception:
+            pass
+
+        # 回退：端口对应的 PID 列表（严格的 TCP 状态筛选已在 netstat 解析内实现）
+        try:
+            pids = self._find_pids_by_port_safe(port_str)
             return bool(pids)
         except Exception:
             return False
