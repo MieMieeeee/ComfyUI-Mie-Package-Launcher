@@ -10,7 +10,10 @@ from PIL import Image, ImageTk
 from version_manager import VersionManager
 import paths as PATHS
 import assets as ASSETS
-from utils import run_hidden, have_git, is_git_repo
+import pip_utils as PIPUTILS
+import net_utils as NETUTILS
+from config_manager import ConfigManager
+from utils import run_hidden, have_git, is_git_repo, SingletonLock
 from logger_setup import install_logging
 import locale
 import logging
@@ -23,6 +26,8 @@ from ui import about_tab as ABOUT
 from ui import comfyui_tab as COMFY
 from ui import start_button_panel as START
 from ui import launcher_about_tab as LAUNCHER_ABOUT
+from ui.custom_widges import BigLaunchButton, RoundedButton, SectionCard
+from process_manager import ProcessManager
 
 # ================== 单实例锁 ==================
 try:
@@ -34,272 +39,6 @@ try:
 except ImportError:
     msvcrt = None
 
-class SingletonLock:
-    def __init__(self, lock_file_name):
-        self.lock_file_path = os.path.join(tempfile.gettempdir(), lock_file_name)
-        self.lock_file = None
-
-    def acquire(self):
-        try:
-            self.lock_file = open(self.lock_file_path, 'w')
-            if os.name == 'nt' and msvcrt:
-                try:
-                    msvcrt.locking(self.lock_file.fileno(), msvcrt.LK_NBLCK, 1)
-                except OSError:
-                    self.lock_file.close()
-                    self.lock_file = None
-                    return False
-            elif fcntl:
-                try:
-                    fcntl.flock(self.lock_file.fileno(), fcntl.LOCK_EX | fcntl.LOCK_NB)
-                except OSError:
-                    self.lock_file.close()
-                    self.lock_file = None
-                    return False
-            else:
-                if os.path.exists(self.lock_file_path):
-                    self.lock_file.close()
-                    self.lock_file = None
-                    return False
-                else:
-                    self.lock_file.write(str(os.getpid()))
-                    self.lock_file.flush()
-            atexit.register(self.release)
-            return True
-        except Exception:
-            if self.lock_file:
-                try:
-                    self.lock_file.close()
-                except:
-                    pass
-            self.lock_file = None
-            return False
-
-    def release(self):
-        if self.lock_file:
-            try:
-                self.lock_file.close()
-                os.unlink(self.lock_file_path)
-            except Exception:
-                pass
-            self.lock_file = None
-
-# 使用工具模块中的 run_hidden，移除重复定义
-
-# ================== 大启动按钮 ==================
-class BigLaunchButton(tk.Frame):
-    def __init__(self, parent, text="一键启动", size=180,
-                 color="#2F6EF6", hover="#2760DB", active="#1F52BE",
-                 radius=30, command=None):
-        super().__init__(parent, width=size, height=size, bg=parent.cget("bg"))
-        self.size = size
-        self.radius = radius
-        self.color = color
-        self.hover = hover
-        self.active = active
-        self.command = command
-        self.state = "idle"
-        self._pressed = False
-        self._last_click_at = 0.0
-        self.canvas = tk.Canvas(self, width=size, height=size, bd=0, highlightthickness=0,
-                                bg=parent.cget("bg"))
-        self.canvas.pack(fill=tk.BOTH, expand=True)
-        self.label = tk.Label(self.canvas, text=text, bg=color, fg="#FFF",
-                              font=("Microsoft YaHei", 18, "bold"))
-        self._draw(color)
-        self._place()
-        for w in (self.canvas, self.label):
-            w.bind("<Enter>", lambda e: self._on_hover())
-            w.bind("<Leave>", lambda e: self._refresh())
-            w.bind("<ButtonPress-1>", lambda e: self._on_press())
-            w.bind("<ButtonRelease-1>", lambda e: self._on_release())
-
-    def _draw(self, fill):
-        c = self.canvas
-        s = self.size
-        r = self.radius
-        c.delete("bg")
-        c.create_rectangle(r, 0, s - r, s, fill=fill, outline=fill, tags="bg")
-        c.create_rectangle(0, r, s, s - r, fill=fill, outline=fill, tags="bg")
-        for (x0, y0) in [(0, 0), (s - 2 * r, 0), (0, s - 2 * r), (s - 2 * r, s - 2 * r)]:
-            c.create_oval(x0, y0, x0 + 2 * r, y0 + 2 * r, fill=fill, outline=fill, tags="bg")
-
-    def _place(self):
-        self.canvas.create_window(self.size / 2, self.size / 2, window=self.label, anchor="center", tags="lbl")
-
-    def _on_hover(self):
-        if self.state == "idle":
-            self._draw(self.hover)
-            self.label.config(bg=self.hover)
-
-    def _on_press(self):
-        self._pressed = True
-        self._draw(self.active)
-        self.label.config(bg=self.active)
-
-    def _on_release(self):
-        # 防止事件在 label 与 canvas 上重复触发：仅响应一次
-        if not self._pressed:
-            return
-        self._pressed = False
-        # 防止在“启动中”状态被重复点击
-        if self.state == "starting":
-            return
-        # 简单防抖：双击间隔 < 400ms 则忽略第二次
-        try:
-            import time
-            now = time.time()
-            if (now - getattr(self, "_last_click_at", 0.0)) < 0.4:
-                return
-            self._last_click_at = now
-        except Exception:
-            pass
-        if self.command:
-            self.command()
-        self._refresh()
-
-    def _refresh(self):
-        base = self.color if self.state == "idle" else (self.active if self.state == "starting" else self.hover)
-        self._draw(base)
-        self.label.config(bg=base)
-
-    def set_state(self, st):
-        self.state = st
-        self._refresh()
-
-    def set_text(self, txt):
-        self.label.config(text=txt)
-
-# ================== 小号圆角按钮（与一键启动风格一致） ==================
-class RoundedButton(tk.Frame):
-    def __init__(self, parent, text="按钮", width=120, height=36,
-                 color="#2F6EF6", hover="#2760DB", active="#1F52BE",
-                 radius=10, command=None,
-                 font=("Microsoft YaHei", 11, "bold")):
-        super().__init__(parent, width=width, height=height, bg=parent.cget("bg"))
-        self.w = width
-        self.h = height
-        self.radius = radius
-        self.color = color
-        self.hover = hover
-        self.active = active
-        self.command = command
-        self.state = "idle"
-        self.canvas = tk.Canvas(self, width=width, height=height, bd=0, highlightthickness=0,
-                                bg=parent.cget("bg"))
-        self.canvas.pack(fill=tk.BOTH, expand=True)
-        self.label = tk.Label(self.canvas, text=text, bg=color, fg="#FFF",
-                              font=font)
-        self._draw(color)
-        self._place()
-        for w in (self.canvas, self.label):
-            w.bind("<Enter>", lambda e: self._on_hover())
-            w.bind("<Leave>", lambda e: self._refresh())
-            w.bind("<ButtonPress-1>", lambda e: self._on_press())
-            w.bind("<ButtonRelease-1>", lambda e: self._on_release())
-
-    def _draw(self, fill):
-        c = self.canvas
-        w, h, r = self.w, self.h, self.radius
-        c.delete("bg")
-        # 中心矩形与四边
-        c.create_rectangle(r, 0, w - r, h, fill=fill, outline=fill, tags="bg")
-        c.create_rectangle(0, r, w, h - r, fill=fill, outline=fill, tags="bg")
-        # 四角圆弧
-        for (x0, y0) in [(0, 0), (w - 2 * r, 0), (0, h - 2 * r), (w - 2 * r, h - 2 * r)]:
-            c.create_oval(x0, y0, x0 + 2 * r, y0 + 2 * r, fill=fill, outline=fill, tags="bg")
-
-    def _place(self):
-        self.canvas.create_window(self.w / 2, self.h / 2, window=self.label, anchor="center", tags="lbl")
-
-    def _on_hover(self):
-        if self.state == "idle":
-            self._draw(self.hover)
-            self.label.config(bg=self.hover)
-
-    def _on_press(self):
-        self._draw(self.active)
-        self.label.config(bg=self.active)
-
-    def _on_release(self):
-        if self.command:
-            self.command()
-        self._refresh()
-
-    def _refresh(self):
-        base = self.color if self.state == "idle" else (self.active if self.state == "starting" else self.hover)
-        self._draw(base)
-        self.label.config(bg=base)
-
-    def set_state(self, st):
-        self.state = st
-        self._refresh()
-
-    def set_text(self, txt):
-        self.label.config(text=txt)
-
-# ================== Section 卡片（图标与标题基线对齐版本） ==================
-class SectionCard(tk.Frame):
-    def __init__(self, parent,
-                 title: str,
-                 icon: str = None,
-                 border_color: str = "#E3E7EB",
-                 bg: str = "#FFFFFF",
-                 title_fg: str = "#1F2328",
-                 title_font=("Microsoft YaHei", 18, "bold"),
-                 icon_font=("Segoe UI Emoji", 18),
-                 padding=(20, 18, 20, 20),  # left, top, right, bottom
-                 inner_gap=14,
-                 icon_width=36,
-                 default_icon_offset=2):
-        super().__init__(parent,
-                         bg=bg,
-                         highlightthickness=1,
-                         highlightbackground=border_color,
-                         bd=0)
-        self.pad_l, self.pad_t, self.pad_r, self.pad_b = padding
-
-        ICON_ADJUST_MAP = {
-            "⚙": 2,
-            "🔄": 1,
-            "🗂": 2,
-            "🧩": 2,
-        }
-        icon_y_offset = ICON_ADJUST_MAP.get(icon, default_icon_offset) if icon else 0
-
-        header = tk.Frame(self, bg=bg)
-        header.pack(fill=tk.X, padx=(self.pad_l, self.pad_r), pady=(self.pad_t, 0))
-
-        if icon:
-            icon_box = tk.Frame(header, width=icon_width, bg=bg)
-            icon_box.grid(row=0, column=0, sticky="w")
-            icon_box.grid_propagate(False)
-
-            icon_label = tk.Label(icon_box,
-                                  text=icon,
-                                  font=icon_font,
-                                  bg=bg,
-                                  fg=title_fg)
-            icon_label.pack(anchor="w", pady=(icon_y_offset, 0))
-
-            title_label = tk.Label(header,
-                                   text=title,
-                                   bg=bg,
-                                   fg=title_fg,
-                                   font=title_font)
-            title_label.grid(row=0, column=1, sticky="w")
-            header.columnconfigure(1, weight=1)
-        else:
-            tk.Label(header, text=title, bg=bg, fg=title_fg,
-                     font=title_font).pack(anchor='w')
-
-        self.body = tk.Frame(self, bg=bg)
-        self.body.pack(fill=tk.BOTH, expand=True,
-                       padx=(self.pad_l, self.pad_r),
-                       pady=(inner_gap, self.pad_b))
-
-    def get_body(self):
-        return self.body
 
 # ================== 主启动器 ==================
 class ComfyUILauncherEnhanced:
@@ -361,45 +100,7 @@ class ComfyUILauncherEnhanced:
                 pass
         # 统一工作目录为项目根目录（优先选择包含 ComfyUI/main.py 的目录），并在该根目录同级创建 launcher 日志目录
         try:
-            base_root_candidates = []
-            # 源码环境：launcher 上级目录
-            try:
-                base_root_candidates.append(Path(__file__).resolve().parent.parent)
-            except Exception:
-                pass
-            # PyInstaller 环境资源目录
-            try:
-                from sys import _MEIPASS  # type: ignore
-                if _MEIPASS:
-                    base_root_candidates.append(Path(_MEIPASS))
-            except Exception:
-                pass
-            # EXE 所在目录
-            try:
-                base_root_candidates.append(Path(sys.executable).resolve().parent)
-            except Exception:
-                pass
-            # 当前工作目录作为兜底
-            base_root_candidates.append(Path.cwd())
-            base_root = None
-            # 第一轮：优先选择包含 ComfyUI/main.py 的候选
-            for cand in base_root_candidates:
-                try:
-                    if cand and cand.exists() and (cand / "ComfyUI" / "main.py").exists():
-                        base_root = cand
-                        break
-                except Exception:
-                    pass
-            # 第二轮：没有命中则选择第一个存在的目录
-            if base_root is None:
-                for cand in base_root_candidates:
-                    try:
-                        if cand and cand.exists():
-                            base_root = cand
-                            break
-                    except Exception:
-                        pass
-            base_root = base_root or Path.cwd()
+            base_root = PATHS.resolve_base_root()
             # 缓存根目录，并切换工作目录
             try:
                 self._base_root = base_root
@@ -424,10 +125,11 @@ class ComfyUILauncherEnhanced:
 
         # 基础配置与变量需尽早初始化，避免后续保护性路径检查时出现属性缺失
         try:
-            self.config_file = (Path.cwd() / "launcher" / "config.json").resolve()
+            config_file = (Path.cwd() / "launcher" / "config.json").resolve()
         except Exception:
-            self.config_file = Path("launcher/config.json")
-        self.load_config()
+            config_file = Path("launcher/config.json")
+        self.config_manager = ConfigManager(config_file, self.logger)
+        self.config = self.config_manager.load_config()
         # 根据配置或文件开关切换调试模式与日志级别（优先使用 launcher/is_debug 文件）
         try:
             dbg_cfg = False
@@ -464,9 +166,7 @@ class ComfyUILauncherEnhanced:
         # 允许在任意目录运行：如果未检测到有效的 ComfyUI 路径，则提示用户选择
         def is_valid_comfy_path(p: Path) -> bool:
             try:
-                return p.exists() and (
-                    (p / "main.py").exists() or (p / ".git").exists()
-                )
+                return PATHS.validate_comfy_root(p)
             except Exception:
                 return False
 
@@ -510,35 +210,7 @@ class ComfyUILauncherEnhanced:
             pass
 
         # 解析并固定 Python 可执行路径，避免相对路径在不同工作目录下失效
-        def resolve_python_exec() -> Path:
-            cfg_path = Path(self.config["paths"].get("python_path", "python_embeded/python.exe"))
-            candidates = []
-            # 已是绝对路径
-            if cfg_path.is_absolute():
-                candidates.append(cfg_path)
-            # 相对路径：尝试当前工作目录
-            candidates.append(Path.cwd() / cfg_path)
-            # 启动器目录（launcher 上级）
-            try:
-                app_root = Path(__file__).resolve().parent.parent
-                candidates.append(app_root / cfg_path)
-                candidates.append(app_root / "python_embeded" / "python.exe")
-            except Exception:
-                pass
-            # 以 ComfyUI 路径为基准（ComfyUI 的上级应是根目录）
-            try:
-                candidates.append(Path(comfy_path).resolve().parent / "python_embeded" / "python.exe")
-            except Exception:
-                pass
-            for c in candidates:
-                try:
-                    if c.exists():
-                        return c
-                except Exception:
-                    pass
-            return cfg_path
-
-        py_exec = resolve_python_exec()
+        py_exec = PATHS.resolve_python_exec(comfy_path, self.config["paths"].get("python_path", "python_embeded/python.exe"))
         self.python_exec = str(py_exec)
         # 将解析后的绝对路径写回配置，后续运行更稳健
         try:
@@ -557,29 +229,24 @@ class ComfyUILauncherEnhanced:
             self.config["paths"]["python_path"]
         )
 
+        # 初始化进程管理器
+        self.process_manager = ProcessManager(self)
+
         # 构建界面、启动监控线程并设置关闭事件
         self.build_layout()
-        threading.Thread(target=self.monitor_process, daemon=True).start()
+        threading.Thread(target=self.process_manager.monitor_process, daemon=True).start()
         self.root.protocol("WM_DELETE_WINDOW", self.on_closing)
 
     def apply_pip_proxy_settings(self):
-        """根据当前 PyPI 代理设置更新 python_embeded/pip.ini。
-        将具体写入逻辑委托给 net_utils.update_pip_ini，便于模块化拆分。
-        """
+        """根据当前 PyPI 代理设置更新 python_embeded/pip.ini。"""
         try:
-            try:
-                from .net_utils import update_pip_ini
-            except Exception:
-                # 兼容未作为包导入的场景
-                from net_utils import update_pip_ini
-
             mode = self.pypi_proxy_mode.get() if hasattr(self.pypi_proxy_mode, 'get') else 'none'
             url = (self.pypi_proxy_url.get() or '').strip() if hasattr(self.pypi_proxy_url, 'get') else ''
             pip_proxy = (self.pip_proxy_url.get() or '').strip() if hasattr(self, 'pip_proxy_url') and hasattr(self.pip_proxy_url, 'get') else (
                 (self.config.get('proxy_settings', {}) or {}).get('pip_proxy_url', '')
             )
-
-            update_pip_ini(self.python_exec, mode, url, pip_proxy, getattr(self, 'logger', None))
+            
+            NETUTILS.apply_pip_proxy_settings(self.python_exec, mode, url, pip_proxy, getattr(self, 'logger', None))
         except Exception:
             try:
                 self.logger.exception("应用 PyPI 代理到 pip.ini 时出错")
@@ -602,140 +269,10 @@ class ComfyUILauncherEnhanced:
                     ctypes.windll.shell32.SetCurrentProcessExplicitAppUserModelID("ComfyUILauncher")
             except Exception:
                 pass
-            # 窗口图标：优先使用 rabbit.ico，适配 PyInstaller (sys._MEIPASS) 环境；失败则回退到 rabbit.png
+            # 窗口图标设置委托到 assets 统一处理
             try:
-                # 可选：通过环境变量或文件跳过图标设置，便于快速定位卡顿（抽离到 assets）
-                skip_icons = ASSETS.skip_icons()
-                if skip_icons:
-                    try:
-                        self.logger.info("样式阶段: 跳过窗口图标设置 (skip_icons=%s)", skip_icons)
-                    except Exception:
-                        pass
-                else:
-                    try:
-                        self.logger.info("样式阶段: 准备收集图标候选路径 (assets)")
-                    except Exception:
-                        pass
-                    icon_candidates = ASSETS.icon_candidates_ico()
-                    try:
-                        self.logger.info("样式阶段: ICO候选列表=%s", 
-                                         ", ".join([str(p) for p in icon_candidates]))
-                    except Exception:
-                        pass
-
-                icon_set = False
-                # Windows 上优先启用 .ico 以显示任务栏与标题栏图标；仍保留开关与回退逻辑
-                enable_ico = ASSETS.enable_ico() or (os.name == 'nt')
-                if not skip_icons and enable_ico:
-                    for p in icon_candidates:
-                        if p.exists():
-                            try:
-                                try:
-                                    self.logger.info("样式阶段: 尝试设置窗口图标(iconbitmap)=%s", str(p))
-                                except Exception:
-                                    pass
-                                self.root.iconbitmap(str(p))
-                                icon_set = True
-                                try:
-                                    self.logger.info("样式阶段: iconbitmap 设置成功")
-                                except Exception:
-                                    pass
-                                break
-                            except:
-                                pass
-                else:
-                    try:
-                        self.logger.info("样式阶段: 默认跳过 iconbitmap 设置 (enable_ico=%s)", enable_ico)
-                    except Exception:
-                        pass
-                # 无论是否已设置 ICO，都尝试设置 PNG 以提升缩放质量与一致性
-                if not skip_icons:
-                    png_candidates = ASSETS.icon_candidates_png()
-                    try:
-                        self.logger.info("样式阶段: PNG候选列表=%s", 
-                                         ", ".join([str(p) for p in png_candidates]))
-                    except Exception:
-                        pass
-                    for p in png_candidates:
-                        if p.exists():
-                            try:
-                                try:
-                                    self.logger.info("样式阶段: 尝试设置窗口图标(iconphoto)=%s", str(p))
-                                except Exception:
-                                    pass
-                                self._icon_image = ImageTk.PhotoImage(file=str(p))
-                                self.root.iconphoto(True, self._icon_image)
-                                try:
-                                    self.logger.info("样式阶段: iconphoto 设置成功")
-                                except Exception:
-                                    pass
-                                break
-                            except:
-                                pass
-
-                # Windows 任务栏图标兜底：使用 Win32 WM_SETICON 强制设置大/小图标，避免显示羽毛
-                try:
-                    if os.name == 'nt' and not skip_icons:
-                        # 选取第一个存在的 ICO 作为来源
-                        ico_path = None
-                        for p in icon_candidates:
-                            try:
-                                if p.exists():
-                                    ico_path = str(p)
-                                    break
-                            except Exception:
-                                pass
-                        if ico_path:
-                            try:
-                                WM_SETICON = 0x0080
-                                IMAGE_ICON = 1
-                                ICON_SMALL = 0
-                                ICON_BIG = 1
-                                LR_LOADFROMFILE = 0x00000010
-                                LR_DEFAULTSIZE = 0x00000040
-                                # 通过窗口标题查找 hwnd（需在设置标题后执行）
-                                hwnd = ctypes.windll.user32.FindWindowW(None, self.root.title())
-                                if hwnd:
-                                    hicon = ctypes.windll.user32.LoadImageW(None, ico_path, IMAGE_ICON, 0, 0, LR_LOADFROMFILE | LR_DEFAULTSIZE)
-                                    if hicon:
-                                        ctypes.windll.user32.SendMessageW(hwnd, WM_SETICON, ICON_BIG, hicon)
-                                        ctypes.windll.user32.SendMessageW(hwnd, WM_SETICON, ICON_SMALL, hicon)
-                                        try:
-                                            self.logger.info("样式阶段: Win32 WM_SETICON 已应用到任务栏图标=%s", ico_path)
-                                        except Exception:
-                                            pass
-                            except Exception:
-                                try:
-                                    self.logger.info("样式阶段: Win32 WM_SETICON 应用失败，继续使用 Tk 图标")
-                                except Exception:
-                                    pass
-                except Exception:
-                    pass
-
-                # macOS: 设置 Dock 图标，避免默认的蓝色羽毛（Wish）
-                try:
-                    if sys.platform == 'darwin' and not skip_icons:
-                        try:
-                            from AppKit import NSApplication, NSImage
-                            # 同时尝试 icns 与 png，两者任一存在即可
-                            icn_path = ASSETS.resolve_asset_variants(['rabbit.icns', 'rabbit.png'])
-                            if icn_path and icn_path.exists():
-                                img = NSImage.alloc().initWithContentsOfFile_(str(icn_path))
-                                if img is not None:
-                                    NSApplication.sharedApplication().setApplicationIconImage_(img)
-                                    try:
-                                        self.logger.info("样式阶段: macOS Dock 图标已设置为 %s", str(icn_path))
-                                    except Exception:
-                                        pass
-                        except Exception:
-                            # PyObjC 不可用或设置失败时静默回退为默认图标
-                            try:
-                                self.logger.info("样式阶段: macOS Dock 图标设置失败或 PyObjC 不可用，保持默认图标")
-                            except Exception:
-                                pass
-                except Exception:
-                    pass
-            except:
+                ASSETS.apply_window_icons(self.root, getattr(self, 'logger', None))
+            except Exception:
                 pass
 
             # 安全创建样式并选择可用主题（抽离到 THEME 模块）
@@ -835,101 +372,11 @@ class ComfyUILauncherEnhanced:
         return v
 
     def load_config(self):
-        try:
-            self.logger.info("加载配置文件: %s (exists=%s)", str(self.config_file), self.config_file.exists())
-        except Exception:
-            pass
-        default = {
-            "launch_options": {
-                "default_compute_mode": "gpu",
-                "default_port": "8188",
-                "enable_fast_mode": False,
-                "enable_cors": True,
-                "listen_all": True,
-                "extra_args": ""
-            },
-            "ui_settings": {
-                "window_width": 800,
-                "window_height": 600,
-                "theme": "default",
-                "font_size": 9,
-                "log_max_lines": 1000,
-                "window_size": "500x650"
-            },
-            "paths": {
-                "comfyui_root": ".",
-                "python_embeded": "python_embeded",
-                "custom_nodes": "ComfyUI/custom_nodes",
-                "bat_files_directory": ".",
-                "comfyui_path": "ComfyUI",
-                "python_path": "python_embeded/python.exe",
-                "hf_mirror": "hf-mirror"
-            },
-            "advanced": {
-                "check_environment_changes": True,
-                "show_debug_info": False,
-                "auto_scroll_logs": True,
-                "save_logs": False
-            },
-            "proxy_settings": {
-            "git_proxy_mode": "gh-proxy",
-            "git_proxy_url": "https://gh-proxy.com/",
-            "pypi_proxy_mode": "aliyun",
-            "pypi_proxy_url": "https://mirrors.aliyun.com/pypi/simple/",
-            "hf_mirror_url": "https://hf-mirror.com"
-        }
-        }
-        # 确保配置目录存在
-        try:
-            self.config_file.parent.mkdir(parents=True, exist_ok=True)
-        except Exception:
-            pass
-        if self.config_file.exists():
-            try:
-                self.config = json.load(open(self.config_file, 'r', encoding='utf-8'))
-                try:
-                    self.logger.info("配置读取成功")
-                except Exception:
-                    pass
-            except:
-                self.config = default
-                try:
-                    self.logger.warning("配置读取失败，使用默认值")
-                except Exception:
-                    pass
-        else:
-            # 直接写入默认配置，避免在变量尚未初始化时调用 save_config
-            self.config = default
-            # 在无配置文件时，若根目录存在 ComfyUI 且包含 main.py，则自动设置为 ComfyUI 路径
-            try:
-                app_root = getattr(self, "_base_root", Path(__file__).resolve().parent.parent)
-            except Exception:
-                app_root = Path.cwd()
-            auto_comfy = app_root / "ComfyUI"
-            try:
-                if auto_comfy.exists() and (auto_comfy / "main.py").exists():
-                    self.config["paths"]["comfyui_path"] = str(auto_comfy.resolve())
-                    try:
-                        self.logger.info("检测到本地 ComfyUI 目录，已自动设置路径: %s", str(auto_comfy.resolve()))
-                    except Exception:
-                        pass
-            except Exception:
-                pass
-            try:
-                with open(self.config_file, 'w', encoding='utf-8') as f:
-                    json.dump(self.config, f, indent=2, ensure_ascii=False)
-                try:
-                    self.logger.info("首次创建配置文件并写入默认值")
-                except Exception:
-                    pass
-            except:
-                pass
+        """加载配置 - 委托给 ConfigManager"""
+        self.config = self.config_manager.load_config()
 
     def save_config(self):
-        try:
-            self.logger.info("保存配置到: %s", str(self.config_file))
-        except Exception:
-            pass
+        """保存配置 - 委托给 ConfigManager"""
         # 保护性获取变量，避免在初始化早期因为变量不存在而报错
         def _get(var, default):
             try:
@@ -937,29 +384,33 @@ class ComfyUILauncherEnhanced:
             except Exception:
                 return default
 
-        self.config["launch_options"] = {
-            "default_compute_mode": _get(self.compute_mode, "gpu"),
-            "default_port": _get(self.custom_port, "8188"),
-            "enable_fast_mode": _get(self.use_fast_mode, False),
-            "enable_cors": _get(self.enable_cors, True),
-            "listen_all": _get(self.listen_all, True),
-            "extra_args": _get(self.extra_launch_args, ""),
-        }
+        # 更新配置数据
+        self.config_manager.update_launch_options(
+            default_compute_mode=_get(self.compute_mode, "gpu"),
+            default_port=_get(self.custom_port, "8188"),
+            enable_fast_mode=_get(self.use_fast_mode, False),
+            enable_cors=_get(self.enable_cors, True),
+            listen_all=_get(self.listen_all, True),
+            extra_args=_get(self.extra_launch_args, "")
+        )
+        
         # 记录镜像选项（模式与 URL）
-        self.config["paths"]["hf_mirror"] = _get(self.selected_hf_mirror, "hf-mirror")
+        self.config_manager.set("paths.hf_mirror", _get(self.selected_hf_mirror, "hf-mirror"))
+        
         # 保存代理设置
-        ps = self.config.setdefault("proxy_settings", {})
         try:
-            ps["pypi_proxy_mode"] = _get(self.pypi_proxy_mode, "aliyun")
-            ps["pypi_proxy_url"] = _get(self.pypi_proxy_url, "https://mirrors.aliyun.com/pypi/simple/")
-            ps["hf_mirror_url"] = _get(self.hf_mirror_url, "https://hf-mirror.com")
+            self.config_manager.update_proxy_settings(
+                pypi_proxy_mode=_get(self.pypi_proxy_mode, "aliyun"),
+                pypi_proxy_url=_get(self.pypi_proxy_url, "https://mirrors.aliyun.com/pypi/simple/"),
+                hf_mirror_url=_get(self.hf_mirror_url, "https://hf-mirror.com")
+            )
         except Exception:
             pass
-        json.dump(self.config, open(self.config_file, 'w', encoding='utf-8'), indent=2, ensure_ascii=False)
-        try:
-            self.logger.info("配置保存完成")
-        except Exception:
-            pass
+            
+        # 保存到文件
+        self.config_manager.save_config()
+        # 同步本地配置引用
+        self.config = self.config_manager.get_config()
 
     def load_settings(self):
         opt = self.config.get("launch_options", {})
@@ -1168,25 +619,19 @@ class ComfyUILauncherEnhanced:
     def _update_path_label_elide(self):
         """根据可用宽度将路径文本进行中间截断，避免顶栏按钮被挤出。"""
         try:
-            full = getattr(self, "_path_full_text", None) or (self.path_value_var.get() if hasattr(self, 'path_value_var') else "")
-            # 计算可用于显示路径的像素宽度：顶栏总宽度 - 标题宽度 - 按钮宽度 - 余量
-            top_w = self._path_top_bar.winfo_width() if hasattr(self, '_path_top_bar') else 0
-            title_w = self.path_label_title.winfo_width() if hasattr(self, 'path_label_title') else 0
-            btn_w = self.reset_root_btn.winfo_width() if hasattr(self, 'reset_root_btn') else 0
-            # 预留边距与间距（标题右侧8px，按钮左侧12px等），综合设置为 40px
-            available_px = max(60, top_w - title_w - btn_w - 40)
-            # 根据字体估算最大字符数（使用“M”作宽度参考）
-            font_obj = getattr(self, '_path_label_font', None)
-            if font_obj:
-                m_w = max(7, int(font_obj.measure("M")))
-            else:
-                m_w = 9
-            max_chars = max(10, available_px // m_w)
-            self.path_value_var.set(self._truncate_middle(full, max_chars))
+            try:
+                from ui import helpers as UIHELP
+            except Exception:
+                # 兼容未作为包导入的场景
+                import ui.helpers as UIHELP  # type: ignore
+            elided = UIHELP.compute_elided_path_text(self)
+            if hasattr(self, 'path_value_var'):
+                self.path_value_var.set(elided)
         except Exception:
             # 回退：不截断
             try:
                 if hasattr(self, 'path_value_var'):
+                    full = getattr(self, "_path_full_text", None) or (self.path_value_var.get() if hasattr(self, 'path_value_var') else "")
                     self.path_value_var.set(full)
             except Exception:
                 pass
@@ -1208,665 +653,52 @@ class ComfyUILauncherEnhanced:
 
     # ---------- 启动逻辑 ----------
     def toggle_comfyui(self):
-        # 防抖与状态保护：启动进行中时忽略重复点击
-        try:
-            if getattr(self, '_launching', False):
-                try:
-                    self.logger.warning("忽略重复点击：正在启动中")
-                except Exception:
-                    pass
-                return
-        except Exception:
-            pass
-        try:
-            self.logger.info("点击一键启动/停止")
-        except Exception:
-            pass
-        # 判断是否已有运行中的 ComfyUI（包括外部启动的同端口实例）
-        running = False
-        try:
-            if getattr(self, "comfyui_process", None) and self.comfyui_process.poll() is None:
-                running = True
-            else:
-                running = self._is_http_reachable()
-        except Exception:
-            running = False
-        if running:
-            self.stop_comfyui()
-        else:
-            # 启动前追加端口占用检测：若任何进程占用目标端口，则避免重复启动
-            try:
-                port = (self.custom_port.get() or "8188").strip()
-                pids = self._find_pids_by_port_safe(port)
-            except Exception:
-                pids = []
-            if pids:
-                try:
-                    from tkinter import messagebox
-                    # 若端口被占用，优先提示并提供直接打开网页的选项；默认取消启动
-                    proceed_open = messagebox.askyesno(
-                        "端口被占用",
-                        f"检测到端口 {port} 已被占用 (PID: {', '.join(map(str, pids))}).\n\n是否直接打开网页而不启动新的实例?"
-                    )
-                except Exception:
-                    proceed_open = True
-                if proceed_open:
-                    try:
-                        self.open_comfyui_web()
-                    except Exception:
-                        pass
-                    return
-                else:
-                    # 用户选择不直接打开网页：提供停止旧实例并启动新实例的选项
-                    try:
-                        restart = messagebox.askyesno(
-                            "端口被占用",
-                            "是否停止现有实例并用当前配置启动新的 ComfyUI?"
-                        )
-                    except Exception:
-                        restart = False
-                    if restart:
-                        try:
-                            self.stop_all_comfyui_instances()
-                        except Exception:
-                            pass
-                        # 尝试启动新的实例
-                        self.start_comfyui()
-                        return
-                    else:
-                        # 取消启动，维持按钮状态为“启动”
-                        try:
-                            self.logger.warning("端口占用，用户取消重启: %s", port)
-                        except Exception:
-                            pass
-                        return
-            # 未占用则正常启动
-            self.start_comfyui()
+        # 委托到进程管理器统一处理
+        self.process_manager.toggle_comfyui()
 
     def start_comfyui(self):
-        try:
-            comfy_root = Path(self.config["paths"]["comfyui_path"]).resolve()
-            py = Path(self.config["paths"]["python_path"]).resolve()
-            # 若 Python 路径与当前 ComfyUI 根目录不一致，且新根目录下存在 python_embeded，则自动切换
-            try:
-                py_root = py.parent.parent.resolve()
-            except Exception:
-                py_root = None
-            candidate_py = comfy_root.parent / "python_embeded" / ("python.exe" if os.name == 'nt' else "python")
-            if (not py.exists()) or (py_root and py_root != comfy_root.parent.resolve() and candidate_py.exists()):
-                py = candidate_py
-                try:
-                    self.config["paths"]["python_path"] = str(py)
-                    # 立即保存，避免后续启动仍读到旧路径
-                    self.save_config()
-                    try:
-                        self.logger.info("自动切换 Python 路径为当前根目录: %s", py)
-                    except Exception:
-                        pass
-                except Exception:
-                    pass
-            main = comfy_root / "main.py"
-            if not py.exists():
-                messagebox.showerror("错误", f"Python不存在: {py}")
-                return
-            if not main.exists():
-                messagebox.showerror("错误", f"主文件不存在: {main}")
-                return
-            cmd = [str(py), "-s", str(main), "--windows-standalone-build"]
-            if self.compute_mode.get() == "cpu":
-                cmd.append("--cpu")
-            if self.use_fast_mode.get():
-                cmd.extend(["--fast"])
-            if self.listen_all.get():
-                cmd.extend(["--listen", "0.0.0.0"])
-            port = self.custom_port.get().strip()
-            if port and port != "8188":
-                cmd.extend(["--port", port])
-            if self.enable_cors.get():
-                cmd.extend(["--enable-cors-header", "*"])
-            # 追加自定义额外参数（支持引号与空格）
-            extra = (self.extra_launch_args.get() or "").strip()
-            if extra:
-                try:
-                    extra_tokens = shlex.split(extra)
-                except Exception:
-                    extra_tokens = extra.split()
-                cmd.extend(extra_tokens)
-            try:
-                self.logger.info("启动命令: %s", " ".join(cmd))
-                if extra:
-                    self.logger.info("附加参数: %s", extra)
-            except Exception:
-                pass
-            env = os.environ.copy()
-            sel = self.selected_hf_mirror.get()
-            if sel != "不使用镜像":
-                # 使用输入框的 URL；当选择“hf-mirror”时已自动填充默认值
-                endpoint = (self.hf_mirror_url.get() or "").strip()
-                if endpoint:
-                    env["HF_ENDPOINT"] = endpoint
-            try:
-                self.logger.info("环境变量(HF_ENDPOINT): %s", env.get("HF_ENDPOINT", ""))
-            except Exception:
-                pass
-            # 若设置了 GitHub 代理，则注入 GITHUB_ENDPOINT 环境变量
-            try:
-                vm = getattr(self, 'version_manager', None)
-                if vm and vm.proxy_mode_var.get() in ('gh-proxy', 'custom'):
-                    base = (vm.proxy_url_var.get() or '').strip()
-                    if base:
-                        if not base.endswith('/'):
-                            base += '/'
-                        env["GITHUB_ENDPOINT"] = f"{base}https://github.com"
-            except Exception:
-                pass
-            try:
-                self.logger.info("环境变量(GITHUB_ENDPOINT): %s", env.get("GITHUB_ENDPOINT", ""))
-            except Exception:
-                pass
-            # 为 GitPython 指定 Git 可执行文件，优先使用整合包的便携 Git
-            try:
-                git_cmd = None
-                try:
-                    # 若之前已解析过，直接使用；否则尝试解析
-                    git_cmd = self.git_path if getattr(self, 'git_path', None) else None
-                except Exception:
-                    git_cmd = None
-                if not git_cmd:
-                    try:
-                        git_cmd, _src = self.resolve_git()
-                    except Exception:
-                        git_cmd = None
-                if git_cmd and git_cmd != 'git':
-                    # 设置 GitPython 专用环境变量
-                    env["GIT_PYTHON_GIT_EXECUTABLE"] = str(git_cmd)
-                    # 兼容某些脚本直接调用 git：将便携 Git 的 bin 目录置于 PATH 前侧
-                    try:
-                        git_bin = str(Path(git_cmd).resolve().parent)
-                        env["PATH"] = git_bin + os.pathsep + env.get("PATH", "")
-                    except Exception:
-                        pass
-                try:
-                    self.logger.info("环境变量(GIT_PYTHON_GIT_EXECUTABLE): %s", env.get("GIT_PYTHON_GIT_EXECUTABLE", ""))
-                except Exception:
-                    pass
-            except Exception:
-                pass
-            self.big_btn.set_state("starting")
-            self.big_btn.set_text("启动中…")
-            self._launching = True
-
-            def worker():
-                try:
-                    # 始终以当前配置的 ComfyUI 根目录作为工作目录运行
-                    try:
-                        run_cwd = str(Path(self.config["paths"]["comfyui_path"]).resolve())
-                    except Exception:
-                        run_cwd = os.getcwd()
-                    try:
-                        self.logger.info("启动工作目录(cwd): %s", run_cwd)
-                    except Exception:
-                        pass
-                    if os.name == 'nt':
-                        # 始终显示控制台窗口
-                        self.comfyui_process = subprocess.Popen(
-                            cmd, env=env, cwd=run_cwd,
-                            creationflags=subprocess.CREATE_NEW_CONSOLE,
-                        )
-                    else:
-                        self.comfyui_process = subprocess.Popen(
-                            cmd, env=env, cwd=run_cwd
-                        )
-                    threading.Event().wait(2)
-                    if self.comfyui_process.poll() is None:
-                        self.root.after(0, self.on_start_success)
-                    else:
-                        self.root.after(0, lambda: self.on_start_failed("进程退出"))
-                except Exception as e:
-                    msg = str(e)
-                    # 捕获当前异常信息到默认参数，避免闭包中变量未绑定问题
-                    self.root.after(0, lambda m=msg: self.on_start_failed(m))
-
-            threading.Thread(target=worker, daemon=True).start()
-        except Exception as e:
-            msg = str(e)
-            try:
-                messagebox.showerror("启动失败", msg)
-            except Exception:
-                pass
-            # 同样使用默认参数绑定，避免在 after 回调中出现自由变量问题
-            self.on_start_failed(msg)
+        # 委托到进程管理器统一处理
+        self.process_manager.start_comfyui()
 
     def on_start_success(self):
-        self._launching = False
-        try:
-            self.logger.info("ComfyUI 启动成功")
-        except Exception:
-            pass
-        self.big_btn.set_state("running")
-        self.big_btn.set_text("停止")
+        # 委托到进程管理器统一处理
+        self.process_manager.on_start_success()
 
     def on_start_failed(self, error):
-        self._launching = False
-        try:
-            self.logger.error("ComfyUI 启动失败: %s", error)
-        except Exception:
-            pass
-        self.big_btn.set_state("idle")
-        self.big_btn.set_text("一键启动")
-        self.comfyui_process = None
+        # 委托到进程管理器统一处理
+        self.process_manager.on_start_failed(error)
 
     def stop_comfyui(self):
-        try:
-            self.logger.info("用户点击停止：开始关闭 ComfyUI")
-        except Exception:
-            pass
-        # 停止过程中也避免重复点击触发启动
-        self._launching = False
-        killed = False
-        # 1) 优先停止当前已跟踪的进程
-        if getattr(self, "comfyui_process", None) and self.comfyui_process.poll() is None:
-            try:
-                self.logger.info("检测到已跟踪进程，PID=%s，按平台策略终止", str(self.comfyui_process.pid))
-            except Exception:
-                pass
-            pid_str = str(self.comfyui_process.pid)
-            if os.name == 'nt':
-                # Windows：按序尝试 /T、/T /F，然后回退到 terminate/kill，避免残留控制台窗口
-                try:
-                    r_soft = run_hidden(["taskkill", "/PID", pid_str, "/T"], capture_output=True, text=True)
-                    try:
-                        self.logger.info("Windows 停止阶段: taskkill /T 返回码=%s", str(r_soft.returncode))
-                    except Exception:
-                        pass
-                    if r_soft.returncode == 0:
-                        killed = True
-                        try:
-                            self.logger.info("Windows 停止阶段: 已通过 taskkill /T 终止 PID=%s (含控制台)", pid_str)
-                        except Exception:
-                            pass
-                    else:
-                        r_hard = run_hidden(["taskkill", "/PID", pid_str, "/T", "/F"], capture_output=True, text=True)
-                        try:
-                            self.logger.info("Windows 停止阶段: taskkill /T /F 返回码=%s", str(r_hard.returncode))
-                        except Exception:
-                            pass
-                        if r_hard.returncode == 0:
-                            killed = True
-                            try:
-                                self.logger.info("Windows 停止阶段: 已通过 taskkill /T /F 强制终止 PID=%s", pid_str)
-                            except Exception:
-                                pass
-                        else:
-                            # taskkill 未能终止，改用 Popen API
-                            try:
-                                self.comfyui_process.terminate()
-                                self.comfyui_process.wait(timeout=5)
-                                killed = True
-                                try:
-                                    self.logger.warning("Windows 停止阶段: taskkill 失败，已回退到 terminate+wait，PID=%s", pid_str)
-                                except Exception:
-                                    pass
-                            except subprocess.TimeoutExpired:
-                                try:
-                                    self.comfyui_process.kill()
-                                    killed = True
-                                    try:
-                                        self.logger.warning("Windows 停止阶段: terminate 超时，已 kill，PID=%s", pid_str)
-                                    except Exception:
-                                        pass
-                                except Exception as e3:
-                                    try:
-                                        self.logger.error("Windows 停止阶段: 回退强制结束失败: %s", str(e3))
-                                    except Exception:
-                                        pass
-                                    messagebox.showerror("错误", f"停止失败: {e3}")
-                except Exception as e:
-                    try:
-                        self.logger.error("Windows 停止阶段: taskkill 执行异常: %s，回退到 terminate/kill", str(e))
-                    except Exception:
-                        pass
-                    try:
-                        self.comfyui_process.terminate()
-                        self.comfyui_process.wait(timeout=5)
-                        killed = True
-                        try:
-                            self.logger.warning("Windows 停止阶段: 已回退到 terminate+wait，PID=%s", pid_str)
-                        except Exception:
-                            pass
-                    except subprocess.TimeoutExpired:
-                        try:
-                            self.comfyui_process.kill()
-                            killed = True
-                            try:
-                                self.logger.warning("Windows 停止阶段: 回退 terminate 超时，已 kill，PID=%s", pid_str)
-                            except Exception:
-                                pass
-                        except Exception as e2:
-                            try:
-                                self.logger.error("Windows 停止阶段: 回退强制结束失败: %s", str(e2))
-                            except Exception:
-                                pass
-                            messagebox.showerror("错误", f"停止失败: {e2}")
-            else:
-                # 非 Windows：沿用 terminate -> wait -> kill
-                try:
-                    self.comfyui_process.terminate()
-                    self.comfyui_process.wait(timeout=5)
-                    killed = True
-                    try:
-                        self.logger.info("已终止跟踪进程，PID=%s", pid_str)
-                    except Exception:
-                        pass
-                except subprocess.TimeoutExpired:
-                    try:
-                        self.comfyui_process.kill()
-                        killed = True
-                        try:
-                            self.logger.warning("优雅终止超时，已强制结束，PID=%s", pid_str)
-                        except Exception:
-                            pass
-                    except Exception as e:
-                        try:
-                            self.logger.error("强制结束失败: %s", str(e))
-                        except Exception:
-                            pass
-                        messagebox.showerror("错误", f"停止失败: {e}")
-        else:
-            # 2) 未跟踪到句柄：根据端口查找并强制终止对应进程
-            port = (self.custom_port.get() or "8188").strip()
-            pids = self._find_pids_by_port_safe(port)
-            try:
-                self.logger.info("未跟踪到句柄；端口 %s 的PID列表: %s", port, ", ".join(map(str, pids)) or "<空>")
-            except Exception:
-                pass
-            if pids:
-                try:
-                    self._kill_pids(pids)
-                    killed = True
-                    try:
-                        self.logger.info("已强制终止端口 %s 上的相关进程: %s", port, ", ".join(map(str, pids)))
-                    except Exception:
-                        pass
-                except Exception as e:
-                    try:
-                        self.logger.error("强制停止失败: %s", str(e))
-                    except Exception:
-                        pass
-                    messagebox.showerror("错误", f"强制停止失败: {e}")
-            else:
-                try:
-                    self.logger.warning("未找到端口 %s 上运行的进程，可能已外部关闭或端口设置不一致", port)
-                except Exception:
-                    pass
-                messagebox.showwarning("警告", f"未找到端口 {port} 上运行的进程")
-
-        # 根据结果刷新按钮
-        if killed:
-            self.big_btn.set_state("idle")
-            self.big_btn.set_text("一键启动")
-            self.comfyui_process = None
-            try:
-                self.logger.info("停止流程完成：已关闭 ComfyUI")
-            except Exception:
-                pass
-        else:
-            # 若仍被判定为运行中，保持“停止”以避免误导
-            try:
-                reachable = self._is_http_reachable()
-                try:
-                    self.logger.warning("停止未成功：端口可达=%s。可能原因：外部启动的实例、权限不足、端口配置不同。", str(reachable))
-                except Exception:
-                    pass
-                if reachable:
-                    self.big_btn.set_state("running")
-                    self.big_btn.set_text("停止")
-                else:
-                    self.big_btn.set_state("idle")
-                    self.big_btn.set_text("一键启动")
-            except Exception:
-                self.big_btn.set_state("idle")
-                self.big_btn.set_text("一键启动")
+        # 委托到进程管理器统一处理
+        self.process_manager.stop_comfyui()
 
     def _find_pids_by_port_safe(self, port_str):
-        # 解析端口并通过 psutil 或 netstat 查找 PID 列表
-        try:
-            port = int(port_str)
-        except Exception:
-            return []
-        # 优先使用 psutil
-        try:
-            import psutil  # type: ignore
-            pids = set()
-            try:
-                for conn in psutil.net_connections(kind='inet'):
-                    try:
-                        if conn.laddr and conn.laddr.port == port:
-                            if conn.status in ('LISTEN', 'ESTABLISHED'):  # 监听或连接中
-                                if conn.pid:
-                                    pids.add(conn.pid)
-                    except Exception:
-                        pass
-            except Exception:
-                pass
-            if pids:
-                return list(pids)
-        except Exception:
-            pass
-        # 回退到 netstat 解析（Windows）
-        try:
-            import subprocess
-            import re
-            cmd = ["netstat", "-ano"]
-            # 使用系统首选编码并忽略解码错误，且隐藏子进程窗口
-            preferred_enc = locale.getpreferredencoding(False) or "utf-8"
-            r = run_hidden(
-                cmd,
-                capture_output=True,
-                text=True,
-                encoding=preferred_enc,
-                errors="ignore",
-            )
-            if r.returncode == 0 and r.stdout:
-                pids = set()
-                # 只认 TCP 的 LISTENING 或 ESTABLISHED，避免 TIME_WAIT/Close 等状态误判
-                pattern_tcp = re.compile(
-                    rf"^\s*TCP\s+\S+:{port}\s+\S+:\S+\s+(LISTENING|ESTABLISHED)\s+(\d+)\s*$",
-                    re.IGNORECASE,
-                )
-                for line in r.stdout.splitlines():
-                    m = pattern_tcp.match(line)
-                    if m:
-                        try:
-                            pids.add(int(m.group(2)))
-                        except Exception:
-                            pass
-                # 不再统计 UDP（ComfyUI 使用 HTTP/TCP），以减少误判
-                return list(pids)
-        except Exception:
-            pass
-        return []
+        # 委托到进程管理器统一处理
+        return self.process_manager._find_pids_by_port_safe(port_str)
 
     def _is_comfyui_pid(self, pid: int) -> bool:
-        # 通过 cmdline/exe/cwd 多重特征判断是否为 ComfyUI 相关进程
-        try:
-            import psutil  # type: ignore
-            try:
-                p = psutil.Process(pid)
-                cmdline = " ".join(p.cmdline()).lower()
-            except Exception:
-                cmdline = ""
-            try:
-                exe = (p.exe() or "").lower()
-            except Exception:
-                exe = ""
-            try:
-                cwd = (p.cwd() or "").lower()
-            except Exception:
-                cwd = ""
-            # 关键特征：main.py、comfyui 字样。移除配置路径匹配，避免因路径不一致误判
-            if ("main.py" in cmdline and ("comfyui" in cmdline or "windows-standalone-build" in cmdline)):
-                return True
-            if ("comfyui" in cmdline or "comfyui" in exe or "comfyui" in cwd):
-                return True
-        except Exception:
-            pass
-
-        # 回退：使用 wmic 获取命令行（在部分 Windows 环境可用）
-        if os.name == 'nt':
-            try:
-                # 首次检测 wmic 是否存在并缓存结果；不存在则不再尝试，避免日志噪音
-                try:
-                    if getattr(self, "_wmic_available", None) is None:
-                        self._wmic_available = bool(shutil.which("wmic"))
-                except Exception:
-                    self._wmic_available = False
-
-                if self._wmic_available:
-                    comfy_root = str(Path(self.config["paths"]["comfyui_path"]).resolve()).lower()
-                    preferred_enc = locale.getpreferredencoding(False) or "utf-8"
-                    try:
-                        r = run_hidden([
-                            "wmic", "process", "where", f"ProcessId={pid}", "get", "CommandLine", "/format:list"
-                        ], capture_output=True, text=True, encoding=preferred_enc, errors="ignore")
-                        if r.returncode == 0 and r.stdout:
-                            out = r.stdout.lower()
-                            if ("comfyui" in out) or ("main.py" in out) or (comfy_root and comfy_root in out):
-                                return True
-                    except FileNotFoundError:
-                        # 运行期确认 wmic 不存在，则标记为不可用，后续不再尝试
-                        self._wmic_available = False
-                    except Exception:
-                        pass
-            except Exception:
-                pass
-
-        return False
+        # 委托到进程管理器统一处理
+        return self.process_manager._is_comfyui_pid(pid)
 
     def _kill_pids(self, pids):
-        # 优先使用 psutil 优雅终止，失败则回退到 taskkill
-        try:
-            self.logger.info("准备终止进程列表: %s", ", ".join(map(str, pids)))
-        except Exception:
-            pass
-        killed_any = False
-        try:
-            import psutil  # type: ignore
-            for pid in pids:
-                try:
-                    p = psutil.Process(pid)
-                    p.terminate()
-                    try:
-                        self.logger.info("发送terminate信号: PID=%s", str(pid))
-                    except Exception:
-                        pass
-                except Exception:
-                    pass
-            try:
-                psutil.wait_procs([psutil.Process(pid) for pid in pids], timeout=3)
-                killed_any = True
-                try:
-                    self.logger.info("psutil 等待结束：已终止部分或全部进程")
-                except Exception:
-                    pass
-            except Exception:
-                pass
-        except Exception:
-            pass
-        # 对未结束的进程使用 taskkill 强制终止（Windows）
-        if os.name == 'nt':
-            try:
-                for pid in pids:
-                    run_hidden(["taskkill", "/PID", str(pid), "/T", "/F"], capture_output=True, text=True)
-                killed_any = True
-                try:
-                    self.logger.info("taskkill 强制终止：%s", ", ".join(map(str, pids)))
-                except Exception:
-                    pass
-            except Exception:
-                pass
-        if not killed_any:
-            try:
-                self.logger.error("无法终止目标进程：%s", ", ".join(map(str, pids)))
-            except Exception:
-                pass
-            raise RuntimeError("无法终止目标进程")
+        # 委托到进程管理器统一处理
+        return self.process_manager._kill_pids(pids)
 
     def _is_http_reachable(self) -> bool:
-        """运行探测：优先使用 TCP 直连判断端口监听，其次回退到进程/端口解析。
-
-        - 首选尝试 `socket.create_connection((127.0.0.1, port))`，成功即认为“运行中”。
-        - 若直连失败，回退到 `_find_pids_by_port_safe` 的 psutil/netstat 解析。
-        """
-        try:
-            port_str = (self.custom_port.get() or "8188").strip()
-            port = int(port_str)
-        except Exception:
-            return False
-
-        # 首选：TCP 直连判断监听
-        try:
-            import socket
-            with socket.create_connection(("127.0.0.1", port), timeout=0.4):
-                return True
-        except Exception:
-            pass
-
-        # 回退：端口对应的 PID 列表（严格的 TCP 状态筛选已在 netstat 解析内实现）
-        try:
-            pids = self._find_pids_by_port_safe(port_str)
-            return bool(pids)
-        except Exception:
-            return False
+        # 委托到进程管理器统一处理
+        return self.process_manager._is_http_reachable()
 
     def _refresh_running_status(self):
-        # 根据进程与端口探测结果统一刷新按钮状态
-        try:
-            running = False
-            if getattr(self, "comfyui_process", None) and self.comfyui_process.poll() is None:
-                running = True
-            else:
-                running = self._is_http_reachable()
-            if running:
-                self.big_btn.set_state("running")
-                self.big_btn.set_text("停止")
-            else:
-                self.big_btn.set_state("idle")
-                self.big_btn.set_text("一键启动")
-        except Exception:
-            pass
+        # 委托到进程管理器统一处理
+        return self.process_manager._refresh_running_status()
 
     def monitor_process(self):
-        while True:
-            try:
-                # 若处于关闭流程，则停止监控循环，避免销毁窗口前的 UI 冲突
-                if getattr(self, "_shutting_down", False):
-                    break
-                # 进程结束时，置空句柄并根据端口探测决定按钮显示
-                if getattr(self, "comfyui_process", None) and self.comfyui_process.poll() is not None:
-                    self.comfyui_process = None
-                self.root.after(0, self._refresh_running_status)
-                threading.Event().wait(2)
-            except:
-                break
+        # 委托到进程管理器统一处理
+        return self.process_manager.monitor_process()
 
     def on_process_ended(self):
-        try:
-            self.logger.info("ComfyUI 进程结束")
-        except Exception:
-            pass
-        self.comfyui_process = None
-        # 根据端口探测决定显示“停止”或“一键启动”
-        try:
-            if self._is_http_reachable():
-                self.big_btn.set_state("running")
-                self.big_btn.set_text("停止")
-            else:
-                self.big_btn.set_state("idle")
-                self.big_btn.set_text("一键启动")
-        except Exception:
-            self.big_btn.set_state("idle")
-            self.big_btn.set_text("一键启动")
+        # 委托到进程管理器统一处理
+        return self.process_manager.on_process_ended()
 
     # ---------- 目录 ----------
     def _open_dir(self, path: Path):
@@ -2192,92 +1024,23 @@ class ComfyUILauncherEnhanced:
                 # 前端版本仅在需要时查询：'all' 或显式前端
                 if scope == "all" or scope == "front_only" or (scope == "selected" and self.update_frontend_var.get()):
                     try:
-                        # 优先使用 python -m pip
-                        try:
-                            self.logger.info("操作pip: 仅查询 comfyui-frontend-package 版本（不会安装/更新；python -m pip）")
-                        except Exception:
-                            pass
-                        r = run_hidden([self.python_exec, "-m", "pip", "show", "comfyui-frontend-package"],
-                                           capture_output=True, text=True, timeout=10)
-                        if r.returncode == 0:
-                            for line in r.stdout.splitlines():
-                                if line.startswith("Version:"):
-                                    ver = "v" + line.split(":")[1].strip()
-                                    self.root.after(0, lambda v=ver: self.frontend_version.set(v))
-                                    break
-                            else:
-                                self.root.after(0, lambda: self.frontend_version.set("未安装"))
+                        ver = PIPUTILS.get_package_version(self.python_exec, "comfyui-frontend-package", logger=self.logger)
+                        if ver:
+                            self.root.after(0, lambda v=ver: self.frontend_version.set(v))
                         else:
-                            # 备用：直接调用 Scripts\pip.exe
-                            try:
-                                pip_exe = Path(self.python_exec).resolve().parent.parent / "Scripts" / "pip.exe"
-                                if pip_exe.exists():
-                                    try:
-                                        self.logger.info("操作pip: 仅查询 comfyui-frontend-package 版本（不会安装/更新；pip.exe）")
-                                    except Exception:
-                                        pass
-                                    r2 = run_hidden([str(pip_exe), "show", "comfyui-frontend-package"],
-                                                    capture_output=True, text=True, timeout=10)
-                                    if r2.returncode == 0:
-                                        for line in r2.stdout.splitlines():
-                                            if line.startswith("Version:"):
-                                                ver = "v" + line.split(":")[1].strip()
-                                                self.root.after(0, lambda v=ver: self.frontend_version.set(v))
-                                                break
-                                        else:
-                                            self.root.after(0, lambda: self.frontend_version.set("未安装"))
-                                    else:
-                                        self.root.after(0, lambda: self.frontend_version.set("未安装"))
-                                else:
-                                    self.root.after(0, lambda: self.frontend_version.set("未安装"))
-                            except:
-                                self.root.after(0, lambda: self.frontend_version.set("未安装"))
-                    except:
+                            self.root.after(0, lambda: self.frontend_version.set("未安装"))
+                    except Exception:
                         self.root.after(0, lambda: self.frontend_version.set("获取失败"))
 
                 # 模板库版本仅在需要时查询：'all' 或显式模板库
                 if scope == "all" or scope == "template_only" or (scope == "selected" and self.update_template_var.get()):
                     try:
-                        try:
-                            self.logger.info("操作pip: 仅查询 comfyui-workflow-templates 版本（不会安装/更新；python -m pip）")
-                        except Exception:
-                            pass
-                        r = run_hidden([self.python_exec, "-m", "pip", "show", "comfyui-workflow-templates"],
-                                           capture_output=True, text=True, timeout=10)
-                        if r.returncode == 0:
-                            for line in r.stdout.splitlines():
-                                if line.startswith("Version:"):
-                                    ver = "v" + line.split(":")[1].strip()
-                                    self.root.after(0, lambda v=ver: self.template_version.set(v))
-                                    break
-                            else:
-                                self.root.after(0, lambda: self.template_version.set("未安装"))
+                        ver = PIPUTILS.get_package_version(self.python_exec, "comfyui-workflow-templates", logger=self.logger)
+                        if ver:
+                            self.root.after(0, lambda v=ver: self.template_version.set(v))
                         else:
-                            # 备用：直接调用 Scripts\pip.exe
-                            try:
-                                pip_exe = Path(self.python_exec).resolve().parent.parent / "Scripts" / "pip.exe"
-                                if pip_exe.exists():
-                                    try:
-                                        self.logger.info("操作pip: 仅查询 comfyui-workflow-templates 版本（不会安装/更新；pip.exe）")
-                                    except Exception:
-                                        pass
-                                    r2 = run_hidden([str(pip_exe), "show", "comfyui-workflow-templates"],
-                                                    capture_output=True, text=True, timeout=10)
-                                    if r2.returncode == 0:
-                                        for line in r2.stdout.splitlines():
-                                            if line.startswith("Version:"):
-                                                ver = "v" + line.split(":")[1].strip()
-                                                self.root.after(0, lambda v=ver: self.template_version.set(v))
-                                                break
-                                        else:
-                                            self.root.after(0, lambda: self.template_version.set("未安装"))
-                                    else:
-                                        self.root.after(0, lambda: self.template_version.set("未安装"))
-                                else:
-                                    self.root.after(0, lambda: self.template_version.set("未安装"))
-                            except:
-                                self.root.after(0, lambda: self.template_version.set("未安装"))
-                    except:
+                            self.root.after(0, lambda: self.template_version.set("未安装"))
+                    except Exception:
                         self.root.after(0, lambda: self.template_version.set("获取失败"))
 
                 # 最后刷新内核版本：内核较慢，置于末尾以提升整体响应
@@ -2473,8 +1236,9 @@ class ComfyUILauncherEnhanced:
         threading.Thread(target=worker, daemon=True).start()
 
     def update_frontend(self, notify: bool = True):
-        # 使用 PyPI 代理更新前端包 comfyui-frontend-package
+        """使用 pip_utils 更新前端包 comfyui-frontend-package"""
         try:
+            # 获取 PyPI 镜像配置
             idx = None
             mode = self.pypi_proxy_mode.get()
             if mode == 'aliyun':
@@ -2483,57 +1247,48 @@ class ComfyUILauncherEnhanced:
                 u = (self.pypi_proxy_url.get() or '').strip()
                 if u:
                     idx = u
-            # 优先使用嵌入的 pip
-            pip_exe = Path(self.python_exec).resolve().parent.parent / "Scripts" / "pip.exe"
-            cmd = [str(pip_exe if pip_exe.exists() else self.python_exec), "-m", "pip", "install", "-U", "comfyui-frontend-package"]
-            if idx:
-                cmd.extend(["-i", idx])
+            
+            # 使用 pip_utils 进行安装/更新
+            result = PIPUTILS.install_or_update_package(
+                "comfyui-frontend-package",
+                self.python_exec,
+                index_url=idx,
+                upgrade=True,
+                logger=self.logger
+            )
+            
+            if notify and result["success"]:
+                def _notify():
+                    try:
+                        if result["updated"]:
+                            version_text = f"（v{result['version']}）" if result['version'] else ""
+                            messagebox.showinfo("完成", f"前端已更新到最新版本{version_text}")
+                        elif result["up_to_date"]:
+                            version_text = f"（v{result['version']}）" if result['version'] else ""
+                            messagebox.showinfo("完成", f"前端已是最新，无需更新{version_text}")
+                        else:
+                            messagebox.showinfo("完成", "前端更新流程完成（请查看日志确认是否发生变更）")
+                    except Exception:
+                        pass
+                self.root.after(0, _notify)
+            
+            return {
+                "component": "frontend", 
+                "updated": result["updated"], 
+                "up_to_date": result["up_to_date"], 
+                "version": f"v{result['version']}" if result['version'] else None
+            }
+            
+        except Exception as e:
             try:
-                self.logger.info("操作pip: 安装/更新 comfyui-frontend-package，index=%s，cmd=%s", idx or '-', " ".join(cmd))
+                self.logger.error(f"前端更新失败: {e}")
             except Exception:
                 pass
-            r = run_hidden(cmd, capture_output=True, text=True)
-            # 根据 pip 输出判断是否发生了实际更新，并给出提醒
-            try:
-                out = getattr(r, 'stdout', '') or ''
-                updated = ("Successfully installed" in out) or ("Installing collected packages" in out) or ("Successfully upgraded" in out)
-                up_to_date = ("Requirement already satisfied" in out) and not updated
-                # 查询安装后的版本号用于提示
-                installed_ver = None
-                try:
-                    r_show = run_hidden([str(pip_exe if pip_exe.exists() else self.python_exec), "-m", "pip", "show", "comfyui-frontend-package"], capture_output=True, text=True, timeout=10)
-                    if r_show.returncode == 0:
-                        for line in (getattr(r_show, 'stdout', '') or '').splitlines():
-                            if line.startswith("Version:"):
-                                installed_ver = line.split(":", 1)[1].strip()
-                                break
-                except Exception:
-                    pass
-                if notify:
-                    def _notify():
-                        try:
-                            if updated:
-                                messagebox.showinfo("完成", f"前端已更新到最新版本{f'（v{installed_ver}）' if installed_ver else ''}")
-                            elif up_to_date:
-                                messagebox.showinfo("完成", f"前端已是最新，无需更新{f'（v{installed_ver}）' if installed_ver else ''}")
-                            else:
-                                messagebox.showinfo("完成", "前端更新流程完成（请查看日志确认是否发生变更）")
-                        except Exception:
-                            pass
-                    self.root.after(0, _notify)
-                return {"component": "frontend", "updated": bool(updated), "up_to_date": bool(up_to_date), "version": (f"v{installed_ver}" if installed_ver else None)}
-            except Exception:
-                pass
-            try:
-                self.logger.info("操作pip: 前端包更新完成")
-            except Exception:
-                pass
-        except Exception:
-            pass
 
     def update_template_library(self, notify: bool = True):
-        # 使用 PyPI 代理更新模板库 comfyui-workflow-templates
+        """使用 pip_utils 更新模板库 comfyui-workflow-templates"""
         try:
+            # 获取 PyPI 镜像配置
             idx = None
             mode = self.pypi_proxy_mode.get()
             if mode == 'aliyun':
@@ -2542,52 +1297,43 @@ class ComfyUILauncherEnhanced:
                 u = (self.pypi_proxy_url.get() or '').strip()
                 if u:
                     idx = u
-            pip_exe = Path(self.python_exec).resolve().parent.parent / "Scripts" / "pip.exe"
-            cmd = [str(pip_exe if pip_exe.exists() else self.python_exec), "-m", "pip", "install", "-U", "comfyui-workflow-templates"]
-            if idx:
-                cmd.extend(["-i", idx])
+            
+            # 使用 pip_utils 进行安装/更新
+            result = PIPUTILS.install_or_update_package(
+                "comfyui-workflow-templates",
+                self.python_exec,
+                index_url=idx,
+                upgrade=True,
+                logger=self.logger
+            )
+            
+            if notify and result["success"]:
+                def _notify():
+                    try:
+                        if result["updated"]:
+                            version_text = f"（v{result['version']}）" if result['version'] else ""
+                            messagebox.showinfo("完成", f"模板库已更新到最新版本{version_text}")
+                        elif result["up_to_date"]:
+                            version_text = f"（v{result['version']}）" if result['version'] else ""
+                            messagebox.showinfo("完成", f"模板库已是最新，无需更新{version_text}")
+                        else:
+                            messagebox.showinfo("完成", "模板库更新流程完成（请查看日志确认是否发生变更）")
+                    except Exception:
+                        pass
+                self.root.after(0, _notify)
+            
+            return {
+                "component": "templates", 
+                "updated": result["updated"], 
+                "up_to_date": result["up_to_date"], 
+                "version": f"v{result['version']}" if result['version'] else None
+            }
+            
+        except Exception as e:
             try:
-                self.logger.info("操作pip: 安装/更新 comfyui-workflow-templates，index=%s，cmd=%s", idx or '-', " ".join(cmd))
+                self.logger.error(f"模板库更新失败: {e}")
             except Exception:
                 pass
-            r = run_hidden(cmd, capture_output=True, text=True)
-            # 根据 pip 输出判断是否发生了实际更新，并给出提醒
-            try:
-                out = getattr(r, 'stdout', '') or ''
-                updated = ("Successfully installed" in out) or ("Installing collected packages" in out) or ("Successfully upgraded" in out)
-                up_to_date = ("Requirement already satisfied" in out) and not updated
-                # 查询安装后的版本号用于提示
-                installed_ver = None
-                try:
-                    r_show = run_hidden([str(pip_exe if pip_exe.exists() else self.python_exec), "-m", "pip", "show", "comfyui-workflow-templates"], capture_output=True, text=True, timeout=10)
-                    if r_show.returncode == 0:
-                        for line in (getattr(r_show, 'stdout', '') or '').splitlines():
-                            if line.startswith("Version:"):
-                                installed_ver = line.split(":", 1)[1].strip()
-                                break
-                except Exception:
-                    pass
-                if notify:
-                    def _notify():
-                        try:
-                            if updated:
-                                messagebox.showinfo("完成", f"模板库已更新到最新版本{f'（v{installed_ver}）' if installed_ver else ''}")
-                            elif up_to_date:
-                                messagebox.showinfo("完成", f"模板库已是最新，无需更新{f'（v{installed_ver}）' if installed_ver else ''}")
-                            else:
-                                messagebox.showinfo("完成", "模板库更新流程完成（请查看日志确认是否发生变更）")
-                        except Exception:
-                            pass
-                    self.root.after(0, _notify)
-                return {"component": "templates", "updated": bool(updated), "up_to_date": bool(up_to_date), "version": (f"v{installed_ver}" if installed_ver else None)}
-            except Exception:
-                pass
-            try:
-                self.logger.info("操作pip: 模板库更新完成")
-            except Exception:
-                pass
-        except Exception:
-            pass
 
     # ---------- Git 解析 ----------
     def resolve_git(self):
@@ -2789,7 +1535,8 @@ class ComfyUILauncherEnhanced:
     def on_closing(self):
         # 统一处理关闭时的 ComfyUI 清理：即使不是由本启动器启动，也尝试关闭
         try:
-            running_tracked = getattr(self, "comfyui_process", None) and self.comfyui_process.poll() is None
+            pm_proc = getattr(self.process_manager, "comfyui_process", None)
+            running_tracked = pm_proc is not None and pm_proc.poll() is None
         except Exception:
             running_tracked = False
         # 端口可达则说明存在运行中的 ComfyUI（可能不是我们启动的）
@@ -2818,58 +1565,8 @@ class ComfyUILauncherEnhanced:
                 pass
 
     def stop_all_comfyui_instances(self) -> bool:
-        """尝试关闭所有检测到的 ComfyUI 实例（包括非本启动器启动的）。
-
-        返回 True 表示至少成功终止一个进程。
-        """
-        killed = False
-        pids = set()
-        # 1) 通过端口查找（当前自定义端口）
-        try:
-            port = (self.custom_port.get() or "8188").strip()
-            for pid in self._find_pids_by_port_safe(port):
-                try:
-                    if self._is_comfyui_pid(pid):
-                        pids.add(pid)
-                except Exception:
-                    pass
-        except Exception:
-            pass
-        # 2) 通过进程枚举查找（可能是不同端口或手动启动）
-        try:
-            import psutil  # type: ignore
-            for p in psutil.process_iter(attrs=["pid"]):
-                pid = p.info.get("pid")
-                if not pid:
-                    continue
-                try:
-                    if self._is_comfyui_pid(int(pid)):
-                        pids.add(int(pid))
-                except Exception:
-                    pass
-        except Exception:
-            # 若无 psutil，可忽略此步骤（已有端口方法与回退的 taskkill）
-            pass
-        # 移除自身跟踪的句柄，避免重复
-        try:
-            if getattr(self, "comfyui_process", None) and self.comfyui_process.poll() is None:
-                pids.discard(self.comfyui_process.pid)
-        except Exception:
-            pass
-        # 统一终止
-        if pids:
-            try:
-                self._kill_pids(list(pids))
-                killed = True
-            except Exception:
-                # 继续尝试逐个终止以提升成功率
-                for pid in list(pids):
-                    try:
-                        self._kill_pids([pid])
-                        killed = True
-                    except Exception:
-                        pass
-        return killed
+        # 委托到进程管理器统一处理
+        return self.process_manager.stop_all_comfyui_instances()
 
 
 if __name__ == "__main__":

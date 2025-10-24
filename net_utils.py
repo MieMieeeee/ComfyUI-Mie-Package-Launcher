@@ -100,3 +100,27 @@ def update_pip_ini(python_exec_path: str, mode: str, index_url: str, pip_proxy: 
                 logger.exception("应用 PyPI 代理到 pip.ini 时出错")
             except Exception:
                 pass
+
+
+def apply_pip_proxy_settings(python_exec: str, pypi_proxy_mode: str, pypi_proxy_url: str, pip_proxy_url: str, logger=None):
+    """根据当前 PyPI 代理设置更新 python_embeded/pip.ini。
+    
+    Args:
+        python_exec: Python 可执行文件路径
+        pypi_proxy_mode: 代理模式 ('none', 'aliyun', 'custom')
+        pypi_proxy_url: 自定义 PyPI 镜像 URL
+        pip_proxy_url: pip 代理 URL
+        logger: 日志记录器
+    """
+    try:
+        mode = (pypi_proxy_mode or 'none').strip()
+        url = (pypi_proxy_url or '').strip()
+        pip_proxy = (pip_proxy_url or '').strip()
+        
+        update_pip_ini(python_exec, mode, url, pip_proxy, logger)
+    except Exception:
+        if logger:
+            try:
+                logger.exception("应用 PyPI 代理到 pip.ini 时出错")
+            except Exception:
+                pass

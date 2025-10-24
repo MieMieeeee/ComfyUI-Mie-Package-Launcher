@@ -129,3 +129,127 @@ def enable_ico() -> bool:
     except Exception:
         file_flag = False
     return bool(env or file_flag)
+
+# ---------------- 图标应用 ----------------
+def apply_window_icons(root, logger=None):
+    """为 Tk root 应用窗口图标（ico/png），并在 Windows/macOS 上做额外处理。
+    依赖现有的 assets 辅助方法，集中封装图标设置以便主文件简化。
+    """
+    skip = skip_icons()
+    try:
+        if skip and logger:
+            logger.info("样式阶段: 跳过窗口图标设置 (skip_icons=%s)", skip)
+    except Exception:
+        pass
+    if skip:
+        return
+
+    icon_candidates_list = icon_candidates_ico()
+    icon_set = False
+    enable = enable_ico() or (os.name == 'nt')
+    if enable:
+        for p in icon_candidates_list:
+            if p.exists():
+                try:
+                    if logger:
+                        try:
+                            logger.info("样式阶段: 尝试设置窗口图标(iconbitmap)=%s", str(p))
+                        except Exception:
+                            pass
+                    root.iconbitmap(str(p))
+                    icon_set = True
+                    if logger:
+                        try:
+                            logger.info("样式阶段: iconbitmap 设置成功")
+                        except Exception:
+                            pass
+                    break
+                except Exception:
+                    pass
+    else:
+        try:
+            if logger:
+                logger.info("样式阶段: 默认跳过 iconbitmap 设置 (enable_ico=%s)", enable)
+        except Exception:
+            pass
+
+    # PNG iconphoto
+    png_candidates_list = icon_candidates_png()
+    for p in png_candidates_list:
+        if p.exists():
+            try:
+                try:
+                    from PIL import ImageTk
+                except Exception:
+                    ImageTk = None
+                if ImageTk is not None:
+                    _icon_image = ImageTk.PhotoImage(file=str(p))
+                    root.iconphoto(True, _icon_image)
+                    if logger:
+                        try:
+                            logger.info("样式阶段: iconphoto 设置成功")
+                        except Exception:
+                            pass
+                break
+            except Exception:
+                pass
+
+    # Windows taskbar icon fallback via WM_SETICON
+    try:
+        if os.name == 'nt':
+            ico_path = None
+            for p in icon_candidates_list:
+                try:
+                    if p.exists():
+                        ico_path = str(p)
+                        break
+                except Exception:
+                    pass
+            if ico_path:
+                try:
+                    import ctypes
+                    WM_SETICON = 0x0080
+                    IMAGE_ICON = 1
+                    ICON_SMALL = 0
+                    ICON_BIG = 1
+                    LR_LOADFROMFILE = 0x00000010
+                    LR_DEFAULTSIZE = 0x00000040
+                    hwnd = ctypes.windll.user32.FindWindowW(None, root.title())
+                    if hwnd:
+                        hicon = ctypes.windll.user32.LoadImageW(None, ico_path, IMAGE_ICON, 0, 0, LR_LOADFROMFILE | LR_DEFAULTSIZE)
+                        if hicon:
+                            ctypes.windll.user32.SendMessageW(hwnd, WM_SETICON, ICON_BIG, hicon)
+                            ctypes.windll.user32.SendMessageW(hwnd, WM_SETICON, ICON_SMALL, hicon)
+                            if logger:
+                                try:
+                                    logger.info("样式阶段: Win32 WM_SETICON 已应用到任务栏图标=%s", ico_path)
+                                except Exception:
+                                    pass
+                except Exception:
+                    if logger:
+                        try:
+                            logger.info("样式阶段: Win32 WM_SETICON 应用失败，继续使用 Tk 图标")
+                        except Exception:
+                            pass
+    except Exception:
+        pass
+
+    # macOS Dock icon
+    try:
+        if sys.platform == 'darwin':
+            try:
+                from AppKit import NSApplication, NSImage
+                icn_path = resolve_asset_variants(['rabbit.icns', 'rabbit.png'])
+                if icn_path and icn_path.exists():
+                    img = NSImage.alloc().initWithContentsOfFile_(str(icn_path))
+                    if img is not None:
+                        NSApplication.sharedApplication().setApplicationIconImage_(img)
+                        if logger:
+                            try:
+                                logger.info("样式阶段: macOS Dock 图标已设置为 %s", str(icn_path))
+                            except Exception:
+                                pass
+            except Exception:
+                pass
+    except Exception:
+        pass

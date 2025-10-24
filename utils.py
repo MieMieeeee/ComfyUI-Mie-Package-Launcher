@@ -3,6 +3,17 @@ import os
 import subprocess
 import logging
 from pathlib import Path
+import atexit
+import tempfile
+# 尝试导入平台特定的文件锁模块
+try:
+    import msvcrt
+except ImportError:
+    msvcrt = None
+try:
+    import fcntl
+except ImportError:
+    fcntl = None
 
 # Use the unified launcher logger
 logger = logging.getLogger("comfyui_launcher")
@@ -183,3 +194,54 @@ def is_git_repo(path: str | Path) -> bool:
         return (p / ".git").exists()
     except Exception:
         return False
+
+
+class SingletonLock:
+    def __init__(self, lock_file_name):
+        self.lock_file_path = os.path.join(tempfile.gettempdir(), lock_file_name)
+        self.lock_file = None
+
+    def acquire(self):
+        try:
+            self.lock_file = open(self.lock_file_path, 'w')
+            if os.name == 'nt' and msvcrt:
+                try:
+                    msvcrt.locking(self.lock_file.fileno(), msvcrt.LK_NBLCK, 1)
+                except OSError:
+                    self.lock_file.close()
+                    self.lock_file = None
+                    return False
+            elif fcntl:
+                try:
+                    fcntl.flock(self.lock_file.fileno(), fcntl.LOCK_EX | fcntl.LOCK_NB)
+                except OSError:
+                    self.lock_file.close()
+                    self.lock_file = None
+                    return False
+            else:
+                if os.path.exists(self.lock_file_path):
+                    self.lock_file.close()
+                    self.lock_file = None
+                    return False
+                else:
+                    self.lock_file.write(str(os.getpid()))
+                    self.lock_file.flush()
+            atexit.register(self.release)
+            return True
+        except Exception:
+            if self.lock_file:
+                try:
+                    self.lock_file.close()
+                except:
+                    pass
+            self.lock_file = None
+            return False
+
+    def release(self):
+        if self.lock_file:
+            try:
+                self.lock_file.close()
+                os.unlink(self.lock_file_path)
+            except Exception:
+                pass
+            self.lock_file = None
