@@ -1,5 +1,5 @@
 # ComfyUI 启动器
-> 版本：v1.0.1
+> 版本：v1.0.2
 
 一个专为 ComfyUI 设计的图形化启动器，提供便捷的启动选项管理与版本更新。
 
@@ -34,7 +34,7 @@ python comfyui_launcher_enhanced.py
 - 在“启动与更新”页配置启动选项（CPU/GPU、端口、CORS、镜像与代理等）。
 - 点击“一键启动”，启动器会按配置构造命令并启动 ComfyUI。
 - 若设置了镜像或代理，会注入相关环境变量（如 `HF_ENDPOINT`、`GITHUB_ENDPOINT`）。
-- 检测到便携版 Git（`tools/PortableGit/bin/git.exe`）时，会在启动时注入 `GIT_PYTHON_GIT_EXECUTABLE` 并前置其 `bin` 到 `PATH`，无需手动设置系统环境。
+- 检测到便携版 Git（优先在当前目录或打包目录的 `tools/PortableGit/bin/git.exe`）时，会在启动时注入 `GIT_PYTHON_GIT_EXECUTABLE` 并前置其 `bin` 到 `PATH`，无需手动设置系统环境；若未检测到，则回退到系统 Git。
  - 若目标端口已被占用，启动器会提示是否直接打开网页而不启动新的实例；默认取消启动。
  - 点击“停止”，会直接终止占用当前设置端口（默认 `8188`）的所有相关进程。
  - 关闭窗口时，自动执行与“停止”一致的逻辑后退出。
@@ -111,6 +111,7 @@ ComfyUI-Mie-Package-Launcher/
 - `services/*`：封装更新、Git、网络、运行时、配置等业务，向 `core/*` 委派具体执行。
 - `core/*`：启动/停止/监控子进程、刷新版本信息、构建启动参数与环境变量。
 - `utils/*`：pip 安装与查询、路径解析、网络代理、日志与通用方法。
+- 版本相关：`services/version_service.py` 负责业务编排；`core/version_service.py` 负责底层信息刷新。
 - `tests/*`：`unittest` 编写的单元与集成测试，覆盖关键路径与异常分支。
 
 ## 架构与数据流（View / Service / Core）
@@ -139,10 +140,10 @@ flowchart LR
 - Core 层：执行系统层面操作（子进程、端口探测、版本刷新），通过回调更新 UI 状态。
 
 ### 关键调用关系
-- 入口初始化服务容器：`comfyui_launcher_enhanced.py:200` 调用 `ServiceContainer.from_app(self)`。
-- 启动流程：`core/process_manager.py:111` 构造命令 → `core/runner_start.py` 启动 → `core/runner.py` 监控 → UI 大按钮状态更新。
-- 版本刷新：`core/version_service.py:6` 异步查询版本，使用 `app.root.after` 安全更新 `StringVar`。
-- 代理设置：View 调用 `apply_pip_proxy_settings()` → `services/network_service.py` 写入 `pip.ini`（`utils/net.py`）。
+- 入口初始化服务容器：入口调用 `ServiceContainer.from_app(app)` 提供统一服务实例。
+- 启动流程：`core.launcher_cmd.build_launch_params` 构造命令 → `core.runner_start.start` 启动 → `core.runner.monitor` 监控 → UI 大按钮状态更新。
+- 版本刷新：`core.version_service.refresh_version_info` 异步查询版本，使用 `app.root.after` 安全更新 `StringVar`。
+- 代理设置：View 调用 `apply_pip_proxy_settings()` → `services.network_service` 写入 `pip.ini`（`utils.net`）。
 
 ### 数据流向
 - 配置：入口解析并写入 `comfyui_path/python_path` → `config/manager.py` 负责读写与更新。
@@ -197,7 +198,7 @@ flowchart LR
 
 ### 说明与提示
 - 打包脚本内置常用的 `hidden-import` 与 `exclude-module` 配置，适配 Windows 环境与 Tkinter GUI。
-- 若你希望自定义图标，替换 `launcher\rabbit.ico` 即可。
+- 若你希望自定义图标，替换 `assets\rabbit.ico` 即可。
 - 调试日志可通过在 `launcher` 目录下创建 `is_debug` 文件开启；打包后的 EXE 同样支持该开关。
 ## 模块化重构说明
 
@@ -278,47 +279,6 @@ coverage html  # 生成 htmlcov/index.html
 ### Service 层约束
 - 明确输入/输出契约，失败返回统一结构（`success/updated/up_to_date/version/error`）。
 - 调用 Core 与 Utils，避免直接操作 UI 控件或线程调度。
-
-### 最佳实践示例
-```python
-# View 调用示例（comfyui_launcher_enhanced.py）
-def apply_pip_proxy_settings(self):
-    if getattr(self, 'services', None):
-        self.services.network.apply_pip_proxy_settings()
-
-# Service 委派示例（services/network_service.py）
-def apply_pip_proxy_settings(self):
-    net.apply_pip_proxy_settings(
-        self.app.python_exec,
-        self.app.pypi_proxy_mode.get(),
-        self.app.pypi_proxy_url.get(),
-        self.app.pip_proxy_url.get(),
-        logger=self.app.logger,
-    )
-
-# 启动流程（core/process_manager.py）
-def start_comfyui(self):
-    cmd, env, run_cwd, py, main = build_launch_params(self.app)
-    self.app.services.runtime.pre_start_up()
-    run_start(self.app, self, cmd, env, run_cwd)
-```
-
-## API 调用示例
-
-### 健康检查（可用于脚本集成）
-```python
-import requests
-resp = requests.get("http://localhost:8188")
-print(resp.status_code)  # 200 表示 ComfyUI Web 已就绪
-```
-
-### 提交工作流（ComfyUI 原生接口）
-```bash
-curl -X POST http://localhost:8188/prompt \
-  -H "Content-Type: application/json" \
-  -d '{"prompt": {}}'
-```
-> 注：具体 `prompt` 结构请参考 ComfyUI 官方文档与工作流导出的 JSON；启动器仅负责启动与环境配置，不对 API 进行二次封装。
 
 ## 文档
 - 详细接口契约见 `docs/ServiceInterfaces.md`
