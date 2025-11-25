@@ -1,7 +1,20 @@
 # ComfyUI 启动器
+
 > 版本：v1.0.2
 
 一个专为 ComfyUI 设计的图形化启动器，提供便捷的启动选项管理与版本更新。
+
+## ⚠️ 重要提示：无法运行工作流的解决方案
+
+> 如果启动 ComfyUI 后无法运行工作流，并在日志中看到类似错误：
+>
+> `dev_utils_execute() takes 10 positional arguments but 11 were given`
+>
+> 大概率是 **ComfyUI-Dev-Utils 插件版本不兼容** 导致的。
+>
+> ✅ 解决方法：**禁用或升级 ComfyUI-Dev-Utils 插件**。
+
+![升级或禁用 ComfyUI-Dev-Utils 插件示意图](readme_assets/升级或禁用dev_utils.png)
 
 ## 功能特性
 
