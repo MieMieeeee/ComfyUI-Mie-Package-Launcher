@@ -99,15 +99,85 @@ def build_launch_controls_panel(app, container, rounded_button_cls=None):
     ttk.Entry(port_row, textvariable=app.extra_launch_args, width=38) \
         .pack(side=tk.LEFT)
 
+    # —— 启动后打开网页 ——
+    tk.Label(form, text="启动后自动打开:", bg=CARD_BG, fg=c["TEXT"],
+             font=HEAD_LABEL_FONT) \
+        .grid(row=3, column=0, sticky="nw", padx=(0, 14), pady=(0, ROW_GAP))
+
+    browser_row = tk.Frame(form, bg=CARD_BG)
+    browser_row.grid(row=3, column=1, sticky="w", pady=(0, ROW_GAP))
+    mode_ui_var = tk.StringVar(value="默认浏览器")
+    MODE_MAP = {
+        "默认浏览器": "default",
+        "不自动打开": "none",
+        "自定义浏览器": "custom",
+    }
+    try:
+        cur_mode = (app.browser_open_mode.get() or "default").strip()
+        for k, v in MODE_MAP.items():
+            if v == cur_mode:
+                mode_ui_var.set(k)
+                break
+    except Exception:
+        pass
+    mode_combo = ttk.Combobox(browser_row, textvariable=mode_ui_var, state="readonly",
+                              values=list(MODE_MAP.keys()), width=18)
+    mode_combo.pack(side=tk.LEFT)
+
+    custom_row = tk.Frame(browser_row, bg=CARD_BG)
+    custom_row.pack(side=tk.LEFT, padx=(INLINE_GAP, 0))
+    path_entry = ttk.Entry(custom_row, textvariable=app.custom_browser_path, width=32)
+    path_btn = ttk.Button(custom_row, text="选择浏览器EXE",
+                          command=lambda: _choose_browser_path(app))
+    path_entry.pack(side=tk.LEFT)
+    path_btn.pack(side=tk.LEFT, padx=(8, 0))
+
+    def _refresh_custom_row():
+        try:
+            if MODE_MAP.get(mode_ui_var.get()) == "custom":
+                custom_row.pack_configure(side=tk.LEFT, padx=(INLINE_GAP, 0))
+            else:
+                custom_row.pack_forget()
+        except Exception:
+            pass
+
+    def _on_mode_selected(*_):
+        try:
+            sel = MODE_MAP.get(mode_ui_var.get(), "default")
+            app.browser_open_mode.set(sel)
+            try:
+                app.save_config()
+            except Exception:
+                pass
+            _refresh_custom_row()
+        except Exception:
+            pass
+
+    def _choose_browser_path(app):
+        try:
+            from tkinter import filedialog
+            p = filedialog.askopenfilename(title="选择浏览器可执行文件", filetypes=[["可执行文件", "*.exe"], ["所有文件", "*.*"]])
+            if p:
+                app.custom_browser_path.set(p)
+                try:
+                    app.save_config()
+                except Exception:
+                    pass
+        except Exception:
+            pass
+
+    mode_combo.bind("<<ComboboxSelected>>", _on_mode_selected)
+    _refresh_custom_row()
+
     # —— 网络配置（HF 镜像、GitHub 代理、PyPI 代理） ——
     tk.Label(form, text="网络配置:", bg=CARD_BG, fg=c["TEXT"],
              font=HEAD_LABEL_FONT) \
-        .grid(row=3, column=0, sticky="nw", padx=(0, 14), pady=(0, ROW_GAP))
+        .grid(row=4, column=0, sticky="nw", padx=(0, 14), pady=(0, ROW_GAP))
 
     # 继续复用网络配置面板（已模块化）
     try:
         from ui import network_panel as NETWORK
-        NETWORK.build_network_panel(app, form, rounded_button_cls)
+        NETWORK.build_network_panel(app, form, rounded_button_cls, row_index=4)
     except Exception:
         pass
 

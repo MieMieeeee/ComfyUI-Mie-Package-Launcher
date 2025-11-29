@@ -2,7 +2,7 @@ from tkinter import messagebox, filedialog
 from pathlib import Path
 
 def select_tab(app, name):
-    tab_order = ["launch", "version", "about", "comfyui", "about_launcher"]
+    tab_order = ["launch", "version", "external_models", "about", "comfyui", "about_launcher"]
     idx = tab_order.index(name)
     tabs = app.notebook.tabs()
     if idx < len(tabs):
@@ -30,10 +30,21 @@ def select_tab(app, name):
                 pass
         app._vm_embedded = True
     try:
+        import time as _t
+        now = _t.time()
+        last = getattr(app, '_last_version_refresh_ts', 0.0)
+        should_refresh_anyway = (now - last) > 30.0
         if name == 'version' and hasattr(app, 'version_manager'):
             app.version_manager.refresh_git_info(force_fetch=True)
-        else:
+            should_refresh_anyway = True
+        elif name == 'launch':
+            should_refresh_anyway = True
+        if should_refresh_anyway:
             app.get_version_info(scope='all')
+            try:
+                setattr(app, '_last_version_refresh_ts', now)
+            except Exception:
+                pass
     except Exception:
         pass
 

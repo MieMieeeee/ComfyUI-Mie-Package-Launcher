@@ -44,6 +44,14 @@ def build_launch_params(app):
                     cmd.append(attn)
         except Exception:
             pass
+        try:
+            mode_var = getattr(app, 'browser_open_mode', None)
+            mode = (mode_var.get() if mode_var else (app.config.get('launch_options', {}).get('browser_open_mode', 'default'))).strip()
+            tokens_set = set(extra_tokens) if 'extra_tokens' in locals() else set()
+            if '--disable-auto-launch' not in tokens_set and '--disable-auto-launch' not in cmd:
+                cmd.append('--disable-auto-launch')
+        except Exception:
+            pass
     except Exception:
         pass
     env = os.environ.copy()

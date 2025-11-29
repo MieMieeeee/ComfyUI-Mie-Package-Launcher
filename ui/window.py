@@ -7,7 +7,7 @@ from ui.constants import COLORS
 def setup_window(app):
     try:
         app.root.title("ComfyUI启动器 - 黎黎原上咩")
-        app.root.geometry("1250x820")
+        app.root.geometry("1250x860")
         app.root.minsize(1100, 700)
         try:
             if os.name == 'nt':

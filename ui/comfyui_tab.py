@@ -4,7 +4,11 @@ def build_about_comfyui(app, parent):
     从主文件抽取，保持原有布局、事件与资源加载行为一致。
     """
     import os, webbrowser, tkinter as tk
-    from PIL import Image, ImageTk
+    try:
+        from PIL import Image, ImageTk
+    except Exception:
+        Image = None
+        ImageTk = None
     from ui import assets_helper as ASSETS
 
     # 颜色（沿用浅色主题）
@@ -35,9 +39,14 @@ def build_about_comfyui(app, parent):
 
     def load_logo_png(path, max_w=420, max_h=140):
         try:
-            img = Image.open(path).convert("RGBA")
-            img.thumbnail((max_w, max_h), Image.LANCZOS)
-            return ImageTk.PhotoImage(img)
+            if Image and ImageTk:
+                img = Image.open(path).convert("RGBA")
+                img.thumbnail((max_w, max_h), Image.LANCZOS)
+                return ImageTk.PhotoImage(img)
+        except Exception:
+            pass
+        try:
+            return tk.PhotoImage(file=path)
         except Exception:
             return None
 

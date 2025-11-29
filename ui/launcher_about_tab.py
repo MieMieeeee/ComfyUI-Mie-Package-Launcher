@@ -5,7 +5,11 @@ def build_about_launcher(app, parent):
     与现有“关于我”“关于ComfyUI”保持视觉一致性与交互一致性。
     """
     import webbrowser, tkinter as tk
-    from PIL import Image, ImageTk
+    try:
+        from PIL import Image, ImageTk
+    except Exception:
+        Image = None
+        ImageTk = None
     from ui import assets_helper as ASSETS
 
     # 颜色（沿用浅色主题变量）
@@ -33,9 +37,24 @@ def build_about_launcher(app, parent):
 
     def _load_logo(path, max_w=220, max_h=220):
         try:
-            img = Image.open(path).convert("RGBA")
-            img.thumbnail((max_w, max_h), Image.LANCZOS)
-            return ImageTk.PhotoImage(img)
+            if Image and ImageTk:
+                img = Image.open(path).convert("RGBA")
+                img.thumbnail((max_w, max_h), Image.LANCZOS)
+                return ImageTk.PhotoImage(img)
+        except Exception:
+            pass
+        try:
+            ph = tk.PhotoImage(file=path)
+            try:
+                w, h = ph.width(), ph.height()
+                fx = (w + max_w - 1) // max_w
+                fy = (h + max_h - 1) // max_h
+                f = fx if fx > fy else fy
+                if f > 1:
+                    ph = ph.subsample(f, f)
+            except Exception:
+                pass
+            return ph
         except Exception:
             return None
 

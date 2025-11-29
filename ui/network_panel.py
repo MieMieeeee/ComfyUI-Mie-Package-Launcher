@@ -3,11 +3,11 @@ from tkinter import ttk
 from ui.constants import CARD_BG, BODY_FONT
 
 
-def build_network_panel(app, form, rounded_button_cls=None):
+def build_network_panel(app, form, rounded_button_cls=None, row_index: int = 3):
     c = app.COLORS
     # 让网络配置区域横向填充，从而可将按钮推到更靠右
     net_frame = tk.Frame(form, bg=CARD_BG)
-    net_frame.grid(row=3, column=1, sticky="we", pady=(0, 10))
+    net_frame.grid(row=row_index, column=1, sticky="we", pady=(0, 10))
     try:
         net_frame.grid_columnconfigure(3, weight=1)
     except Exception:

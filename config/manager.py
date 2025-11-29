@@ -34,7 +34,9 @@ class ConfigManager:
                 "enable_cors": True,
                 "listen_all": True,
                 "extra_args": "",
-                "attention_mode": ""
+                "attention_mode": "",
+                "browser_open_mode": "default",
+                "custom_browser_path": ""
             },
             "ui_settings": {
                 "window_width": 800,

@@ -62,4 +62,35 @@ def open_web(app):
     except Exception:
         pass
     import webbrowser
+    mode = "default"
+    try:
+        mode = (app.browser_open_mode.get() or "default").strip()
+    except Exception:
+        try:
+            mode = (app.config.get("launch_options", {}).get("browser_open_mode") or "default").strip()
+        except Exception:
+            mode = "default"
+    if mode == "none":
+        return
+    if mode == "custom":
+        path = ""
+        try:
+            path = (app.custom_browser_path.get() or "").strip()
+        except Exception:
+            try:
+                path = (app.config.get("launch_options", {}).get("custom_browser_path") or "").strip()
+            except Exception:
+                path = ""
+        if path:
+            try:
+                webbrowser.register("custom-browser", None, webbrowser.BackgroundBrowser(path))
+                b = webbrowser.get("custom-browser")
+                b.open(url)
+                return
+            except Exception:
+                pass
+        try:
+            messagebox.showwarning("提示", "未设置或无法使用自定义浏览器，使用默认浏览器打开")
+        except Exception:
+            pass
     webbrowser.open(url)

@@ -4,6 +4,7 @@ import shutil
 import re
 from pathlib import Path
 from utils.common import run_hidden
+from urllib.request import urlopen, Request
 
 try:
     import psutil
@@ -102,13 +103,15 @@ def is_http_reachable(app) -> bool:
     except Exception:
         return False
     try:
-        import socket
-        with socket.create_connection(("127.0.0.1", port), timeout=0.4):
-            return True
-    except Exception:
-        pass
-    try:
-        pids = find_pids_by_port_safe(str(port))
-        return bool(pids)
+        url = f"http://127.0.0.1:{port}/system_stats"
+        req = Request(url, headers={"Accept": "application/json", "User-Agent": "ComfyUI-Launcher"})
+        with urlopen(req, timeout=0.4) as resp:
+            code = getattr(resp, "status", None)
+            if code is None:
+                try:
+                    code = resp.getcode()
+                except Exception:
+                    code = None
+            return code == 200
     except Exception:
         return False

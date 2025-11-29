@@ -125,7 +125,7 @@ class ProcessManager:
                 return
             try:
                 from pathlib import Path as _P
-                rver = run_hidden([str(py), "--version"], capture_output=True, text=True, timeout=5)
+                rver = run_hidden([str(py), "--version"], capture_output=True, text=True, timeout=0.8)
                 if rver.returncode != 0:
                     self._show_error("错误", f"Python无法执行: {py}")
                     return
@@ -163,6 +163,34 @@ class ProcessManager:
             pass
         self.app.big_btn.set_state("running")
         self.app.big_btn.set_text("停止")
+        try:
+            mode = (self.app.browser_open_mode.get() or "default").strip()
+        except Exception:
+            try:
+                mode = (self.app.config.get("launch_options", {}).get("browser_open_mode") or "default").strip()
+            except Exception:
+                mode = "default"
+        if mode != "none":
+            def _open_when_ready():
+                try:
+                    import time
+                    for _ in range(40):
+                        try:
+                            if self._is_http_reachable():
+                                break
+                        except Exception:
+                            pass
+                        time.sleep(0.25)
+                    try:
+                        self.app.root.after(0, self.app.open_comfyui_web)
+                    except Exception:
+                        pass
+                except Exception:
+                    pass
+            try:
+                threading.Thread(target=_open_when_ready, daemon=True).start()
+            except Exception:
+                pass
 
     def on_start_failed(self, error): #
         self.app._launching = False
@@ -451,29 +479,9 @@ class ProcessManager:
             raise RuntimeError("无法终止目标进程")
 
     def _is_http_reachable(self) -> bool: #
-        """运行探测：优先使用 TCP 直连判断端口监听，其次回退到进程/端口解析。
-
-        - 首选尝试 `socket.create_connection((127.0.0.1, port))`，成功即认为“运行中”。
-        - 若直连失败，回退到 `_find_pids_by_port_safe` 的 psutil/netstat 解析。
-        """
         try:
-            port_str = (self.app.custom_port.get() or "8188").strip()
-            port = int(port_str)
-        except Exception:
-            return False
-
-        # 首选：TCP 直连判断监听
-        try:
-            import socket
-            with socket.create_connection(("127.0.0.1", port), timeout=0.4): #
-                return True
-        except Exception:
-            pass
-
-        # 回退：端口对应的 PID 列表（严格的 TCP 状态筛选已在 netstat 解析内实现）
-        try:
-            pids = find_pids_by_port_safe(port_str)
-            return bool(pids)
+            from core.probe import is_http_reachable
+            return is_http_reachable(self.app)
         except Exception:
             return False
 

@@ -4,7 +4,13 @@ def build_about_tab(app, parent):
     从主文件抽取，保持原有布局、事件与资源加载行为一致。
     """
     import os, webbrowser, tkinter as tk
-    from PIL import Image, ImageTk, ImageDraw, ImageFile
+    try:
+        from PIL import Image, ImageTk, ImageDraw, ImageFile
+    except Exception:
+        Image = None
+        ImageTk = None
+        ImageDraw = None
+        ImageFile = None
     from ui import assets_helper as ASSETS
 
     # 浅色配色
@@ -35,22 +41,37 @@ def build_about_tab(app, parent):
     except Exception:
         pass
     # 允许加载被截断的图片，提高容错率
-    ImageFile.LOAD_TRUNCATED_IMAGES = True
+    try:
+        if ImageFile:
+            ImageFile.LOAD_TRUNCATED_IMAGES = True
+    except Exception:
+        pass
 
     def _round_avatar(path, size=96):
-        # 首选 PIL 读取并裁剪为圆形；失败则回退 Tk.PhotoImage 方形头像
         try:
-            img = Image.open(path)
-            img = img.convert("RGBA").resize((size, size), Image.LANCZOS)
-            mask = Image.new("L", (size, size), 0)
-            ImageDraw.Draw(mask).ellipse((0, 0, size, size), fill=255)
-            img.putalpha(mask)
-            return ImageTk.PhotoImage(img)
+            if Image and ImageTk and ImageDraw:
+                img = Image.open(path)
+                img = img.convert("RGBA").resize((size, size), Image.LANCZOS)
+                mask = Image.new("L", (size, size), 0)
+                ImageDraw.Draw(mask).ellipse((0, 0, size, size), fill=255)
+                img.putalpha(mask)
+                return ImageTk.PhotoImage(img)
         except Exception:
+            pass
+        try:
+            ph = tk.PhotoImage(file=path)
             try:
-                return tk.PhotoImage(file=path)
+                w, h = ph.width(), ph.height()
+                fx = (w + size - 1) // size
+                fy = (h + size - 1) // size
+                f = fx if fx > fy else fy
+                if f > 1:
+                    ph = ph.subsample(f, f)
             except Exception:
-                return None
+                pass
+            return ph
+        except Exception:
+            return None
 
     photo = _round_avatar(str(img_path), 96)
     if photo:

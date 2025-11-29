@@ -229,60 +229,6 @@ class ComfyUILauncherEnhanced:
             pass
 
     # ---------- 样式 ----------
-    def setup_window(self):
-        try:
-            try:
-                self.logger.info("开始设置窗口样式")
-            except Exception:
-                pass
-            self.root.title("ComfyUI启动器 - 黎黎原上咩")
-            self.root.geometry("1250x820")
-            self.root.minsize(1100, 700)
-            # Windows: 设置 AppUserModelID，改善任务栏图标与分组一致性
-            try:
-                if os.name == 'nt':
-                    ctypes.windll.shell32.SetCurrentProcessExplicitAppUserModelID("ComfyUILauncher")
-            except Exception:
-                pass
-            # 窗口图标设置委托到 assets 统一处理
-            try:
-                ASSETS.apply_window_icons(self.root, getattr(self, 'logger', None))
-            except Exception:
-                pass
-
-            # 安全创建样式并选择可用主题（抽离到 THEME 模块）
-            self.style = THEME.create_style(logger=self.logger)
-            if not self.style:
-                return
-
-            THEME.apply_theme(self.style, logger=self.logger)
-
-            # 隐藏辅助 Notebook 标签布局（若支持）
-            try:
-                try:
-                    self.logger.info("样式阶段: 设置 Hidden.TNotebook.Tab 布局为空")
-                except Exception:
-                    pass
-                self.style.layout('Hidden.TNotebook.Tab', [])
-                try:
-                    self.logger.info("样式阶段: Hidden.TNotebook.Tab 布局设置完成")
-                except Exception:
-                    pass
-            except Exception:
-                pass
-
-            try:
-                self.root.configure(bg=self.COLORS.get("BG", "#FFFFFF"))
-            except Exception:
-                pass
-            THEME.configure_default_font(self.root, logger=self.logger)
-            THEME.configure_styles(self.style, self.COLORS, logger=self.logger)
-        except Exception:
-            # 兜底：记录异常但不要让启动器崩溃
-            try:
-                self.logger.exception("setup_window 阶段发生异常，继续使用默认外观")
-            except Exception:
-                pass
 
     # ---------- 变量 ----------
     def setup_variables(self):
@@ -293,6 +239,8 @@ class ComfyUILauncherEnhanced:
         self.custom_port = tk.StringVar(value="8188")
         self.extra_launch_args = tk.StringVar(value="")
         self.attention_mode = tk.StringVar(value="")
+        self.browser_open_mode = tk.StringVar(value="default")
+        self.custom_browser_path = tk.StringVar(value="")
         self.hf_mirror_options = {"不使用镜像": "", "hf-mirror": "https://hf-mirror.com"}
         self.selected_hf_mirror = tk.StringVar(value="hf-mirror")
         self.comfyui_version = tk.StringVar(value="获取中…")
@@ -335,6 +283,8 @@ class ComfyUILauncherEnhanced:
         self.custom_port.trace_add("write", lambda *a: self.save_config())
         self.extra_launch_args.trace_add("write", lambda *a: self.save_config())
         self.attention_mode.trace_add("write", lambda *a: self.save_config())
+        self.browser_open_mode.trace_add("write", lambda *a: self.save_config())
+        self.custom_browser_path.trace_add("write", lambda *a: self.save_config())
         # 版本偏好变更时持久化
         self.stable_only_var.trace_add("write", lambda *a: self.save_config())
         self.requirements_sync_var.trace_add("write", lambda *a: self.save_config())
@@ -385,7 +335,9 @@ class ComfyUILauncherEnhanced:
                     enable_cors=_get(self.enable_cors, True),
                     listen_all=_get(self.listen_all, True),
                     extra_args=(self.config.get("launch_options", {}).get("extra_args", "") if getattr(self, '_initializing', False) else _get(self.extra_launch_args, "")),
-                    attention_mode=(self.config.get("launch_options", {}).get("attention_mode", "") if getattr(self, '_initializing', False) else _get(self.attention_mode, ""))
+                    attention_mode=(self.config.get("launch_options", {}).get("attention_mode", "") if getattr(self, '_initializing', False) else _get(self.attention_mode, "")),
+                    browser_open_mode=(self.config.get("launch_options", {}).get("browser_open_mode", "default") if getattr(self, '_initializing', False) else _get(self.browser_open_mode, "default")),
+                    custom_browser_path=(self.config.get("launch_options", {}).get("custom_browser_path", "") if getattr(self, '_initializing', False) else _get(self.custom_browser_path, ""))
                 )
                 self.services.config.set("proxy_settings.hf_mirror_mode", _get(self.selected_hf_mirror, "hf-mirror"))
                 try:
@@ -410,7 +362,9 @@ class ComfyUILauncherEnhanced:
                     enable_cors=_get(self.enable_cors, True),
                     listen_all=_get(self.listen_all, True),
                     extra_args=(self.config.get("launch_options", {}).get("extra_args", "") if getattr(self, '_initializing', False) else _get(self.extra_launch_args, "")),
-                    attention_mode=(self.config.get("launch_options", {}).get("attention_mode", "") if getattr(self, '_initializing', False) else _get(self.attention_mode, ""))
+                    attention_mode=(self.config.get("launch_options", {}).get("attention_mode", "") if getattr(self, '_initializing', False) else _get(self.attention_mode, "")),
+                    browser_open_mode=(self.config.get("launch_options", {}).get("browser_open_mode", "default") if getattr(self, '_initializing', False) else _get(self.browser_open_mode, "default")),
+                    custom_browser_path=(self.config.get("launch_options", {}).get("custom_browser_path", "") if getattr(self, '_initializing', False) else _get(self.custom_browser_path, ""))
                 )
                 self.config_manager.set("proxy_settings.hf_mirror_mode", _get(self.selected_hf_mirror, "hf-mirror"))
                 try:
@@ -448,6 +402,14 @@ class ComfyUILauncherEnhanced:
         self.extra_launch_args.set(opt.get("extra_args", ""))
         try:
             self.attention_mode.set(opt.get("attention_mode", ""))
+        except Exception:
+            pass
+        try:
+            self.browser_open_mode.set(opt.get("browser_open_mode", "default"))
+        except Exception:
+            pass
+        try:
+            self.custom_browser_path.set(opt.get("custom_browser_path", ""))
         except Exception:
             pass
 
@@ -599,8 +561,8 @@ class ComfyUILauncherEnhanced:
         except Exception:
             _path = str(Path.cwd())
         QUICK.build_quick_links_panel(self, quick_card.get_body(), path=_path, rounded_button_cls=RoundedButton)
-
-        self.get_version_info()
+        
+        self.root.after(0, lambda: self.get_version_info())
 
     
 
