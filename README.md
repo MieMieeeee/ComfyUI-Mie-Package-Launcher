@@ -1,6 +1,6 @@
 # ComfyUI 启动器
 
-> 版本：v1.0.2
+> 版本：v1.0.3
 
 一个专为 ComfyUI 设计的图形化启动器，提供便捷的启动选项管理与版本更新。
 
@@ -28,6 +28,9 @@
 - 获取并展示版本信息
 - 选择更新项目并执行批量更新
 - 支持快速刷新状态
+- 升级策略：可选择仅更新到稳定版（依据 GitHub Releases 标签）
+- 依赖一致性：可选“模板库与前端版本遵循内核需求”，按 ComfyUI `requirements*.txt` 指定版本进行更新
+- GitHub 代理：在内核版本管理中支持 gh-proxy 或自定义代理地址以加速拉取与标签刷新
 
 ## 使用说明
 
@@ -42,7 +45,7 @@ python comfyui_launcher_enhanced.py
 
 ### 使用流程
 - 启动后，启动器会自动读取 `launcher/config.json`：
-  - `paths.comfyui_path`：作为 ComfyUI 根目录；若未配置或无效，会弹窗提示选择 ComfyUI 根目录（包含 `main.py` 或 `.git`）。选择后会保存到配置文件。
+  - `paths.comfyui_root`：作为 ComfyUI 根目录；若未配置或无效，会弹窗提示选择 ComfyUI 根目录（包含 `main.py` 或 `.git`）。选择后会保存到配置文件。
   - `paths.python_path`：作为 Python 可执行路径；若未配置或无效，会按常见候选自动解析（如 `python_embeded/python.exe`）。
 - 在“启动与更新”页配置启动选项（CPU/GPU、端口、CORS、镜像与代理等）。
 - 点击“一键启动”，启动器会按配置构造命令并启动 ComfyUI。
@@ -57,10 +60,18 @@ python comfyui_launcher_enhanced.py
 - 打开根/日志/输入/输出/插件目录
 - 切换计算模式与网络选项
 
+## 外置模型库管理
+
+- 在“外置模型库管理”页选择外置模型库根路径，扫描并映射子文件夹
+- 生成或刷新 `ComfyUI/extra_model_paths.yaml`，自动写入 `base_path` 与各子目录映射，变更前自动备份旧版本
+- 映射列表与数量将实时展示，方便核对与维护
+
 ### 启动选项
-- 选择启动模式（从现有 .bat 文件解析）
-- 配置自定义启动参数
-- 保存常用配置
+- 计算模式：CPU / GPU
+- 选项：快速模式、启用 CORS、监听 `0.0.0.0`
+- 端口与额外参数：自定义端口与额外启动参数
+- 注意力优化：支持 Split/Quad/PyTorch2.0/Sage/FlashAttention 等选项
+- 启动后自动打开：默认浏览器 / 不自动打开 / 自定义浏览器
 
 ### 调试模式与日志
 - 默认情况下，命令输出日志被严格收敛：每次命令的 `stdout`/`stderr` 最多记录少量行（默认 10 行），`netstat -ano` 仅记录行数摘要，避免日志膨胀。
@@ -102,19 +113,20 @@ ComfyUI-Mie-Package-Launcher/
 │   ├── unit/
 │   └── integration/
 ├── ui/                          # 视图层（Tkinter）
-│   ├── layout.py
-│   ├── version_panel.py
-│   ├── launch_controls_panel.py
-│   ├── network_panel.py
-│   ├── start_button_panel.py
+│   ├── window.py / layout.py / constants.py
+│   ├── version_panel.py / launch_controls_panel.py / start_button_panel.py
+│   ├── network_panel.py / quick_links_panel.py / comfyui_tab.py
+│   ├── external_models_tab.py
+│   ├── assets_helper.py / custom_widges.py
 │   ├── about_tab.py / launcher_about_tab.py
-│   └── helpers.py / events.py / theme.py
+│   └── helpers.py / events.py / theme.py / state.py
 ├── utils/                       # 通用工具
 │   ├── common.py / logging.py
 │   ├── paths.py / pip.py / net.py
 │   └── ui_actions.py
 ├── comfyui_launcher_enhanced.py # 应用入口（View+Controller）
 ├── requirements.txt             # 依赖说明（主要标准库 + 可选）
+├── ComfyUI启动器.spec / build_parameters.json / MIGRATION.md
 └── README.md
 ```
 
@@ -156,7 +168,7 @@ flowchart LR
 - 入口初始化服务容器：入口调用 `ServiceContainer.from_app(app)` 提供统一服务实例。
 - 启动流程：`core.launcher_cmd.build_launch_params` 构造命令 → `core.runner_start.start` 启动 → `core.runner.monitor` 监控 → UI 大按钮状态更新。
 - 版本刷新：`core.version_service.refresh_version_info` 异步查询版本，使用 `app.root.after` 安全更新 `StringVar`。
-- 代理设置：View 调用 `apply_pip_proxy_settings()` → `services.network_service` 写入 `pip.ini`（`utils.net`）。
+- 代理设置：View 调用 `apply_pip_proxy_settings()` → `services.network_service` 写入 `pip.ini`（`utils.net`）；内核版本管理支持 GitHub 代理（gh-proxy/自定义）。
 
 ### 数据流向
 - 配置：入口解析并写入 `comfyui_path/python_path` → `config/manager.py` 负责读写与更新。
@@ -165,7 +177,7 @@ flowchart LR
 
 ## 注意事项
 
-1. 启动器可在任意目录运行；首次或路径无效时会弹窗选择 ComfyUI 根目录。当前版本使用 `launcher/config.json` 保存解析后的 `comfyui_path` 与 `python_path`、端口与 UI 设置等。
+1. 启动器可在任意目录运行；首次或路径无效时会弹窗选择 ComfyUI 根目录。当前版本使用 `launcher/config.json` 保存解析后的 `comfyui_root` 与 `python_path`、端口与 UI 设置等。
 2. “停止”与“退出”会直接终止占用配置端口的相关进程；若该端口被其他程序使用，也会被结束，请谨慎设置端口。
 3. 端口被占用时，点击“一键启动”将提示是否直接打开网页而不启动新的实例。
 
@@ -213,6 +225,7 @@ flowchart LR
 - 打包脚本内置常用的 `hidden-import` 与 `exclude-module` 配置，适配 Windows 环境与 Tkinter GUI。
 - 若你希望自定义图标，替换 `assets\rabbit.ico` 即可。
 - 调试日志可通过在 `launcher` 目录下创建 `is_debug` 文件开启；打包后的 EXE 同样支持该开关。
+- 构建时会写入 `build_parameters.json`（版本与构建时间），用于“关于启动器”页面展示版本（`launcher_about_tab.py`）。
 ## 模块化重构说明
 
 - 新的目录结构：
