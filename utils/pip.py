@@ -119,3 +119,81 @@ def batch_install_packages(
         logger.info(f"开始处理包: {package}")
         results[package] = install_or_update_package(package, python_exec, index_url, upgrade, logger)
     return results
+
+
+def install_requirements_file(
+    requirements_file: Union[str, Path],
+    python_exec: Union[str, Path],
+    index_url: Optional[str] = None,
+    upgrade: bool = False,
+    logger: Optional[logging.Logger] = None
+) -> Dict[str, Any]:
+    if logger is None:
+        logger = logging.getLogger(__name__)
+    result = {"success": False, "updated": False, "up_to_date": False, "error": None, "installed": [], "satisfied": []}
+    try:
+        req_path = Path(requirements_file).resolve()
+        python_path = Path(python_exec).resolve()
+        if not req_path.exists():
+            result["error"] = f"requirements 文件不存在: {str(req_path)}"
+            logger.error(result["error"])
+            return result
+        pip_exe = compute_pip_executable(python_path)
+        if pip_exe.exists():
+            cmd = [str(pip_exe), "install"]
+        else:
+            cmd = [str(python_path), "-m", "pip", "install"]
+        cmd.extend(["-r", str(req_path)])
+        if index_url:
+            cmd.extend(["-i", index_url])
+        logger.info(f"执行 pip requirements 安装: {' '.join(cmd)}")
+        pip_result = run_hidden(cmd, capture_output=True, text=True)
+        if pip_result.returncode == 0:
+            result["success"] = True
+            stdout = getattr(pip_result, 'stdout', '') or ''
+            try:
+                import re as _re
+                for line in stdout.splitlines():
+                    if "Successfully installed" in line:
+                        tail = line.split("Successfully installed", 1)[1].strip()
+                        toks = tail.split()
+                        for t in toks:
+                            m = _re.match(r"^([A-Za-z0-9_.\-]+)-([0-9][A-Za-z0-9_.+\-]*)$", t)
+                            if m:
+                                name = m.group(1)
+                                ver = m.group(2)
+                                result["installed"].append(f"{name}-{ver}")
+                            else:
+                                result["installed"].append(t)
+                    elif "Requirement already satisfied" in line:
+                        m = _re.search(r"Requirement already satisfied:\s*([A-Za-z0-9_.\-]+).*?\(.*?version\s+([A-Za-z0-9_.+\-]+)\)", line)
+                        if m:
+                            result["satisfied"].append(f"{m.group(1)}-{m.group(2)}")
+                        else:
+                            m2 = _re.search(r"Requirement already satisfied:\s*([A-Za-z0-9_.\-]+)", line)
+                            if m2:
+                                result["satisfied"].append(m2.group(1))
+                if result["installed"]:
+                    for item in result["installed"]:
+                        try:
+                            logger.info(f"依赖变更: 安装/更新 {item}")
+                        except Exception:
+                            pass
+                if result["satisfied"]:
+                    try:
+                        logger.info(f"依赖满足: {', '.join(result['satisfied'])}")
+                    except Exception:
+                        pass
+            except Exception:
+                pass
+            result["updated"] = ("Installing collected packages" in stdout) or ("Successfully installed" in stdout) or ("Successfully upgraded" in stdout)
+            result["up_to_date"] = ("Requirement already satisfied" in stdout) and not result["updated"]
+            logger.info(f"requirements 安装完成: {req_path.name}, 更新={result['updated']}, 最新={result['up_to_date']}")
+        else:
+            stderr = getattr(pip_result, 'stderr', '') or ''
+            result["error"] = f"pip requirements 执行失败: {stderr}"
+            logger.error(result["error"])
+    except Exception as e:
+        result["error"] = f"pip requirements 操作异常: {str(e)}"
+        logger.error(result["error"])
+    return result

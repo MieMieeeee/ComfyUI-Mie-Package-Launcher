@@ -46,7 +46,7 @@ class UpdateService:
         pkg = "comfyui-frontend-package"
         spec = None
         try:
-            if getattr(self.app, 'requirements_sync_var', None) and bool(self.app.requirements_sync_var.get()):
+            if getattr(self.app, 'auto_update_deps_var', None) and bool(self.app.auto_update_deps_var.get()):
                 spec = self._find_requirement_spec(pkg)
         except Exception:
             spec = None
@@ -80,7 +80,7 @@ class UpdateService:
         pkg = "comfyui-workflow-templates"
         spec = None
         try:
-            if getattr(self.app, 'requirements_sync_var', None) and bool(self.app.requirements_sync_var.get()):
+            if getattr(self.app, 'auto_update_deps_var', None) and bool(self.app.auto_update_deps_var.get()):
                 spec = self._find_requirement_spec(pkg)
         except Exception:
             spec = None
@@ -161,7 +161,7 @@ class UpdateService:
         results: List[Dict[str, Any]] = []
         needs_consistency = False
         try:
-            needs_consistency = bool(getattr(self.app, 'requirements_sync_var', None) and self.app.requirements_sync_var.get())
+            needs_consistency = bool(getattr(self.app, 'auto_update_deps_var', None) and self.app.auto_update_deps_var.get())
         except Exception:
             needs_consistency = False
         do_core_first = bool(self.app.update_core_var.get() or (needs_consistency and (self.app.update_frontend_var.get() or self.app.update_template_var.get())))
@@ -202,6 +202,56 @@ class UpdateService:
                     pass
                 if core_res:
                     results.append(core_res)
+                # 在内核升级后执行 requirements*.txt 安装，确保前端与模板库等依赖一致
+                if needs_consistency:
+                    try:
+                        base = Path(self.app.config.get("paths", {}).get("comfyui_root") or ".").resolve()
+                        comfy_root = (base / "ComfyUI").resolve()
+                    except Exception:
+                        comfy_root = Path.cwd()
+                    # 解析 PyPI 代理
+                    idx = None
+                    try:
+                        mode = self.app.pypi_proxy_mode.get()
+                        if mode == 'aliyun':
+                            idx = 'https://mirrors.aliyun.com/pypi/simple/'
+                        elif mode == 'custom':
+                            u = (self.app.pypi_proxy_url.get() or '').strip()
+                            if u:
+                                idx = u
+                    except Exception:
+                        idx = None
+                    # 依次处理 requirements*.txt
+                    req_files = []
+                    for name in ["requirements.txt", "requirements-dev.txt", "requirements-beta.txt"]:
+                        p = comfy_root / name
+                        try:
+                            if p.exists():
+                                req_files.append(p)
+                        except Exception:
+                            pass
+                    try:
+                        for f in comfy_root.glob("requirements*.txt"):
+                            if f not in req_files:
+                                req_files.append(f)
+                    except Exception:
+                        pass
+                    from utils import pip as PIPUTILS
+                    sync_summary = []
+                    installed_all = []
+                    satisfied_all = []
+                    for rf in req_files:
+                        try:
+                            res = PIPUTILS.install_requirements_file(rf, self._resolve_python_exec(), index_url=idx, upgrade=False, logger=self.app.logger)
+                            ok = res.get("success") and not res.get("error")
+                            sync_summary.append(f"{rf.name}: {'OK' if ok else 'FAIL'}")
+                            for item in (res.get("installed") or []):
+                                installed_all.append(item)
+                            for item in (res.get("satisfied") or []):
+                                satisfied_all.append(item)
+                        except Exception as e:
+                            sync_summary.append(f"{rf.name}: FAIL")
+                    results.append({"component": "requirements", "updated": True, "summary": "; ".join(sync_summary), "installed": installed_all, "satisfied": satisfied_all})
             except Exception:
                 results.append({"component": "core", "error": "update failed"})
         if self.app.update_frontend_var.get():
@@ -238,6 +288,18 @@ class UpdateService:
                             lines.append(f"内核：已是最新，无需更新{suffix}")
                     else:
                         lines.append("内核：更新流程完成")
+            elif comp == "requirements":
+                changes = res.get("installed") or []
+                satisfied = res.get("satisfied") or []
+                if changes:
+                    show_changes = ", ".join(changes[:10]) + (f" 等{len(changes)-10}项" if len(changes) > 10 else "")
+                else:
+                    show_changes = "无"
+                if satisfied:
+                    show_satisfied = ", ".join(satisfied[:10]) + (f" 等{len(satisfied)-10}项" if len(satisfied) > 10 else "")
+                else:
+                    show_satisfied = "无"
+                lines.append(f"依赖：已根据 requirements.txt 安装；变更: {show_changes}；已满足: {show_satisfied}")
             elif comp == "frontend":
                 ver = res.get("version") or ""
                 if res.get("updated"):

@@ -91,14 +91,14 @@ def build_version_panel(app, container, rounded_button_cls=None):
         selectcolor=CARD_BG
     ).pack(side=tk.LEFT)
     try:
-        app.requirements_sync_var
+        app.auto_update_deps_var
     except Exception:
         import tkinter as _tk
-        app.requirements_sync_var = _tk.BooleanVar(value=True)
+        app.auto_update_deps_var = _tk.BooleanVar(value=True)
     tk.Checkbutton(
         strat,
-        text="模板库与前端版本遵循内核需求",
-        variable=app.requirements_sync_var,
+        text="自动更新依赖库（包括前端及模板库）",
+        variable=app.auto_update_deps_var,
         bg=CARD_BG, fg=c["TEXT"],
         activebackground=CARD_BG, activeforeground=c["TEXT"],
         selectcolor=CARD_BG

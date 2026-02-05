@@ -275,8 +275,8 @@ class VersionManager:
                                bg=self.COLORS["card"], fg=self.COLORS["text"],
                                activebackground=self.COLORS["card"], activeforeground=self.COLORS["text"],
                                selectcolor=self.COLORS["card"]).pack(side=tk.LEFT)
-            if hasattr(self.parent, 'requirements_sync_var') and self.parent.requirements_sync_var is not None:
-                tk.Checkbutton(update_row, text="模板库与前端版本遵循内核需求", variable=self.parent.requirements_sync_var,
+            if hasattr(self.parent, 'auto_update_deps_var') and self.parent.auto_update_deps_var is not None:
+                tk.Checkbutton(update_row, text="自动更新依赖库（包括前端及模板库）", variable=self.parent.auto_update_deps_var,
                                bg=self.COLORS["card"], fg=self.COLORS["text"],
                                activebackground=self.COLORS["card"], activeforeground=self.COLORS["text"],
                                selectcolor=self.COLORS["card"]).pack(side=tk.LEFT, padx=(10, 0))

@@ -68,10 +68,10 @@ class ProcessManager:
             if pids:
                 try:
                     from tkinter import messagebox
-                    # 若端口被占用，优先提示并提供直接打开网页的选项；默认取消启动
+                    pid_text = ", ".join(map(str, pids)) if pids else "未知"
                     proceed_open = messagebox.askyesno(
                         "端口被占用",
-                        f"检测到端口 {port} 已被占用 (PID: {', '.join(map(str, pids))}).\n\n是否直接打开网页而不启动新的实例?"
+                        f"检测到端口 {port} 已被占用 (PID: {pid_text}).\n\n是否直接打开网页而不启动新的实例?"
                     )
                 except Exception:
                     proceed_open = True
@@ -82,7 +82,6 @@ class ProcessManager:
                         pass
                     return
                 else:
-                    # 用户选择不直接打开网页：提供停止旧实例并启动新实例的选项
                     try:
                         restart = messagebox.askyesno(
                             "端口被占用",
@@ -95,11 +94,9 @@ class ProcessManager:
                             self.stop_all_comfyui_instances()
                         except Exception:
                             pass
-                        # 尝试启动新的实例
                         self.start_comfyui()
                         return
                     else:
-                        # 取消启动，维持按钮状态为“启动”
                         try:
                             self.app.logger.warning("端口占用，用户取消重启: %s", port)
                         except Exception:
@@ -206,6 +203,11 @@ class ProcessManager:
         self.comfyui_process = None
 
     def stop_comfyui(self): #
+        try:
+            self.app.big_btn.set_state("starting")
+            self.app.big_btn.set_text("正在停止…")
+        except Exception:
+            pass
         def _bg():
             try:
                 from core.runner_stop import stop as run_stop
@@ -243,6 +245,11 @@ class ProcessManager:
         return True
 
     def stop_comfyui_sync(self):
+        try:
+            self.app.big_btn.set_state("starting")
+            self.app.big_btn.set_text("正在停止…")
+        except Exception:
+            pass
         try:
             from core.runner_stop import stop as run_stop
         except Exception:
@@ -353,7 +360,9 @@ class ProcessManager:
                     m = pattern_tcp.match(line)
                     if m:
                         try:
-                            pids.add(int(m.group(2)))
+                            _pid = int(m.group(2))
+                            if _pid > 0:
+                                pids.add(_pid)
                         except Exception:
                             pass
                 # 不再统计 UDP（ComfyUI 使用 HTTP/TCP），以减少误判

@@ -21,7 +21,8 @@ def find_pids_by_port_safe(port: str):
                     for conn in conns:
                         try:
                             if getattr(conn, 'laddr', None) and getattr(conn.laddr, 'port', None) == int(port):
-                                pids.add(p.pid)
+                                if p.pid and p.pid > 0:
+                                    pids.add(p.pid)
                         except Exception:
                             pass
                 except Exception:
@@ -41,7 +42,9 @@ def find_pids_by_port_safe(port: str):
                 m = pattern_tcp.match(line)
                 if m:
                     try:
-                        pids.add(int(m.group(2)))
+                        pid_val = int(m.group(2))
+                        if pid_val > 0:
+                            pids.add(pid_val)
                     except Exception:
                         pass
             return list(pids)
@@ -54,6 +57,11 @@ def is_comfyui_pid(app, pid: int) -> bool:
         try:
             p = psutil.Process(pid)
             try:
+                if pid in (os.getpid(), os.getppid()):
+                    return False
+            except Exception:
+                pass
+            try:
                 cmdline = " ".join(p.cmdline()).lower()
             except Exception:
                 cmdline = ""
@@ -65,9 +73,13 @@ def is_comfyui_pid(app, pid: int) -> bool:
                 cwd = (p.cwd() or "").lower()
             except Exception:
                 cwd = ""
-            if ("main.py" in cmdline and ("comfyui" in cmdline or "windows-standalone-build" in cmdline)):
+            has_segment = (("\\comfyui\\" in cmdline) or ("/comfyui/" in cmdline) or
+                           ("\\comfyui\\" in exe) or ("/comfyui/" in exe) or
+                           ("\\comfyui\\" in cwd) or ("/comfyui/" in cwd))
+            has_main = ("main.py" in cmdline)
+            if has_main and (has_segment or ("comfyui" in cmdline) or ("windows-standalone-build" in cmdline)):
                 return True
-            if ("comfyui" in cmdline or "comfyui" in exe or "comfyui" in cwd):
+            if has_segment and not ("launcher" in cmdline or "launcher" in exe or "launcher" in cwd):
                 return True
         except (Exception):
             pass
@@ -89,7 +101,7 @@ def is_comfyui_pid(app, pid: int) -> bool:
                 r = run_hidden(["wmic", "process", "where", f"ProcessId={pid}", "get", "CommandLine", "/format:list"], capture_output=True, text=True, encoding=preferred_enc, errors="ignore")
                 if r.returncode == 0 and r.stdout:
                     out = r.stdout.lower()
-                    if ("comfyui" in out) or ("main.py" in out) or (comfy_root and comfy_root in out):
+                    if ("main.py" in out and "comfyui" in out) or (comfy_root and comfy_root in out):
                         return True
             except FileNotFoundError:
                 app._wmic_available = False

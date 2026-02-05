@@ -1,3 +1,9 @@
+import os as _os, sys as _sys
+try:
+    _sys.path.insert(0, _os.path.abspath(_os.path.dirname(__file__)))
+    _sys.path.insert(0, _os.path.abspath(_os.path.join(_os.path.dirname(__file__), "..")))
+except Exception:
+    pass
 import tkinter as tk
 from tkinter import ttk, messagebox, filedialog
 import threading, os, sys
@@ -285,7 +291,17 @@ class ComfyUILauncherEnhanced:
         # 升级偏好：仅稳定版
         vp = (self.config.get("version_preferences") or {}) if isinstance(self.config, dict) else {}
         self.stable_only_var = tk.BooleanVar(value=bool(vp.get("stable_only", True)))
-        self.requirements_sync_var = tk.BooleanVar(value=bool(vp.get("requirements_sync", True)))
+        self.auto_update_deps_var = tk.BooleanVar(value=bool(vp.get("auto_update_deps", True)))
+        
+        # 自动保存依赖更新选项
+        def _save_deps_pref(*args):
+            try:
+                self.config.setdefault("version_preferences", {})
+                self.config["version_preferences"]["auto_update_deps"] = self.auto_update_deps_var.get()
+                threading.Thread(target=lambda: self.config_manager.save_config(self.config), daemon=True).start()
+            except Exception:
+                pass
+        self.auto_update_deps_var.trace_add("write", _save_deps_pref)
 
         # PyPI 代理设置（用于前端与模板库更新）
         proxy_cfg = self.config.get("proxy_settings", {}) if isinstance(self.config, dict) else {}
@@ -314,7 +330,7 @@ class ComfyUILauncherEnhanced:
         self.custom_browser_path.trace_add("write", lambda *a: self.save_config())
         # 版本偏好变更时持久化
         self.stable_only_var.trace_add("write", lambda *a: self.save_config())
-        self.requirements_sync_var.trace_add("write", lambda *a: self.save_config())
+        self.auto_update_deps_var.trace_add("write", lambda *a: self.save_config())
 
         # HF 镜像 URL
         default_hf_url = proxy_cfg.get("hf_mirror_url", "https://hf-mirror.com")
@@ -381,7 +397,7 @@ class ComfyUILauncherEnhanced:
                     hf_mirror_url=_get(self.hf_mirror_url, "https://hf-mirror.com")
                 )
                 self.services.config.set("version_preferences.stable_only", _get(self.stable_only_var, True))
-                self.services.config.set("version_preferences.requirements_sync", _get(self.requirements_sync_var, False))
+                self.services.config.set("version_preferences.auto_update_deps", _get(self.auto_update_deps_var, True))
                 self.services.config.save(None)
                 self.config = self.services.config.get_config()
             else:
@@ -418,7 +434,7 @@ class ComfyUILauncherEnhanced:
                 except Exception:
                     pass
                 try:
-                    self.config_manager.set("version_preferences.requirements_sync", _get(self.requirements_sync_var, False))
+                    self.config_manager.set("version_preferences.auto_update_deps", _get(self.auto_update_deps_var, True))
                 except Exception:
                     pass
                 self.config_manager.save_config()
@@ -946,15 +962,23 @@ class ComfyUILauncherEnhanced:
                 proceed = True
             if not proceed:
                 return
-            ok = False
+            def _bg():
+                try:
+                    self.process_manager.stop_comfyui_sync()
+                except Exception:
+                    pass
+                try:
+                    self.root.after(0, self.root.destroy)
+                except Exception:
+                    pass
             try:
-                ok = bool(self.process_manager.stop_comfyui_sync())
+                import threading as _th
+                _th.Thread(target=_bg, daemon=True).start()
             except Exception:
-                ok = False
-            try:
-                self.root.destroy()
-            except Exception:
-                pass
+                try:
+                    self.root.destroy()
+                except Exception:
+                    pass
         else:
             try:
                 self.root.destroy()
