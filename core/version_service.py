@@ -130,10 +130,10 @@ def refresh_version_info(app, scope: str = "all"):
                 _submit(_python_ver)
                 def _torch_ver():
                     try:
-                        r = run_hidden([app.python_exec, "-c", "import torch;print(torch.__version__)"], capture_output=True, text=True, timeout=10)
-                        if r.returncode == 0:
+                        ver = PIPUTILS.get_package_version("torch", app.python_exec, logger=app.logger)
+                        if ver:
                             try:
-                                app.root.after(0, lambda v=r.stdout.strip(): app.torch_version.set(v))
+                                app.root.after(0, lambda v=ver: app.torch_version.set(v))
                             except Exception:
                                 pass
                         else:
