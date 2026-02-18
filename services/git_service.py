@@ -7,37 +7,27 @@ class GitService:
         self.app = app
 
     def resolve_git(self):
-        pg_candidates = []
         try:
-            pg_candidates.append(Path(self.app.python_exec).resolve().parent / "tools" / "PortableGit" / "bin" / "git.exe")
+            base = Path(self.app.config.get("paths", {}).get("comfyui_root") or ".").resolve()
+        except Exception:
+            base = Path(".").resolve()
+        try:
+            pkg_git = base / "tools" / "PortableGit" / "bin" / "git.exe"
+            if pkg_git.exists():
+                r_pkg = run_hidden([str(pkg_git), "--version"], capture_output=True, text=True, timeout=5)
+                if r_pkg.returncode == 0:
+                    self.app.git_path = str(pkg_git)
+                    try:
+                        self.app.logger.info(f"Git解析: 使用整合包Git path={self.app.git_path}")
+                    except Exception:
+                        pass
+                    try:
+                        self.apply_to_manager(self.app.git_path)
+                    except Exception:
+                        pass
+                    return self.app.git_path, "使用整合包Git"
         except Exception:
             pass
-        try:
-            pg_candidates.append(Path(__file__).resolve().parent.parent / "tools" / "PortableGit" / "bin" / "git.exe")
-        except Exception:
-            pass
-        try:
-            pg_candidates.append(Path(__file__).resolve().parent / "tools" / "PortableGit" / "bin" / "git.exe")
-        except Exception:
-            pass
-        pg_candidates.append(Path.cwd() / "tools" / "PortableGit" / "bin" / "git.exe")
-        for c in pg_candidates:
-            try:
-                if c.exists():
-                    r_pkg = run_hidden([str(c), "--version"], capture_output=True, text=True, timeout=5)
-                    if r_pkg.returncode == 0:
-                        self.app.git_path = str(c)
-                        try:
-                            self.app.logger.info(f"Git解析: 使用整合包Git path={self.app.git_path}")
-                        except Exception:
-                            pass
-                        try:
-                            self.apply_to_manager(self.app.git_path)
-                        except Exception:
-                            pass
-                        return self.app.git_path, "使用整合包Git"
-            except Exception:
-                pass
         try:
             r_sys = run_hidden(["git", "--version"], capture_output=True, text=True, timeout=5)
             if r_sys.returncode == 0:

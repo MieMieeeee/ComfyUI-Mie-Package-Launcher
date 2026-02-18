@@ -34,19 +34,15 @@ def workflows_dir(comfy_root: Path) -> Path:
 def resolve_base_root() -> Path:
     """解析运行根目录，用于日志与配置放置。
     优先规则：
-    1) EXE 所在目录（`Path(sys.executable).parent`）
-    2) 当前工作目录（`Path.cwd()`）
-    3) 源码相对目录（`Path(__file__).parent.parent` 或 `Path(__file__).parent`）
-    4) 最后考虑 `_MEIPASS`（PyInstaller 临时目录，仅用于资源，不用于日志与配置）
+    1) 当前工作目录（`Path.cwd()`）
+    2) 源码相对目录（`Path(__file__).parent.parent` 或 `Path(__file__).parent`）
+    3) EXE 所在目录（`Path(sys.executable).parent`）
+    4) `_MEIPASS` 仅用于资源，不参与日志与配置根目录选择
 
     在上述每个候选中，若检测到 `ComfyUI/main.py`，则优先返回该候选（认为是项目根）。
     否则返回第一个存在的候选路径。
     """
     candidates: list[Path] = []
-    try:
-        candidates.append(Path(sys.executable).resolve().parent)
-    except Exception:
-        pass
     try:
         candidates.append(Path.cwd())
     except Exception:
@@ -56,11 +52,8 @@ def resolve_base_root() -> Path:
         candidates.append(Path(__file__).resolve().parent)
     except Exception:
         pass
-    # `_MEIPASS` 作为资源目录，不参与日志/配置根目录选择
     try:
-        from sys import _MEIPASS  # type: ignore
-        if _MEIPASS:
-            candidates.append(Path(_MEIPASS))
+        candidates.append(Path(sys.executable).resolve().parent)
     except Exception:
         pass
 
@@ -71,7 +64,7 @@ def resolve_base_root() -> Path:
                 return cand
         except Exception:
             pass
-    # 第二轮：返回第一个存在的候选（通常为 EXE 目录或 CWD）
+    # 第二轮：返回第一个存在的候选（优先 CWD 与源码目录，其次 EXE 目录）
     for cand in candidates:
         try:
             if cand and cand.exists():

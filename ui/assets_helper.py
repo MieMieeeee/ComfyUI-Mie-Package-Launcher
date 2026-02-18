@@ -15,6 +15,10 @@ def resolve_asset(filename: str) -> Path:
     except Exception:
         pass
     try:
+        candidates.append(Path(__file__).resolve().parents[1] / 'assets' / filename)
+    except Exception:
+        pass
+    try:
         candidates.append(Path('launcher').resolve() / 'assets' / filename)
     except Exception:
         pass

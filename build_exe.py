@@ -22,8 +22,6 @@ def build_simple_test():
         '--onefile',
         '--console',
         '--debug=all',
-        '--hidden-import=tkinter',
-        '--hidden-import=tkinter.ttk',
         'test_simple.py'
     ]
     
@@ -54,7 +52,7 @@ def build_exe():
     args = [
         '--name=ComfyUI启动器',
         '--onefile',
-        '--windowed',  # 改回窗口模式
+        '--windowed',
         '--add-data=assets/about_me.png;assets',
         '--add-data=assets/comfyui.png;assets',
         '--add-data=assets/rabbit.png;assets',
@@ -67,12 +65,11 @@ def build_exe():
         '--hidden-import=webbrowser',
         '--hidden-import=tempfile',
         '--hidden-import=atexit',
-        '--hidden-import=tkinter',
-        '--hidden-import=tkinter.ttk',
-        '--hidden-import=tkinter.messagebox',
-        '--hidden-import=tkinter.filedialog',
+        '--hidden-import=PyQt5',
+        '--hidden-import=PyQt5.QtWidgets',
+        '--hidden-import=PyQt5.QtCore',
+        '--hidden-import=PyQt5.QtGui',
         # 新结构的显式隐藏导入，确保打包准确包含子模块
-        '--hidden-import=core.version_manager',
         '--hidden-import=core.process_manager',
         '--hidden-import=config.manager',
         '--hidden-import=utils.logging',
@@ -81,12 +78,13 @@ def build_exe():
         '--hidden-import=utils.pip',
         '--hidden-import=utils.common',
         '--hidden-import=ui.assets_helper',
+        '--hidden-import=ui_qt.qt_app',
         '--exclude-module=fcntl',
         '--exclude-module=posix',
         '--exclude-module=pwd',
         '--exclude-module=grp',
         '--exclude-module=_posixsubprocess',
-        'comfyui_launcher_enhanced.py'
+        'comfyui_launcher_pyqt.py'
     ]
     
     # 检查图标文件是否存在
@@ -119,6 +117,7 @@ def build_exe():
     
     try:
         bp_path = os.path.join(current_dir, 'build_parameters.json')
+        bp_path_launcher = os.path.join(current_dir, 'launcher', 'build_parameters.json')
         params = {}
         try:
             if os.path.exists(bp_path):
@@ -135,6 +134,13 @@ def build_exe():
         try:
             with open(bp_path, 'w', encoding='utf-8') as f:
                 json.dump(params, f, ensure_ascii=False, indent=2)
+            try:
+                os.makedirs(os.path.dirname(bp_path_launcher), exist_ok=True)
+                with open(bp_path_launcher, 'w', encoding='utf-8') as f:
+                    json.dump(params, f, ensure_ascii=False, indent=2)
+                print(f"版本参数写入: {bp_path} 以及 {bp_path_launcher}")
+            except Exception:
+                print(f"版本参数写入: {bp_path}（launcher 目录写入失败，忽略）")
         except Exception:
             pass
         # 运行PyInstaller

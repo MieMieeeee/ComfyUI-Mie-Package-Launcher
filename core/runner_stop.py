@@ -42,7 +42,11 @@ def stop(app, pm):
                             pm.comfyui_process.kill()
                             killed = True
                         except Exception as e3:
-                            app.root.after(0, lambda: __import__('tkinter').messagebox.showerror("错误", f"停止失败: {e3}"))
+                            try:
+                                from PyQt5 import QtWidgets
+                                app.root.after(0, lambda: QtWidgets.QMessageBox.critical(None, "错误", f"停止失败: {e3}"))
+                            except Exception:
+                                pass
             except Exception:
                 try:
                     pm.comfyui_process.terminate()
@@ -52,7 +56,11 @@ def stop(app, pm):
                     pm.comfyui_process.kill()
                     killed = True
                 except Exception as e2:
-                    app.root.after(0, lambda: __import__('tkinter').messagebox.showerror("错误", f"停止失败: {e2}"))
+                    try:
+                        from PyQt5 import QtWidgets
+                        app.root.after(0, lambda: QtWidgets.QMessageBox.critical(None, "错误", f"停止失败: {e2}"))
+                    except Exception:
+                        pass
         else:
             try:
                 pm.comfyui_process.terminate()
@@ -62,7 +70,11 @@ def stop(app, pm):
                 pm.comfyui_process.kill()
                 killed = True
             except Exception as e:
-                app.root.after(0, lambda: __import__('tkinter').messagebox.showerror("错误", f"停止失败: {e}"))
+                try:
+                    from PyQt5 import QtWidgets
+                    app.root.after(0, lambda: QtWidgets.QMessageBox.critical(None, "错误", f"停止失败: {e}"))
+                except Exception:
+                    pass
     if not killed:
         try:
             port = (app.custom_port.get() or "8188").strip()

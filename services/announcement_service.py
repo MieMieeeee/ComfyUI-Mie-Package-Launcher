@@ -409,8 +409,8 @@ class AnnouncementService:
                             self._log('info', 'announcement: using cache for popup size=%d', len(txt))
                             def _show_cache():
                                 try:
-                                    from tkinter import messagebox
-                                    messagebox.showinfo("公告", txt)
+                                    from PyQt5 import QtWidgets
+                                    QtWidgets.QMessageBox.information(getattr(self.app, 'window', None) or None, "公告", txt)
                                 except Exception:
                                     pass
                             try:
@@ -466,25 +466,19 @@ class AnnouncementService:
                 pass
             def _show_popup():
                 try:
-                    import tkinter as tk
+                    from PyQt5 import QtWidgets, QtCore
                     self._log('info', 'announcement: show title=%s size=%d source=%s', title, len(content), data.get('source'))
-                    top = tk.Toplevel(self.app.root)
-                    top.title(title)
-                    top.transient(self.app.root)
-                    frm = tk.Frame(top)
-                    frm.pack(fill=tk.BOTH, expand=True, padx=14, pady=12)
-                    txtw = tk.Text(frm, wrap='word', height=16)
-                    txtw.pack(side=tk.LEFT, fill=tk.BOTH, expand=True)
-                    sb = tk.Scrollbar(frm, command=txtw.yview)
-                    sb.pack(side=tk.RIGHT, fill=tk.Y)
-                    txtw.configure(yscrollcommand=sb.set)
-                    try:
-                        txtw.insert('1.0', content)
-                        txtw.configure(state='disabled')
-                    except Exception:
-                        pass
-                    btns = tk.Frame(top)
-                    btns.pack(fill=tk.X, padx=14, pady=(0, 12))
+                    dlg = QtWidgets.QDialog(getattr(self.app, 'window', None) or None)
+                    dlg.setWindowTitle(title)
+                    layout = QtWidgets.QVBoxLayout(dlg)
+                    text = QtWidgets.QTextEdit()
+                    text.setReadOnly(True)
+                    text.setPlainText(content)
+                    layout.addWidget(text)
+                    btns = QtWidgets.QDialogButtonBox()
+                    ack_btn = btns.addButton("知道了", QtWidgets.QDialogButtonBox.AcceptRole)
+                    mute_btn = btns.addButton("不再弹出", QtWidgets.QDialogButtonBox.DestructiveRole)
+                    layout.addWidget(btns)
                     def _ack():
                         try:
                             if aid:
@@ -492,10 +486,7 @@ class AnnouncementService:
                                 self._log('debug', 'announcement: marked seen id=%s', aid[:8])
                         except Exception:
                             pass
-                        try:
-                            top.destroy()
-                        except Exception:
-                            pass
+                        dlg.accept()
                     def _mute():
                         try:
                             if aid:
@@ -512,27 +503,12 @@ class AnnouncementService:
                                 self._log('info', 'announcement: muted id=%s', aid[:8])
                         except Exception:
                             pass
-                        try:
-                            top.destroy()
-                        except Exception:
-                            pass
-                    a = tk.Button(btns, text='知道了', command=_ack)
-                    a.pack(side=tk.RIGHT, padx=(6, 0))
-                    m = tk.Button(btns, text='不再弹出', command=_mute)
-                    m.pack(side=tk.RIGHT)
-                    try:
-                        top.update_idletasks()
-                        rw = self.app.root.winfo_width()
-                        rh = self.app.root.winfo_height()
-                        rx = self.app.root.winfo_rootx()
-                        ry = self.app.root.winfo_rooty()
-                        tw = max(560, top.winfo_reqwidth())
-                        th = max(380, top.winfo_reqheight())
-                        cx = rx + (rw - tw) // 2
-                        cy = ry + (rh - th) // 2
-                        top.geometry(f"{tw}x{th}+{max(0,cx)}+{max(0,cy)}")
-                    except Exception:
-                        pass
+                        dlg.accept()
+                    ack_btn.clicked.connect(_ack)
+                    mute_btn.clicked.connect(_mute)
+                    dlg.resize(max(560, dlg.sizeHint().width()), max(380, dlg.sizeHint().height()))
+                    dlg.setModal(True)
+                    dlg.show()
                 except Exception:
                     pass
             try:
@@ -560,8 +536,8 @@ class AnnouncementService:
                 pass
         if not data:
             try:
-                from tkinter import messagebox
-                messagebox.showinfo("公告", "暂无公告")
+                from PyQt5 import QtWidgets
+                QtWidgets.QMessageBox.information(getattr(self.app, 'window', None) or None, "公告", "暂无公告")
             except Exception:
                 pass
             return
@@ -569,35 +545,20 @@ class AnnouncementService:
         content = data.get("content") or ""
         def _show():
             try:
-                import tkinter as tk
-                top = tk.Toplevel(self.app.root)
-                top.title(title)
-                top.transient(self.app.root)
-                frm = tk.Frame(top)
-                frm.pack(fill=tk.BOTH, expand=True, padx=14, pady=12)
-                txtw = tk.Text(frm, wrap='word', height=16)
-                txtw.pack(side=tk.LEFT, fill=tk.BOTH, expand=True)
-                sb = tk.Scrollbar(frm, command=txtw.yview)
-                sb.pack(side=tk.RIGHT, fill=tk.Y)
-                txtw.configure(yscrollcommand=sb.set)
-                try:
-                    txtw.insert('1.0', content)
-                    txtw.configure(state='disabled')
-                except Exception:
-                    pass
-                try:
-                    top.update_idletasks()
-                    rw = self.app.root.winfo_width()
-                    rh = self.app.root.winfo_height()
-                    rx = self.app.root.winfo_rootx()
-                    ry = self.app.root.winfo_rooty()
-                    tw = max(560, top.winfo_reqwidth())
-                    th = max(380, top.winfo_reqheight())
-                    cx = rx + (rw - tw) // 2
-                    cy = ry + (rh - th) // 2
-                    top.geometry(f"{tw}x{th}+{max(0,cx)}+{max(0,cy)}")
-                except Exception:
-                    pass
+                from PyQt5 import QtWidgets
+                dlg = QtWidgets.QDialog(getattr(self.app, 'window', None) or None)
+                dlg.setWindowTitle(title)
+                layout = QtWidgets.QVBoxLayout(dlg)
+                text = QtWidgets.QTextEdit()
+                text.setReadOnly(True)
+                text.setPlainText(content)
+                layout.addWidget(text)
+                btns = QtWidgets.QDialogButtonBox(QtWidgets.QDialogButtonBox.Ok)
+                layout.addWidget(btns)
+                btns.accepted.connect(dlg.accept)
+                dlg.resize(max(560, dlg.sizeHint().width()), max(380, dlg.sizeHint().height()))
+                dlg.setModal(True)
+                dlg.show()
             except Exception:
                 pass
         try:

@@ -38,6 +38,13 @@ class VersionService(IVersionService):
     def _run_git(self, cmd: list, **kwargs):
         # 包装 run_hidden 以处理 git ownership 问题
         cwd = kwargs.get('cwd')
+        try:
+            if isinstance(cmd, list) and cmd and str(cmd[0]).lower() == 'git':
+                gp = getattr(self.app, 'git_path', None)
+                if gp:
+                    cmd = [gp] + cmd[1:]
+        except Exception:
+            pass
         r = run_hidden(cmd, **kwargs)
         if r.returncode != 0 and "dubious ownership" in (r.stderr or ""):
             try:

@@ -1,7 +1,7 @@
 import os
 from pathlib import Path
-from tkinter import messagebox
 from utils import paths as PATHS
+from PyQt5 import QtWidgets
 
 def open_dir(app, path: Path):
     try:
@@ -12,7 +12,7 @@ def open_dir(app, path: Path):
     if path.exists():
         os.startfile(str(path))
     else:
-        messagebox.showwarning("警告", f"目录不存在: {path}")
+        QtWidgets.QMessageBox.warning(None, "警告", f"目录不存在: {path}")
 
 def open_file(app, path: Path):
     try:
@@ -22,7 +22,7 @@ def open_file(app, path: Path):
     if path.exists():
         os.startfile(str(path))
     else:
-        messagebox.showwarning("警告", f"文件不存在: {path}")
+        QtWidgets.QMessageBox.warning(None, "警告", f"文件不存在: {path}")
 
 def open_root_dir(app):
     root = PATHS.get_comfy_root(app.config.get("paths", {}))
@@ -54,7 +54,20 @@ def open_workflows_dir(app):
     if wf.exists():
         os.startfile(str(wf))
     else:
-        messagebox.showwarning("提示", "工作流文件夹尚未创建，需要保存至少一个工作流")
+        QtWidgets.QMessageBox.information(None, "提示", "工作流文件夹尚未创建，需要保存至少一个工作流")
+def open_launcher_log(app):
+    try:
+        from pathlib import Path
+        p = Path.cwd() / "launcher" / "launcher.log"
+    except Exception:
+        try:
+            p = Path("launcher/launcher.log")
+        except Exception:
+            p = None
+    if p and p.exists():
+        os.startfile(str(p))
+    else:
+        QtWidgets.QMessageBox.information(None, "提示", "未找到启动器日志文件（launcher/launcher.log）")
 def open_web(app):
     url = f"http://127.0.0.1:{app.custom_port.get() or '8188'}"
     try:
@@ -89,8 +102,5 @@ def open_web(app):
                 return
             except Exception:
                 pass
-        try:
-            messagebox.showwarning("提示", "未设置或无法使用自定义浏览器，使用默认浏览器打开")
-        except Exception:
-            pass
+        QtWidgets.QMessageBox.information(None, "提示", "未设置或无法使用自定义浏览器，使用默认浏览器打开")
     webbrowser.open(url)

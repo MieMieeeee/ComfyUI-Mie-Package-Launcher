@@ -26,11 +26,11 @@ def start(app, pm, cmd, env, run_cwd):
                 pm.comfyui_process = subprocess.Popen(cmd, env=env, cwd=run_cwd)
             threading.Event().wait(2)
             if pm.comfyui_process.poll() is None:
-                app.root.after(0, pm.on_start_success)
+                app.ui_post(pm.on_start_success)
             else:
-                app.root.after(0, lambda: pm.on_start_failed("进程退出"))
+                app.ui_post(lambda: pm.on_start_failed("进程退出"))
         except Exception as e:
             msg = str(e)
-            app.root.after(0, lambda m=msg: pm.on_start_failed(m))
+            app.ui_post(lambda m=msg: pm.on_start_failed(m))
 
     threading.Thread(target=worker, daemon=True).start()

@@ -30,6 +30,7 @@ class ConfigManager:
             "launch_options": {
                 "default_compute_mode": "gpu",
                 "default_port": "8188",
+                "disable_all_custom_nodes": False,
                 "enable_fast_mode": False,
                 "enable_cors": True,
                 "listen_all": True,

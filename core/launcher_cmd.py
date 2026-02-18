@@ -19,6 +19,14 @@ def build_launch_params(app):
     try:
         if app.compute_mode.get() == "cpu":
             cmd.append("--cpu")
+        else:
+            # GPU Mode: Add VRAM flags
+            vram = getattr(app, 'vram_mode', None)
+            if vram:
+                v_flag = vram.get()
+                if v_flag and v_flag not in cmd:
+                    cmd.append(v_flag)
+
         if app.use_fast_mode.get():
             cmd.extend(["--fast"])
         if app.listen_all.get():
@@ -28,6 +36,8 @@ def build_launch_params(app):
             cmd.extend(["--port", port])
         if app.enable_cors.get():
             cmd.extend(["--enable-cors-header", "*"])
+        if getattr(app, 'disable_all_custom_nodes', None) and app.disable_all_custom_nodes.get():
+            cmd.append("--disable-all-custom-nodes")
         extra = (app.extra_launch_args.get() or "").strip()
         if extra:
             try:
@@ -48,8 +58,13 @@ def build_launch_params(app):
             mode_var = getattr(app, 'browser_open_mode', None)
             mode = (mode_var.get() if mode_var else (app.config.get('launch_options', {}).get('browser_open_mode', 'default'))).strip()
             tokens_set = set(extra_tokens) if 'extra_tokens' in locals() else set()
-            if '--disable-auto-launch' not in tokens_set and '--disable-auto-launch' not in cmd:
-                cmd.append('--disable-auto-launch')
+
+            if mode == "default":
+                if '--auto-launch' not in tokens_set and '--auto-launch' not in cmd:
+                    cmd.append('--auto-launch')
+            else:
+                if '--disable-auto-launch' not in tokens_set and '--disable-auto-launch' not in cmd:
+                    cmd.append('--disable-auto-launch')
         except Exception:
             pass
     except Exception:

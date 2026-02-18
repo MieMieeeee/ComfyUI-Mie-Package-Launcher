@@ -11,7 +11,6 @@ import shutil #
 import locale #
 import re #
 import socket #
-from tkinter import messagebox
 from pathlib import Path
 from utils.common import run_hidden #
 from core.probe import is_http_reachable, find_pids_by_port_safe, is_comfyui_pid
@@ -66,15 +65,12 @@ class ProcessManager:
             except Exception:
                 pids = []
             if pids:
-                try:
-                    from tkinter import messagebox
-                    pid_text = ", ".join(map(str, pids)) if pids else "未知"
-                    proceed_open = messagebox.askyesno(
-                        "端口被占用",
-                        f"检测到端口 {port} 已被占用 (PID: {pid_text}).\n\n是否直接打开网页而不启动新的实例?"
-                    )
-                except Exception:
-                    proceed_open = True
+                pid_text = ", ".join(map(str, pids)) if pids else "未知"
+                proceed_open = self._ask_yes_no(
+                    "端口被占用",
+                    f"检测到端口 {port} 已被占用 (PID: {pid_text}).\n\n是否直接打开网页而不启动新的实例?",
+                    default=True,
+                )
                 if proceed_open:
                     try:
                         self.app.open_comfyui_web()
@@ -82,13 +78,11 @@ class ProcessManager:
                         pass
                     return
                 else:
-                    try:
-                        restart = messagebox.askyesno(
-                            "端口被占用",
-                            "是否停止现有实例并用当前配置启动新的 ComfyUI?"
-                        )
-                    except Exception:
-                        restart = False
+                    restart = self._ask_yes_no(
+                        "端口被占用",
+                        "是否停止现有实例并用当前配置启动新的 ComfyUI?",
+                        default=False,
+                    )
                     if restart:
                         try:
                             self.stop_all_comfyui_instances()
@@ -167,7 +161,7 @@ class ProcessManager:
                 mode = (self.app.config.get("launch_options", {}).get("browser_open_mode") or "default").strip()
             except Exception:
                 mode = "default"
-        if mode != "none":
+        if mode == "custom":
             def _open_when_ready():
                 try:
                     import time
@@ -225,12 +219,12 @@ class ProcessManager:
                 try:
                     if killed:
                         try:
-                            self.app.root.after(0, self.on_process_ended)
+                            self.app.ui_post(self.on_process_ended)
                         except Exception:
                             pass
                     else:
                         try:
-                            self.app.root.after(0, self._refresh_running_status)
+                            self.app.ui_post(self._refresh_running_status)
                         except Exception:
                             pass
                     
@@ -303,12 +297,34 @@ class ProcessManager:
                 except Exception:
                     pass
                 return
-            messagebox.showerror(title, msg)
+            try:
+                from PyQt5 import QtWidgets
+                QtWidgets.QMessageBox.critical(None, title, msg)
+            except Exception:
+                try:
+                    # 作为回退，使用控制台日志
+                    self.app.logger.error(f"{title}: {msg}")
+                except Exception:
+                    pass
         except Exception:
             try:
                 self.app.logger.error(f"{title}: {msg}")
             except Exception:
                 pass
+
+    def _ask_yes_no(self, title: str, msg: str, default: bool = True) -> bool:
+        try:
+            from PyQt5 import QtWidgets, QtCore
+            btn = QtWidgets.QMessageBox.question(
+                None,
+                title,
+                msg,
+                QtWidgets.QMessageBox.Yes | QtWidgets.QMessageBox.No,
+                QtWidgets.QMessageBox.Yes if default else QtWidgets.QMessageBox.No,
+            )
+            return btn == QtWidgets.QMessageBox.Yes
+        except Exception:
+            return default
 
     def _find_pids_by_port_safe(self, port_str): #
         # 解析端口并通过 psutil 或 netstat 查找 PID 列表
@@ -542,10 +558,7 @@ class ProcessManager:
                     except Exception:
                         pass
                 try:
-                    try:
-                        self.app.root.after(0, _ui)
-                    except Exception:
-                        pass
+                    self.app.ui_post(_ui)
                 except Exception:
                     pass
             except Exception:

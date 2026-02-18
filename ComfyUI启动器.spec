@@ -2,11 +2,11 @@
 
 
 a = Analysis(
-    ['comfyui_launcher_enhanced.py'],
+    ['comfyui_launcher_pyqt.py'],
     pathex=[],
     binaries=[],
     datas=[('assets/about_me.png', 'assets'), ('assets/comfyui.png', 'assets'), ('assets/rabbit.png', 'assets'), ('assets/rabbit.ico', 'assets'), ('build_parameters.json', '.')],
-    hiddenimports=['threading', 'json', 'pathlib', 'subprocess', 'webbrowser', 'tempfile', 'atexit', 'tkinter', 'tkinter.ttk', 'tkinter.messagebox', 'tkinter.filedialog', 'core.version_manager', 'core.process_manager', 'config.manager', 'utils.logging', 'utils.paths', 'utils.net', 'utils.pip', 'utils.common', 'ui.assets_helper'],
+    hiddenimports=['threading', 'json', 'pathlib', 'subprocess', 'webbrowser', 'tempfile', 'atexit', 'PyQt5', 'PyQt5.QtWidgets', 'PyQt5.QtCore', 'PyQt5.QtGui', 'core.process_manager', 'config.manager', 'utils.logging', 'utils.paths', 'utils.net', 'utils.pip', 'utils.common', 'ui.assets_helper', 'ui_qt.qt_app'],
     hookspath=[],
     hooksconfig={},
     runtime_hooks=[],

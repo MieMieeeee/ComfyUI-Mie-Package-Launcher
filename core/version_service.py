@@ -46,6 +46,17 @@ def refresh_version_info(app, scope: str = "all"):
                 v.set("获取中…")
             except Exception:
                 pass
+    def _post(fn):
+        try:
+            app.ui_post(fn)
+        except Exception:
+            try:
+                app.root.after(0, fn)
+            except Exception:
+                try:
+                    fn()
+                except Exception:
+                    pass
     def worker():
         try:
             paths = app.config.get("paths", {}) if isinstance(app.config, dict) else {}
@@ -74,10 +85,7 @@ def refresh_version_info(app, scope: str = "all"):
                     except Exception:
                         repo_state = "非Git仓库"
                 git_text_to_show = repo_state if repo_state in ("未找到Git命令", "非Git仓库", "ComfyUI未找到") else git_source_text
-                try:
-                    app.root.after(0, lambda: app.git_status.set(git_text_to_show))
-                except Exception:
-                    pass
+                _post(lambda: app.git_status.set(git_text_to_show))
                 def _update_git_controls():
                     status = app.git_status.get()
                     disable = status in ("非Git仓库", "ComfyUI未找到", "未找到Git命令")
@@ -92,10 +100,7 @@ def refresh_version_info(app, scope: str = "all"):
                             app.batch_update_btn.config(state='disabled' if disable else 'normal')
                     except:
                         pass
-                try:
-                    app.root.after(0, _update_git_controls)
-                except Exception:
-                    pass
+                _post(_update_git_controls)
 
             core_needed = (scope == "all") or (scope == "core_only") or (scope == "selected" and app.update_core_var.get())
             executor = concurrent.futures.ThreadPoolExecutor(max_workers=4)
@@ -116,15 +121,9 @@ def refresh_version_info(app, scope: str = "all"):
                     try:
                         r = run_hidden([app.python_exec, "--version"], capture_output=True, text=True, timeout=10)
                         if r.returncode == 0:
-                            try:
-                                app.root.after(0, lambda v=r.stdout.strip().replace("Python ", ""): app.python_version.set(v))
-                            except Exception:
-                                pass
+                            _post(lambda v=r.stdout.strip().replace("Python ", ""): app.python_version.set(v))
                         else:
-                            try:
-                                app.root.after(0, lambda: app.python_version.set("获取失败"))
-                            except Exception:
-                                pass
+                            _post(lambda: app.python_version.set("获取失败"))
                     except Exception:
                         app.ui_post(lambda: app.python_version.set("获取失败"))
                 _submit(_python_ver)
@@ -132,60 +131,33 @@ def refresh_version_info(app, scope: str = "all"):
                     try:
                         ver = PIPUTILS.get_package_version("torch", app.python_exec, logger=app.logger)
                         if ver:
-                            try:
-                                app.root.after(0, lambda v=ver: app.torch_version.set(v))
-                            except Exception:
-                                pass
+                            _post(lambda v=ver: app.torch_version.set(v))
                         else:
-                            try:
-                                app.root.after(0, lambda: app.torch_version.set("未安装"))
-                            except Exception:
-                                pass
+                            _post(lambda: app.torch_version.set("未安装"))
                     except Exception:
-                        try:
-                            app.root.after(0, lambda: app.torch_version.set("获取失败"))
-                        except Exception:
-                            pass
+                        _post(lambda: app.torch_version.set("获取失败"))
                 _submit(_torch_ver)
             if scope == "all" or scope == "front_only" or scope == "python_related" or (scope == "selected" and app.update_frontend_var.get()):
                 def _front_ver():
                     try:
                         ver = PIPUTILS.get_package_version("comfyui-frontend-package", app.python_exec, logger=app.logger)
                         if ver:
-                            try:
-                                app.root.after(0, lambda v=ver: app.frontend_version.set(v))
-                            except Exception:
-                                pass
+                            _post(lambda v=ver: app.frontend_version.set(v))
                         else:
-                            try:
-                                app.root.after(0, lambda: app.frontend_version.set("未安装"))
-                            except Exception:
-                                pass
+                            _post(lambda: app.frontend_version.set("未安装"))
                     except Exception:
-                        try:
-                            app.root.after(0, lambda: app.frontend_version.set("获取失败"))
-                        except Exception:
-                            pass
+                        _post(lambda: app.frontend_version.set("获取失败"))
                 _submit(_front_ver)
             if scope == "all" or scope == "template_only" or scope == "python_related" or (scope == "selected" and app.update_template_var.get()):
                 def _tpl_ver():
                     try:
                         ver = PIPUTILS.get_package_version("comfyui-workflow-templates", app.python_exec, logger=app.logger)
                         if ver:
-                            try:
-                                app.root.after(0, lambda v=ver: app.template_version.set(v))
-                            except Exception:
-                                pass
+                            _post(lambda v=ver: app.template_version.set(v))
                         else:
-                            try:
-                                app.root.after(0, lambda: app.template_version.set("未安装"))
-                            except Exception:
-                                pass
+                            _post(lambda: app.template_version.set("未安装"))
                     except Exception:
-                        try:
-                            app.root.after(0, lambda: app.template_version.set("获取失败"))
-                        except Exception:
-                            pass
+                        _post(lambda: app.template_version.set("获取失败"))
                 _submit(_tpl_ver)
             if core_needed and root.exists() and app.git_path:
                 def _core_ver():
@@ -233,47 +205,26 @@ def refresh_version_info(app, scope: str = "all"):
                                 except Exception:
                                     label = ""
                                 app.comfyui_version.set(f"{tag}（{commit}）{label}")
-                            try:
-                                app.root.after(0, _set)
-                            except Exception:
-                                pass
+                            _post(_set)
                         else:
                             try:
                                 r2 = run_hidden([app.git_path, "rev-parse", "--short", "HEAD"], cwd=str(root), capture_output=True, text=True, timeout=6)
                                 commit = r2.stdout.strip() if r2.returncode == 0 else ""
                                 if commit:
-                                    try:
-                                        app.root.after(0, lambda c=commit: app.comfyui_version.set(f"（{c}）"))
-                                    except Exception:
-                                        pass
+                                    _post(lambda c=commit: app.comfyui_version.set(f"（{c}）"))
                                 else:
-                                    try:
-                                        app.root.after(0, lambda: app.comfyui_version.set("未找到"))
-                                    except Exception:
-                                        pass
+                                    _post(lambda: app.comfyui_version.set("未找到"))
                             except Exception:
-                                try:
-                                    app.root.after(0, lambda: app.comfyui_version.set("未找到"))
-                                except Exception:
-                                    pass
+                                _post(lambda: app.comfyui_version.set("未找到"))
                     except Exception:
-                        try:
-                            app.root.after(0, lambda: app.comfyui_version.set("未找到"))
-                        except Exception:
-                            pass
+                        _post(lambda: app.comfyui_version.set("未找到"))
                 _submit(_core_ver)
             elif core_needed:
                 try:
                     msg = "未找到Git命令" if not app.git_path else ("ComfyUI未找到" if not root.exists() else "未找到")
-                    try:
-                        app.root.after(0, lambda m=msg: app.comfyui_version.set(m))
-                    except Exception:
-                        pass
+                    _post(lambda m=msg: app.comfyui_version.set(m))
                 except Exception:
-                    try:
-                        app.root.after(0, lambda: app.comfyui_version.set("未找到"))
-                    except Exception:
-                        pass
+                    _post(lambda: app.comfyui_version.set("未找到"))
             try:
                 executor.shutdown(wait=False)
             except Exception:
@@ -281,3 +232,29 @@ def refresh_version_info(app, scope: str = "all"):
         finally:
             app._version_info_loading = False
     threading.Thread(target=worker, daemon=True).start()
+    def _watchdog():
+        try:
+            import time
+            time.sleep(10)
+            def _fix():
+                try:
+                    if (app.python_version.get() or "").startswith("获取中"):
+                        app.python_version.set("获取失败")
+                    if (app.torch_version.get() or "").startswith("获取中"):
+                        app.torch_version.set("获取失败")
+                    if (app.frontend_version.get() or "").startswith("获取中"):
+                        app.frontend_version.set("获取失败")
+                    if (app.template_version.get() or "").startswith("获取中"):
+                        app.template_version.set("获取失败")
+                    if (app.comfyui_version.get() or "").startswith("获取中"):
+                        app.comfyui_version.set("未找到")
+                except Exception:
+                    pass
+            _post(_fix)
+            app._version_info_loading = False
+        except Exception:
+            app._version_info_loading = False
+    try:
+        threading.Thread(target=_watchdog, daemon=True).start()
+    except Exception:
+        pass

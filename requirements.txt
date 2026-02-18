@@ -10,8 +10,10 @@
 # hashlib - 哈希计算
 # shutil - 文件操作
 
-# 打包依赖
-pyinstaller>=5.0.0    # 用于打包成exe文件
+# 打包与运行依赖
+pyinstaller>=5.0.0
+PyQt5>=5.15.0
+PyYAML>=6.0
 
 # 可选依赖（用于扩展功能）
 # GitPython==3.1.40  # Git操作（用于版本管理）
@@ -19,6 +21,6 @@ pyinstaller>=5.0.0    # 用于打包成exe文件
 # requests==2.31.0   # HTTP请求（用于在线更新）
 
 # 注意：
-# 1. 本启动器主要使用Python标准库，无需额外安装包
-# 2. 如果要打包成exe文件，需要安装pyinstaller
-# 3. 如果运行时出现导入错误，请检查Python安装是否完整
+# 1. 启动器使用 PyQt5 作为唯一 GUI 框架
+# 2. 构建可执行文件需要安装 pyinstaller
+# 3. 若运行时出现导入错误，请检查 Python 与依赖安装是否完整
