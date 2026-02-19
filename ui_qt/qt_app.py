@@ -234,6 +234,7 @@ class PyQtLauncher(QtWidgets.QMainWindow):
         self.listen_all = BoolVar(True)
         self.custom_port = Var("8188")
         self.disable_all_custom_nodes = BoolVar(False)
+        self.disable_api_nodes = BoolVar(False)
         self.extra_launch_args = Var("")
         self.attention_mode = Var("")
         self.browser_open_mode = Var("default")
@@ -245,6 +246,7 @@ class PyQtLauncher(QtWidgets.QMainWindow):
             self.custom_port.set(launch_cfg.get("default_port", self.custom_port.get()))
             self.disable_all_custom_nodes.set(bool(launch_cfg.get("disable_all_custom_nodes", self.disable_all_custom_nodes.get())))
             self.use_fast_mode.set(bool(launch_cfg.get("enable_fast_mode", self.use_fast_mode.get())))
+            self.disable_api_nodes.set(bool(launch_cfg.get("disable_api_nodes", self.disable_api_nodes.get())))
             self.enable_cors.set(bool(launch_cfg.get("enable_cors", self.enable_cors.get())))
             self.listen_all.set(bool(launch_cfg.get("listen_all", self.listen_all.get())))
             self.extra_launch_args.set(launch_cfg.get("extra_args", self.extra_launch_args.get()))
@@ -1025,10 +1027,11 @@ class PyQtLauncher(QtWidgets.QMainWindow):
         # Revert to dual-column layout
         form_layout.setColumnStretch(1, 1) # Control column
         form_layout.setColumnStretch(3, 1) # Second control column
-        form_layout.setHorizontalSpacing(15)
-        form_layout.setVerticalSpacing(10)
+        form_layout.setColumnMinimumWidth(0, 90)  # Label column minimum width
+        form_layout.setHorizontalSpacing(20)
+        form_layout.setVerticalSpacing(15)
         # Increased margins
-        form_layout.setContentsMargins(15, 15, 15, 15)
+        form_layout.setContentsMargins(18, 18, 18, 18)
 
         top_row.addWidget(form_group, 1)
         top_row.addWidget(btn_toggle, 0)
@@ -1111,12 +1114,12 @@ class PyQtLauncher(QtWidgets.QMainWindow):
         port_edit.textChanged.connect(lambda v: (self.custom_port.set(v), _save()))
 
         # 5. 启动后
-        open_label = QtWidgets.QLabel("启动后：")
+        open_label = QtWidgets.QLabel("自动打开浏览器：")
         open_combo = NoWheelComboBox()
         open_opts = [
             ("不自动打开", "disable"),
-            ("默认浏览器", "default"),
-            ("指定浏览器", "webbrowser"),
+            ("使用默认浏览器", "default"),
+            ("使用指定浏览器", "webbrowser"),
         ]
         for name, val in open_opts:
             open_combo.addItem(name, val)
@@ -1129,19 +1132,19 @@ class PyQtLauncher(QtWidgets.QMainWindow):
         open_combo.currentIndexChanged.connect(lambda i: (self.browser_open_mode.set(open_opts[i][1]), _save()))
 
         # 6. Checkboxes
-        cors_chk = QtWidgets.QCheckBox("允许跨域 (CORS)")
-        cors_chk.setChecked(self.enable_cors.get())
-        cors_chk.toggled.connect(lambda v: (self.enable_cors.set(v), _save()))
-
-        listen_chk = QtWidgets.QCheckBox("监听 0.0.0.0 (局域网)")
+        listen_chk = QtWidgets.QCheckBox("允许局域网访问")
         listen_chk.setChecked(self.listen_all.get())
         listen_chk.toggled.connect(lambda v: (self.listen_all.set(v), _save()))
 
-        cb_fast = QtWidgets.QCheckBox("快速模式 (Fast)")
+        cb_fast = QtWidgets.QCheckBox("快速FP16累加")
         cb_fast.setChecked(self.use_fast_mode.get())
         cb_fast.toggled.connect(lambda v: (self.use_fast_mode.set(v), _save()))
 
-        cb_nodes = QtWidgets.QCheckBox("禁用插件")
+        cb_api = QtWidgets.QCheckBox("禁用API节点")
+        cb_api.setChecked(self.disable_api_nodes.get())
+        cb_api.toggled.connect(lambda v: (self.disable_api_nodes.set(v), _save()))
+
+        cb_nodes = QtWidgets.QCheckBox("禁用所有插件(DEBUG)")
         cb_nodes.setChecked(self.disable_all_custom_nodes.get())
         cb_nodes.toggled.connect(lambda v: (self.disable_all_custom_nodes.set(v), _save()))
 
@@ -1159,9 +1162,11 @@ class PyQtLauncher(QtWidgets.QMainWindow):
         form_layout.addWidget(mode_container, 0, 1) # Mode spans a bit?
 
         hbox_port = QtWidgets.QHBoxLayout()
-        hbox_port.setContentsMargins(0,0,0,0)
+        hbox_port.setContentsMargins(0, 0, 0, 0)
+        hbox_port.setSpacing(15)
         hbox_port.addWidget(port_label)
         hbox_port.addWidget(port_edit)
+        hbox_port.addWidget(listen_chk)
         hbox_port.addStretch(1)
         form_layout.addLayout(hbox_port, 0, 2, 1, 2) # Port in second col area
 
@@ -1178,43 +1183,55 @@ class PyQtLauncher(QtWidgets.QMainWindow):
 
         # Row 2: After Launch (Left) | Checkboxes (Right mixed)
         form_layout.addWidget(open_label, 2, 0)
-        form_layout.addWidget(open_combo, 2, 1)
 
-        # Group checkboxes
-        # Let's put Listen/CORS on right
-        hbox_net = QtWidgets.QHBoxLayout()
-        hbox_net.setContentsMargins(0,0,0,0)
-        hbox_net.addWidget(listen_chk)
-        hbox_net.addWidget(cors_chk)
-        form_layout.addLayout(hbox_net, 2, 2, 1, 2)
+        # Custom browser button (conditional, same row as after launch)
+        cpath_btn = QtWidgets.QPushButton("选择浏览器...")
+        cpath_btn.setCursor(QtCore.Qt.PointingHandCursor)
+        cpath_btn.setMinimumWidth(120)
 
-        # Row 3: More Checkboxes & Extra Args
-        hbox_opts = QtWidgets.QHBoxLayout()
-        hbox_opts.setContentsMargins(0,0,0,0)
-        hbox_opts.addWidget(cb_fast)
-        hbox_opts.addWidget(cb_nodes)
+        def _select_browser():
+            from PyQt5.QtWidgets import QFileDialog
+            file_path, _ = QFileDialog.getOpenFileName(
+                None, "选择浏览器程序", "",
+                "可执行文件 (*.exe);;所有文件 (*.*)"
+            )
+            if file_path:
+                self.custom_browser_path.set(file_path)
+                cpath_btn.setText("已选择")
+                _save()
 
-        form_layout.addLayout(hbox_opts, 3, 0, 1, 2)
+        cpath_btn.clicked.connect(_select_browser)
 
-        # Extra args on same row or next? Use next for clarity
-        form_layout.addWidget(extra_label, 4, 0)
-        form_layout.addWidget(extra_edit, 4, 1, 1, 3)
-
-        # Custom browser path (conditional)
-        cpath_widget = QtWidgets.QWidget()
-        cp_h = QtWidgets.QHBoxLayout(cpath_widget)
-        cp_h.setContentsMargins(0,0,0,0)
-        cpath_edit = QtWidgets.QLineEdit(self.custom_browser_path.get())
-        cpath_edit.setPlaceholderText("浏览器完整路径...")
-        cpath_edit.textChanged.connect(lambda v: (self.custom_browser_path.set(v), _save()))
-        cp_h.addWidget(cpath_edit)
-        form_layout.addWidget(cpath_widget, 3, 2, 1, 2) # Put in empty slot of Row 3
+        # Container for open_combo + cpath_btn
+        row2_container = QtWidgets.QWidget()
+        row2_layout = QtWidgets.QHBoxLayout(row2_container)
+        row2_layout.setContentsMargins(0, 0, 0, 0)
+        row2_layout.setSpacing(15)
+        row2_layout.addWidget(open_combo)
+        row2_layout.addWidget(cpath_btn)
+        row2_layout.addStretch(1)
+        form_layout.addWidget(row2_container, 2, 1, 1, 3)
 
         def _update_cpath_vis():
             is_custom = (open_combo.currentData() == "webbrowser")
-            cpath_widget.setVisible(is_custom)
+            cpath_btn.setVisible(is_custom)
         open_combo.currentIndexChanged.connect(lambda: _update_cpath_vis())
         _update_cpath_vis()
+
+        # Row 3: More Checkboxes & Extra Args
+        hbox_opts = QtWidgets.QHBoxLayout()
+        hbox_opts.setContentsMargins(0, 0, 0, 0)
+        hbox_opts.setSpacing(25)
+        hbox_opts.addWidget(cb_fast)
+        hbox_opts.addWidget(cb_api)
+        hbox_opts.addWidget(cb_nodes)
+        hbox_opts.addStretch(1)
+
+        form_layout.addLayout(hbox_opts, 3, 0, 1, 4)
+
+        # Row 4: Extra args
+        form_layout.addWidget(extra_label, 4, 0)
+        form_layout.addWidget(extra_edit, 4, 1, 1, 3)
 
 
         # Environment Config & Other Pages
@@ -1528,9 +1545,17 @@ class PyQtLauncher(QtWidgets.QMainWindow):
                 except Exception: pass
                 try:
                     base = Path(d).resolve()
-                    comfy_path = (base / "ComfyUI").resolve()
-                    py = PATHS.resolve_python_exec(comfy_path, self.config.get("paths", {}).get("python_path", "python_embeded/python.exe"))
-                    self.python_exec = str(py)
+                    # 检查根目录下是否有 python_embeded 目录
+                    python_embeded_dir = base / "python_embeded"
+                    python_exe_path = python_embeded_dir / "python.exe"
+                    if python_embeded_dir.exists() and python_exe_path.exists():
+                        # 如果存在 python_embeded/python.exe，直接使用它
+                        self.python_exec = str(python_exe_path.resolve())
+                    else:
+                        # 否则使用原来的解析逻辑
+                        comfy_path = (base / "ComfyUI").resolve()
+                        py = PATHS.resolve_python_exec(comfy_path, self.config.get("paths", {}).get("python_path", "python_embeded/python.exe"))
+                        self.python_exec = str(py)
                     self.config['paths']['python_path'] = self.python_exec
                     self.services.config.save(self.config)
                     py_show.setText(self.python_exec)
@@ -2898,6 +2923,7 @@ class PyQtLauncher(QtWidgets.QMainWindow):
                 default_port=self.custom_port.get() or "8188",
                 disable_all_custom_nodes=self.disable_all_custom_nodes.get(),
                 enable_fast_mode=self.use_fast_mode.get(),
+                disable_api_nodes=self.disable_api_nodes.get(),
                 enable_cors=self.enable_cors.get(),
                 listen_all=self.listen_all.get(),
                 extra_args=self.extra_launch_args.get() or "",
@@ -2930,6 +2956,7 @@ class PyQtLauncher(QtWidgets.QMainWindow):
             self.compute_mode.set("gpu")
             self.vram_mode.set("--normalvram")
             self.use_fast_mode.set(False)
+            self.disable_api_nodes.set(False)
             self.enable_cors.set(True)
             self.listen_all.set(True)
             self.custom_port.set("8188")

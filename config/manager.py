@@ -32,6 +32,7 @@ class ConfigManager:
                 "default_port": "8188",
                 "disable_all_custom_nodes": False,
                 "enable_fast_mode": False,
+                "disable_api_nodes": False,
                 "enable_cors": True,
                 "listen_all": True,
                 "extra_args": "",

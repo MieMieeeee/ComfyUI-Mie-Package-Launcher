@@ -15,7 +15,12 @@ def build_launch_params(app):
         pass
     main = comfy_root / "main.py"
     py_dir = str(Path(py).resolve().parent)
-    cmd = [str(py), str(main), "--windows-standalone-build"]
+    cmd = [
+        str(py), 
+        str(main), 
+        "--windows-standalone-build", 
+        # "--enable-manager"
+    ]
     try:
         if app.compute_mode.get() == "cpu":
             cmd.append("--cpu")
@@ -34,10 +39,11 @@ def build_launch_params(app):
         port = app.custom_port.get().strip()
         if port and port != "8188":
             cmd.extend(["--port", port])
-        if app.enable_cors.get():
-            cmd.extend(["--enable-cors-header", "*"])
+        cmd.extend(["--enable-cors-header", "*"])
         if getattr(app, 'disable_all_custom_nodes', None) and app.disable_all_custom_nodes.get():
             cmd.append("--disable-all-custom-nodes")
+        if getattr(app, 'disable_api_nodes', None) and app.disable_api_nodes.get():
+            cmd.append("--disable-api-nodes")
         extra = (app.extra_launch_args.get() or "").strip()
         if extra:
             try:
