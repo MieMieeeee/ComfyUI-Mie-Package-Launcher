@@ -19,7 +19,6 @@ def build_launch_params(app):
         str(py), 
         str(main), 
         "--windows-standalone-build", 
-        # "--enable-manager"
     ]
     try:
         if app.compute_mode.get() == "cpu":
@@ -44,6 +43,15 @@ def build_launch_params(app):
             cmd.append("--disable-all-custom-nodes")
         if getattr(app, 'disable_api_nodes', None) and app.disable_api_nodes.get():
             cmd.append("--disable-api-nodes")
+        # Manager UI mode
+        try:
+            use_new_manager = getattr(app, 'use_new_manager', None)
+            if use_new_manager and use_new_manager.get():
+                cmd.append("--enable-manager")
+            else:
+                cmd.append("--enable-manager-legacy-ui")
+        except Exception:
+            cmd.append("--enable-manager-legacy-ui")
         extra = (app.extra_launch_args.get() or "").strip()
         if extra:
             try:
@@ -84,6 +92,38 @@ def build_launch_params(app):
                 env["HF_ENDPOINT"] = endpoint
     except Exception:
         pass
+    # 添加 python_embeded/scripts 到 PATH
+    try:
+        scripts_path = str((py_dir / "scripts").resolve())
+        current_path = env.get("PATH", "")
+        if scripts_path not in current_path:
+            env["PATH"] = scripts_path + os.pathsep + current_path
+    except Exception:
+        pass
+
+    # 添加 path_tools 下的第一层子目录到 PATH
+    try:
+        path_tools_dir = base / "path_tools"
+        if path_tools_dir.exists() and path_tools_dir.is_dir():
+            current_path = env.get("PATH", "")
+            added_paths = []
+            # 遍历 path_tools 下的第一层子目录
+            for subdir in sorted(path_tools_dir.iterdir()):
+                if subdir.is_dir():
+                    subdir_path = str(subdir.resolve())
+                    if subdir_path not in current_path:
+                        env["PATH"] = subdir_path + os.pathsep + current_path
+                        added_paths.append(subdir.name)
+                        current_path = env.get("PATH", "")
+            if added_paths:
+                app.logger.info(f"添加 path_tools 子目录到 PATH: {', '.join(added_paths)}")
+            else:
+                app.logger.info("path_tools 目录为空或无可添加目录")
+        else:
+            app.logger.info("path_tools 目录不存在，跳过 PATH 添加")
+    except Exception:
+        pass
+
     try:
         vm = getattr(app, 'version_manager', None)
         if vm and vm.proxy_mode_var.get() in ('gh-proxy', 'custom'):

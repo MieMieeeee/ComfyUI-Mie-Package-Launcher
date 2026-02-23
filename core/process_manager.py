@@ -161,7 +161,17 @@ class ProcessManager:
                 mode = (self.app.config.get("launch_options", {}).get("browser_open_mode") or "default").strip()
             except Exception:
                 mode = "default"
-        if mode == "custom":
+        try:
+            mode = mode.lower()
+        except Exception:
+            mode = "default"
+        if mode in ("disable", "none"):
+            mode = "none"
+        elif mode in ("webbrowser", "custom"):
+            mode = "custom"
+        else:
+            mode = "default"
+        if mode != "none":
             def _open_when_ready():
                 try:
                     import time

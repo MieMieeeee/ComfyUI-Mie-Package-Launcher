@@ -66,13 +66,22 @@ class VersionService(IVersionService):
         return []
 
     def _tag_commit(self, tag: str) -> Optional[str]:
+        if not tag:
+            return None
         try:
-            r = self._run_git(['git', 'rev-list', '-n', '1', tag], capture_output=True, text=True, timeout=10, cwd=self._repo_root())
+            r = self._run_git(
+                ['git', 'rev-list', '-n', '1', tag],
+                capture_output=True,
+                text=True,
+                timeout=10,
+                cwd=self._repo_root()
+            )
             if r and r.returncode == 0:
                 return (r.stdout.strip() or None)
+            # tag 不存在的情况：直接返回 None，避免在日志里继续尝试同一个失效 tag
+            return None
         except Exception:
             return None
-        return None
 
     def _repo_root(self) -> str:
         try:
@@ -183,11 +192,58 @@ class VersionService(IVersionService):
                 pass
             return res
         else:
-            # 回退到旧逻辑：调用 VersionManager 更新到最新提交
             try:
-                return self.app.version_manager.update_to_latest(confirm=False, notify=False) or {"component": "core"}
-            except Exception:
-                return {"component": "core", "error": "update failed"}
+                repo = self._repo_root()
+                try:
+                    before = self._run_git(['git', 'rev-parse', 'HEAD'], capture_output=True, text=True, timeout=10, cwd=repo)
+                    before_hash = (before.stdout or "").strip() if before and before.returncode == 0 else ""
+                except Exception:
+                    before_hash = ""
+
+                fetch = self._run_git(['git', 'fetch', '--prune'], capture_output=True, text=True, timeout=30, cwd=repo)
+                if not fetch or fetch.returncode != 0:
+                    msg = (fetch.stderr or fetch.stdout or "git fetch failed") if fetch else "git fetch failed"
+                    return {"component": "core", "error": msg}
+
+                br = ""
+                try:
+                    rbr = self._run_git(['git', 'rev-parse', '--abbrev-ref', 'HEAD'], capture_output=True, text=True, timeout=10, cwd=repo)
+                    br = (rbr.stdout or "").strip() if rbr and rbr.returncode == 0 else ""
+                except Exception:
+                    br = ""
+
+                if (not br) or br == "HEAD":
+                    try:
+                        rdef = self._run_git(['git', 'symbolic-ref', '-q', 'refs/remotes/origin/HEAD'], capture_output=True, text=True, timeout=10, cwd=repo)
+                        ref = (rdef.stdout or "").strip() if rdef and rdef.returncode == 0 else ""
+                        if ref.startswith("refs/remotes/origin/"):
+                            br = ref.split("/")[-1]
+                    except Exception:
+                        pass
+                    if not br:
+                        br = "master"
+                    rco = self._run_git(['git', 'checkout', br], capture_output=True, text=True, timeout=20, cwd=repo)
+                    if not rco or rco.returncode != 0:
+                        msg = (rco.stderr or rco.stdout or "git checkout failed") if rco else "git checkout failed"
+                        return {"component": "core", "error": msg, "branch": br}
+
+                pull = self._run_git(['git', 'pull', '--ff-only'], capture_output=True, text=True, timeout=60, cwd=repo)
+                if not pull or pull.returncode != 0:
+                    pull2 = self._run_git(['git', 'pull'], capture_output=True, text=True, timeout=120, cwd=repo)
+                    if not pull2 or pull2.returncode != 0:
+                        msg = (pull2.stderr or pull2.stdout or pull.stderr or pull.stdout or "git pull failed") if (pull or pull2) else "git pull failed"
+                        return {"component": "core", "error": msg, "branch": br}
+
+                try:
+                    after = self._run_git(['git', 'rev-parse', 'HEAD'], capture_output=True, text=True, timeout=10, cwd=repo)
+                    after_hash = (after.stdout or "").strip() if after and after.returncode == 0 else ""
+                except Exception:
+                    after_hash = ""
+
+                updated = bool(before_hash and after_hash and before_hash != after_hash)
+                return {"component": "core", "updated": updated, "branch": br}
+            except Exception as e:
+                return {"component": "core", "error": str(e)}
 
     def upgrade_to_commit(self, commit: str, stable_only: bool = False) -> Dict[str, Any]:
         if stable_only:

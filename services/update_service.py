@@ -317,3 +317,56 @@ class UpdateService:
                 else:
                     lines.append("模板库：更新流程完成")
         return results, "\n".join(lines)
+
+    def sync_requirements_files(self) -> Dict[str, Any]:
+        try:
+            needs_consistency = bool(getattr(self.app, 'auto_update_deps_var', None) and self.app.auto_update_deps_var.get())
+        except Exception:
+            needs_consistency = False
+        if not needs_consistency:
+            return {"component": "requirements", "updated": False}
+        try:
+            base = Path(self.app.config.get("paths", {}).get("comfyui_root") or ".").resolve()
+            comfy_root = (base / "ComfyUI").resolve()
+        except Exception:
+            comfy_root = Path.cwd()
+        idx = None
+        try:
+            mode = self.app.pypi_proxy_mode.get()
+            if mode == 'aliyun':
+                idx = 'https://mirrors.aliyun.com/pypi/simple/'
+            elif mode == 'custom':
+                u = (self.app.pypi_proxy_url.get() or '').strip()
+                if u:
+                    idx = u
+        except Exception:
+            idx = None
+        req_files = []
+        for name in ["requirements.txt", "requirements-dev.txt", "requirements-beta.txt"]:
+            p = comfy_root / name
+            try:
+                if p.exists():
+                    req_files.append(p)
+            except Exception:
+                pass
+        try:
+            for f in comfy_root.glob("requirements*.txt"):
+                if f not in req_files:
+                    req_files.append(f)
+        except Exception:
+            pass
+        sync_summary = []
+        installed_all = []
+        satisfied_all = []
+        for rf in req_files:
+            try:
+                res = PIPUTILS.install_requirements_file(rf, self._resolve_python_exec(), index_url=idx, upgrade=False, logger=self.app.logger)
+                ok = res.get("success") and not res.get("error")
+                sync_summary.append(f"{rf.name}: {'OK' if ok else 'FAIL'}")
+                for item in (res.get("installed") or []):
+                    installed_all.append(item)
+                for item in (res.get("satisfied") or []):
+                    satisfied_all.append(item)
+            except Exception:
+                sync_summary.append(f"{rf.name}: FAIL")
+        return {"component": "requirements", "updated": True, "summary": "; ".join(sync_summary), "installed": installed_all, "satisfied": satisfied_all}

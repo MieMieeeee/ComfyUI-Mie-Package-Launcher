@@ -167,48 +167,65 @@ def refresh_version_info(app, scope: str = "all"):
                                 app.logger.info("内核版本: describe 开始 cwd=%s git=%s", str(root), str(app.git_path))
                         except Exception:
                             pass
-                        r = run_hidden([app.git_path, "describe", "--tags", "--abbrev=0"], cwd=str(root), capture_output=True, text=True, timeout=8)
+                        r = run_hidden(
+                            [app.git_path, "describe", "--tags", "--abbrev=0"],
+                            cwd=str(root),
+                            capture_output=True,
+                            text=True,
+                            timeout=8
+                        )
                         if r.returncode != 0 and "dubious ownership" in (getattr(r, 'stderr', '') or ""):
                             try:
                                 if getattr(app, 'services', None) and getattr(app.services, 'git', None):
                                     app.services.git.fix_unsafe_repo(str(root))
-                                    r = run_hidden([app.git_path, "describe", "--tags", "--abbrev=0"], cwd=str(root), capture_output=True, text=True, timeout=8)
-                            except Exception:
-                                pass
-                        
-                        if r.returncode != 0:
-                            try:
-                                target_url = None
-                                try:
-                                    origin_url = app.version_manager.get_remote_url()
-                                    target_url = app.version_manager.compute_proxied_url(origin_url) or origin_url
-                                except Exception:
-                                    target_url = None
-                                fetch_args = [app.git_path, "fetch", "--tags"]
-                                if target_url:
-                                    fetch_args.append(target_url)
-                                run_hidden(fetch_args, cwd=str(root), capture_output=True, text=True, timeout=15)
-                                r = run_hidden([app.git_path, "describe", "--tags", "--abbrev=0"], cwd=str(root), capture_output=True, text=True, timeout=8)
+                                    r = run_hidden(
+                                        [app.git_path, "describe", "--tags", "--abbrev=0"],
+                                        cwd=str(root),
+                                        capture_output=True,
+                                        text=True,
+                                        timeout=8
+                                    )
                             except Exception:
                                 pass
                         if r.returncode == 0:
                             tag = r.stdout.strip()
-                            r2 = run_hidden([app.git_path, "rev-parse", "--short", "HEAD"], cwd=str(root), capture_output=True, text=True, timeout=8)
-                            commit = r2.stdout.strip() if r2.returncode == 0 else ""
+                            try:
+                                r2 = run_hidden(
+                                    [app.git_path, "rev-parse", "--short", "HEAD"],
+                                    cwd=str(root),
+                                    capture_output=True,
+                                    text=True,
+                                    timeout=8
+                                )
+                                commit = r2.stdout.strip() if r2.returncode == 0 else ""
+                            except Exception:
+                                commit = ""
                             def _set():
-                                label = ""
                                 try:
-                                    info = app.services.version.get_latest_stable_kernel(force_refresh=False)
-                                    full = info.get("commit") or ""
-                                    if full and commit and full.startswith(commit):
-                                        label = "（最新稳定版）"
+                                    if hasattr(app, "comfyui_commit"):
+                                        app.comfyui_commit.set(commit)
                                 except Exception:
-                                    label = ""
-                                app.comfyui_version.set(f"{tag}（{commit}）{label}")
+                                    pass
+                                try:
+                                    ver_text = tag or (f"（{commit}）" if commit else "未找到")
+                                    app.comfyui_version.set(ver_text)
+                                except Exception:
+                                    pass
+                                try:
+                                    if getattr(app, "logger", None):
+                                        app.logger.info("本地内核版本: tag=%s commit=%s", tag, commit)
+                                except Exception:
+                                    pass
                             _post(_set)
                         else:
                             try:
-                                r2 = run_hidden([app.git_path, "rev-parse", "--short", "HEAD"], cwd=str(root), capture_output=True, text=True, timeout=6)
+                                r2 = run_hidden(
+                                    [app.git_path, "rev-parse", "--short", "HEAD"],
+                                    cwd=str(root),
+                                    capture_output=True,
+                                    text=True,
+                                    timeout=6
+                                )
                                 commit = r2.stdout.strip() if r2.returncode == 0 else ""
                                 if commit:
                                     _post(lambda c=commit: app.comfyui_version.set(f"（{c}）"))

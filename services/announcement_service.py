@@ -466,7 +466,7 @@ class AnnouncementService:
                 pass
             def _show_popup():
                 try:
-                    from PyQt5 import QtWidgets, QtCore
+                    from PyQt5 import QtWidgets
                     self._log('info', 'announcement: show title=%s size=%d source=%s', title, len(content), data.get('source'))
                     dlg = QtWidgets.QDialog(getattr(self.app, 'window', None) or None)
                     dlg.setWindowTitle(title)
@@ -508,7 +508,7 @@ class AnnouncementService:
                     mute_btn.clicked.connect(_mute)
                     dlg.resize(max(560, dlg.sizeHint().width()), max(380, dlg.sizeHint().height()))
                     dlg.setModal(True)
-                    dlg.show()
+                    dlg.exec_()
                 except Exception:
                     pass
             try:
@@ -558,7 +558,7 @@ class AnnouncementService:
                 btns.accepted.connect(dlg.accept)
                 dlg.resize(max(560, dlg.sizeHint().width()), max(380, dlg.sizeHint().height()))
                 dlg.setModal(True)
-                dlg.show()
+                dlg.exec_()
             except Exception:
                 pass
         try:
