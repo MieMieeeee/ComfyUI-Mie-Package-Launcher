@@ -911,6 +911,14 @@ class LaunchPage(BasePage):
                     self.app.services.config.save(self.app.config)
                 except Exception:
                     pass
+            
+            # Update UI display
+            try:
+                if hasattr(self, '_root_show'):
+                    self._root_show.setText(d)
+            except Exception:
+                pass
+
             # 与旧版一致：联动解析并更新 Python 路径
             try:
                 base = Path(d).resolve()

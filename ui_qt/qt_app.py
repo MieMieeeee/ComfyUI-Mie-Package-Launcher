@@ -1,5 +1,6 @@
 import os
 import sys
+import subprocess
 from pathlib import Path
 from PyQt5 import QtWidgets, QtCore, QtGui
 from PyQt5.QtCore import Qt
@@ -1183,7 +1184,7 @@ class PyQtLauncher(QtWidgets.QMainWindow):
                 pass
             try:
                 from PyQt5.QtCore import QTimer
-                QTimer.singleShot(300, self._restart_app)
+                QTimer.singleShot(200, self._restart_app)
             except Exception:
                 self._restart_app()
 
@@ -1447,32 +1448,85 @@ class PyQtLauncher(QtWidgets.QMainWindow):
     def _restart_app(self):
         """重启应用以确保主题完整生效"""
         try:
+            if getattr(self, "_restart_in_progress", False):
+                return
+            self._restart_in_progress = True
+        except Exception:
+            pass
+        try:
             if getattr(self, "logger", None):
                 self.logger.info("主题切换：准备重启应用以完整应用样式")
         except Exception:
             pass
+        
         try:
-            import sys, subprocess
+            # 清理定时器和日志，释放文件句柄
+            try:
+                if hasattr(self, "_sync_timer"):
+                    self._sync_timer.stop()
+            except Exception:
+                pass
+            try:
+                import logging as _L
+                _L.shutdown()
+            except Exception:
+                pass
+
+            import sys
+            import subprocess
             from pathlib import Path
             cwd = Path.cwd()
-            try:
-                subprocess.Popen([sys.executable] + sys.argv, cwd=str(cwd))
-            except Exception:
+            
+            env = dict(os.environ)
+            # 移除可能导致问题的环境变量
+            for k in list(env.keys()):
+                kl = k.upper()
+                if kl.startswith("_MEI") or kl.startswith("PYI_"):
+                    env.pop(k, None)
+            env.pop("PYTHONHOME", None)
+            env.pop("PYTHONPATH", None)
+
+            exe = str(Path(sys.executable).resolve())
+            
+            # 区分开发环境与打包环境的参数构造
+            if getattr(sys, 'frozen', False):
+                # 打包环境：sys.executable 是 exe 本身，sys.argv[0] 也是 exe 路径
+                # 我们只需要 [exe, arg1, arg2...]
+                args = [exe] + sys.argv[1:]
+            else:
+                # 开发环境：sys.executable 是 python.exe，sys.argv[0] 是脚本路径
+                # 我们需要 [python.exe, script.py, arg1, arg2...]
+                args = [exe] + sys.argv
+            
+            kwargs = {}
+            if os.name == "nt":
                 try:
-                    script = cwd / "comfyui_launcher_pyqt.py"
-                    subprocess.Popen([sys.executable, str(script)], cwd=str(cwd))
+                    creationflags = 0
+                    creationflags |= subprocess.CREATE_NEW_PROCESS_GROUP
+                    creationflags |= subprocess.DETACHED_PROCESS
+                    kwargs['creationflags'] = creationflags
                 except Exception:
                     pass
+            else:
+                kwargs['start_new_session'] = True
+            
+            subprocess.Popen(
+                args,
+                cwd=str(cwd),
+                env=env,
+                close_fds=True,
+                stdin=subprocess.DEVNULL,
+                stdout=subprocess.DEVNULL,
+                stderr=subprocess.DEVNULL,
+                **kwargs
+            )
         except Exception:
             pass
+        
         try:
             QtWidgets.QApplication.quit()
         except Exception:
-            try:
-                import os
-                os._exit(0)
-            except Exception:
-                pass
+            pass
     def resolve_git(self):
         return GitService(self).resolve_git()
 

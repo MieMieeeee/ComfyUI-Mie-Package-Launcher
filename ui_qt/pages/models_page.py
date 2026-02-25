@@ -147,7 +147,9 @@ class ModelsPage(BasePage):
         d = QtWidgets.QFileDialog.getExistingDirectory(self, "选择模型库根目录", self.edit_base_path.text() or ".")
         if d:
             try:
-                self.edit_base_path.setText(str(Path(d).resolve()))
+                # 规范化路径显示
+                path_str = str(Path(d).resolve())
+                self.edit_base_path.setText(path_str)
             except Exception:
                 self.edit_base_path.setText(d)
             self._refresh_mapping_table()

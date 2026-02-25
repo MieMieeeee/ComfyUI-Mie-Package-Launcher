@@ -171,7 +171,7 @@ class ProcessManager:
             mode = "custom"
         else:
             mode = "default"
-        if mode != "none":
+        if mode == "custom":
             def _open_when_ready():
                 try:
                     import time
