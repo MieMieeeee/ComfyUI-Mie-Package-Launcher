@@ -905,6 +905,27 @@ class LaunchPage(BasePage):
         """选择根目录"""
         d = QtWidgets.QFileDialog.getExistingDirectory(self, "选择 ComfyUI 根目录", str(Path.cwd()))
         if d:
+            # 验证选择的目录是否包含 ComfyUI/main.py
+            comfy_path = Path(d) / "ComfyUI"
+            if not (comfy_path.exists() and (comfy_path / "main.py").exists()):
+                from ui_qt.widgets.custom_confirm_dialog import CustomConfirmDialog
+                dlg = CustomConfirmDialog(
+                    parent=self,
+                    title="目录验证失败",
+                    content=(
+                        "选择的目录无效。\n\n"
+                        f"根目录：{d}\n"
+                        f"ComfyUI 目录：{comfy_path}\n\n"
+                        "请确保选择的目录是包含 ComfyUI 文件夹的父目录，"
+                        "且 ComfyUI 文件夹中存在 main.py 文件。"
+                    ),
+                    buttons=[{"text": "确定", "role": "primary"}],
+                    default_index=0,
+                    theme_manager=self.theme_manager
+                )
+                dlg.exec_()
+                return  # 拒绝应用无效目录
+
             if hasattr(self.app, 'config'):
                 self.app.config.setdefault('paths', {})['comfyui_root'] = d
                 try:
@@ -914,7 +935,7 @@ class LaunchPage(BasePage):
                         self.app.config = saved_config
                 except Exception:
                     pass
-            
+
             # Update UI display
             try:
                 if hasattr(self, '_root_show'):
