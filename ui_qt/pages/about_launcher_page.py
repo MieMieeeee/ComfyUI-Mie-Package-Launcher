@@ -177,15 +177,14 @@ class AboutLauncherPage(BasePage):
 
         if url == "internal:announcement":
             # 显示公告
-            txt = ""
             try:
                 if hasattr(self.app, 'services') and hasattr(self.app.services, 'announcement'):
-                    cache = self.app.services.announcement._get_cache_file()
-                    if cache.exists():
-                        txt = cache.read_text(encoding="utf-8", errors="ignore").strip()
-                QtWidgets.QMessageBox.information(self, "公告", txt or "暂无公告")
+                    self.app.services.announcement.show_cached_popup()
+                else:
+                    from ui_qt.widgets.dialog_helper import DialogHelper
+                    DialogHelper.show_info(self.window(), "公告", "公告服务不可用")
             except Exception:
-                QtWidgets.QMessageBox.information(self, "公告", "暂无公告")
+                pass
         else:
             # 打开外部链接
             try:

@@ -256,7 +256,8 @@ class VersionPage(BasePage):
         """切换到选定提交"""
         row = self.history_table.currentRow()
         if row < 0:
-            QtWidgets.QMessageBox.warning(self, "未选择", "请先选择一个提交记录")
+            from ui_qt.widgets.dialog_helper import DialogHelper
+            DialogHelper.show_warning(self, "未选择", "请先选择一个提交记录")
             return
 
         item = self.history_table.item(row, 0)
@@ -279,17 +280,20 @@ class VersionPage(BasePage):
                 self.app.get_version_info("all")
             self._refresh_kernel_section()
 
-            QtWidgets.QMessageBox.information(self, "切换成功", f"已切换到提交 {commit_hash}")
+            from ui_qt.widgets.dialog_helper import DialogHelper
+            DialogHelper.show_info(self, "切换成功", f"已切换到提交 {commit_hash}")
         except Exception as e:
-            QtWidgets.QMessageBox.warning(self, "切换失败", str(e))
+            from ui_qt.widgets.dialog_helper import DialogHelper
+            DialogHelper.show_warning(self, "切换失败", str(e))
 
     def _fetch_remote_and_refresh(self):
         """从远程刷新提交历史"""
         try:
+            from ui_qt.widgets.dialog_helper import DialogHelper
             base = Path(self.app.config.get("paths", {}).get("comfyui_root") or ".").resolve()
             root = (base / "ComfyUI").resolve()
             if not root.exists():
-                QtWidgets.QMessageBox.warning(self, "失败", "ComfyUI目录不存在")
+                DialogHelper.show_warning(self, "失败", "ComfyUI目录不存在")
                 return
 
             # Fetch
@@ -304,9 +308,10 @@ class VersionPage(BasePage):
             if hasattr(self.app, 'get_version_info'):
                 self.app.get_version_info("core_only")
 
-            QtWidgets.QMessageBox.information(self, "完成", "已刷新提交历史")
+            DialogHelper.show_info(self, "完成", "已刷新提交历史")
         except Exception as e:
-            QtWidgets.QMessageBox.warning(self, "失败", str(e))
+            from ui_qt.widgets.dialog_helper import DialogHelper
+            DialogHelper.show_warning(self, "失败", str(e))
 
     def _refresh_kernel_section(self, force_remote=False):
         """刷新版本信息"""

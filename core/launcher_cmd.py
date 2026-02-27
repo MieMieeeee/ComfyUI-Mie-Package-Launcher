@@ -48,10 +48,8 @@ def build_launch_params(app):
             use_new_manager = getattr(app, 'use_new_manager', None)
             if use_new_manager and use_new_manager.get():
                 cmd.append("--enable-manager")
-            else:
-                cmd.append("--enable-manager-legacy-ui")
         except Exception:
-            cmd.append("--enable-manager-legacy-ui")
+            pass
         extra = (app.extra_launch_args.get() or "").strip()
         if extra:
             try:

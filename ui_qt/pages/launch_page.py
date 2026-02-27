@@ -364,13 +364,13 @@ class LaunchPage(BasePage):
         if hasattr(self.app, 'disable_api_nodes'):
             cb_api.setChecked(self.app.disable_api_nodes.get())
             cb_api.toggled.connect(lambda v: (self.app.disable_api_nodes.set(v), self._save_config()))
-        cb_api.setToolTip("禁用ComfyUI的API节点，减少启动资源占用")
+        cb_api.setToolTip("禁用ComfyUI的API节点，不使用API节点可选择，能减少启动资源占用")
 
-        cb_new_manager = QtWidgets.QCheckBox("使用新版Manager")
-        if hasattr(self.app, 'use_new_manager'):
-            cb_new_manager.setChecked(self.app.use_new_manager.get())
-            cb_new_manager.toggled.connect(lambda v: (self.app.use_new_manager.set(v), self._save_config()))
-        cb_new_manager.setToolTip("切换到新版 ComfyUI-Manager 界面")
+        # cb_new_manager = QtWidgets.QCheckBox("使用新版Manager")
+        # if hasattr(self.app, 'use_new_manager'):
+        #     cb_new_manager.setChecked(self.app.use_new_manager.get())
+        #     cb_new_manager.toggled.connect(lambda v: (self.app.use_new_manager.set(v), self._save_config()))
+        # cb_new_manager.setToolTip("切换到新版 ComfyUI-Manager 界面")
 
         cb_nodes = QtWidgets.QCheckBox("禁用所有插件(DEBUG)")
         if hasattr(self.app, 'disable_all_custom_nodes'):
@@ -380,7 +380,7 @@ class LaunchPage(BasePage):
 
         hbox_opts.addWidget(cb_fast)
         hbox_opts.addWidget(cb_api)
-        hbox_opts.addWidget(cb_new_manager)
+        # hbox_opts.addWidget(cb_new_manager)
         hbox_opts.addWidget(cb_nodes)
         hbox_opts.addStretch(1)
         layout.addLayout(hbox_opts, 3, 0, 1, 4)

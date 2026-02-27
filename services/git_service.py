@@ -57,7 +57,7 @@ class GitService:
                 comfy_root = None
             if not (comfy_root and comfy_root.exists()):
                 return
-            ini_path = comfy_root / "user" / "default" / "ComfyUI-Manager" / "config.ini"
+            ini_path = comfy_root / "user" / "__manager" / "config.ini"
             try:
                 integrations = self.app.config.setdefault("integrations", {})
             except Exception:

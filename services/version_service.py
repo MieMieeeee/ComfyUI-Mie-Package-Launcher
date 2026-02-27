@@ -39,14 +39,15 @@ class VersionService(IVersionService):
         # 包装 run_hidden 以处理 git ownership 问题
         cwd = kwargs.get('cwd')
         try:
+            # 确保 cmd 是列表且首个元素是 'git'，然后替换为实际 git 路径
             if isinstance(cmd, list) and cmd and str(cmd[0]).lower() == 'git':
                 gp = getattr(self.app, 'git_path', None)
                 if gp:
-                    cmd = [gp] + cmd[1:]
+                    cmd[0] = gp
         except Exception:
             pass
         r = run_hidden(cmd, **kwargs)
-        if r.returncode != 0 and "dubious ownership" in (r.stderr or ""):
+        if r.returncode != 0 and "dubious ownership" in (getattr(r, 'stderr', '') or ""):
             try:
                 target_cwd = cwd or self._repo_root()
                 if getattr(self.app, 'services', None) and getattr(self.app.services, 'git', None):
@@ -152,14 +153,43 @@ class VersionService(IVersionService):
         cache = getattr(self.app, '_stable_kernel_cache', None)
         if cache and (not force_refresh):
             return cache
+            
+        # 1. 尝试从 GitHub API 获取最新稳定 Release
         releases = self._get_releases(force_refresh=True)
         latest_tag = None
-        # releases 默认按创建时间降序，取第一个非 prerelease
         for rel in releases:
             if not rel.get('prerelease', False):
                 latest_tag = rel.get('tag_name')
                 break
-        commit = self._tag_commit(latest_tag) if latest_tag else None
+        
+        # 2. 如果 API 获取失败，尝试从 git tags 获取
+        if not latest_tag:
+            try:
+                # 先 fetch tags
+                self._run_git(['git', 'fetch', '--tags'], cwd=self._repo_root(), timeout=15)
+                # 列出所有 tags
+                tags = self._list_tags()
+                # 过滤稳定版并排序（简单假设语义化版本，或者依赖 git tag 排序）
+                stable_tags = [t for t in tags if self.is_stable_version(t)]
+                # 这里假设 git tag --list 已经按版本排序，取最后一个；或者我们需要自己排序
+                if stable_tags:
+                    # 简单的版本排序尝试
+                    try:
+                        stable_tags.sort(key=lambda x: [int(p) for p in re.findall(r'\d+', x)] if re.findall(r'\d+', x) else [0])
+                    except:
+                        pass
+                    latest_tag = stable_tags[-1]
+            except Exception:
+                pass
+
+        if not latest_tag:
+             return {"tag": None, "commit": None, "timestamp": int(time.time()), "success": False, "error": "No stable tag found"}
+
+        # 3. 获取 tag 对应的 commit
+        # 确保本地有这个 tag 的 commit
+        self._run_git(['git', 'fetch', 'origin', 'tag', latest_tag], cwd=self._repo_root(), timeout=15)
+        
+        commit = self._tag_commit(latest_tag)
         data = {"tag": latest_tag, "commit": commit, "timestamp": int(time.time()), "success": bool(latest_tag and commit)}
         try:
             setattr(self.app, '_stable_kernel_cache', data)

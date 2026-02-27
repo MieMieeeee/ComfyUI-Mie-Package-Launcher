@@ -1428,21 +1428,14 @@ class PyQtLauncher(QtWidgets.QMainWindow):
     def _confirm_restart_on_theme_change(self, new_theme: str, old_theme: str) -> bool:
         """弹窗确认：切换主题将重启启动器，不影响已启动的 ComfyUI"""
         try:
-            from PyQt5 import QtWidgets
+            from ui_qt.widgets.dialog_helper import DialogHelper
             msg = (
                 "将切换到“{new}”主题。\n\n"
                 "为确保所有页面样式一致，启动器需要重启。\n"
                 "已启动的 ComfyUI 服务不会受到影响。\n\n"
                 "是否立即重启启动器？"
             ).format(new="浅色" if new_theme == "light" else "深色")
-            res = QtWidgets.QMessageBox.question(
-                self,
-                "切换主题并重启",
-                msg,
-                QtWidgets.QMessageBox.Yes | QtWidgets.QMessageBox.No,
-                QtWidgets.QMessageBox.Yes,
-            )
-            return res == QtWidgets.QMessageBox.Yes
+            return DialogHelper.show_confirmation(self, "切换主题并重启", msg, yes_text="立即重启", no_text="稍后")
         except Exception:
             return True
     def _restart_app(self):
@@ -1739,18 +1732,55 @@ class PyQtLauncher(QtWidgets.QMainWindow):
         except Exception:
             threading = None
 
+        # 创建并显示进度弹窗
+        try:
+            from ui_qt.widgets.progress_dialog import ProgressDialog
+            pd = ProgressDialog(self, title="正在更新", theme_manager=getattr(self, "theme_manager", None))
+            pd.set_status("正在检查更新...")
+            pd.show()
+            # 强制刷新以显示弹窗
+            QtWidgets.QApplication.processEvents()
+        except Exception:
+            pd = None
+
         def _worker():
             core_res = None
             req_res = None
+            
+            # 1. 更新内核
+            if pd:
+                self.ui_post(lambda: pd.set_status("正在更新 ComfyUI 内核..."))
             try:
                 core_res = self.services.version.upgrade_latest(stable_only=stable_only)
             except Exception as e:
                 core_res = {"component": "core", "error": str(e)}
+            
+            # 2. 更新依赖
+            if pd:
+                self.ui_post(lambda: pd.set_status("正在同步依赖库 (requirements)..."))
             try:
                 if hasattr(self, "auto_update_deps_var") and bool(self.auto_update_deps_var.get()):
                     req_res = self.services.update.sync_requirements_files()
             except Exception as e:
                 req_res = {"component": "requirements", "error": str(e)}
+            
+            # 3. 更新前端和模板库
+            if self.update_frontend_var.get():
+                if pd:
+                    self.ui_post(lambda: pd.set_status("正在更新前端包..."))
+                try:
+                    self.services.update.update_frontend(False)
+                except Exception:
+                    pass
+            
+            if self.update_template_var.get():
+                if pd:
+                    self.ui_post(lambda: pd.set_status("正在更新模板库..."))
+                try:
+                    self.services.update.update_templates(False)
+                except Exception:
+                    pass
+
             try:
                 if getattr(self, "logger", None):
                     self.logger.info("更新结果 core=%s requirements=%s", str(core_res), str(req_res))
@@ -1761,6 +1791,10 @@ class PyQtLauncher(QtWidgets.QMainWindow):
 
             def _finish():
                 try:
+                    # 关闭进度弹窗
+                    if pd:
+                        pd.close()
+                    
                     summary = self._format_update_summary(core_res, req_res)
                     try:
                         if getattr(self, "logger", None):
@@ -1768,10 +1802,11 @@ class PyQtLauncher(QtWidgets.QMainWindow):
                     except Exception:
                         pass
                     try:
+                        from ui_qt.widgets.dialog_helper import DialogHelper
                         if isinstance(core_res, dict) and core_res.get("error"):
-                            QtWidgets.QMessageBox.warning(self, "更新失败", summary)
+                            DialogHelper.show_warning(self, "更新失败", summary)
                         else:
-                            QtWidgets.QMessageBox.information(self, "更新完成", summary)
+                            DialogHelper.show_info(self, "更新完成", summary)
                     except Exception:
                         pass
                     try:
@@ -1809,13 +1844,15 @@ class PyQtLauncher(QtWidgets.QMainWindow):
             except Exception:
                 pass
             try:
-                QtWidgets.QMessageBox.information(self, "更新完成", summary or "更新流程完成")
+                from ui_qt.widgets.dialog_helper import DialogHelper
+                DialogHelper.show_info(self, "更新完成", summary or "更新流程完成")
             except Exception:
                 pass
             self.get_version_info("core_only")
         except Exception:
             try:
-                QtWidgets.QMessageBox.warning(self, "更新失败", "更新过程中发生错误")
+                from ui_qt.widgets.dialog_helper import DialogHelper
+                DialogHelper.show_warning(self, "更新失败", "更新过程中发生错误")
             except Exception:
                 pass
 
@@ -1871,33 +1908,39 @@ class PyQtLauncher(QtWidgets.QMainWindow):
             running = False
         if running:
             try:
-                box = QtWidgets.QMessageBox(self)
-                box.setWindowTitle("关闭启动器")
-                box.setIcon(QtWidgets.QMessageBox.Question)
-                box.setText(
-                    "检测到 ComfyUI 仍在运行。\n\n"
-                    "关闭启动器时，你可以选择：\n"
-                    "1. 退出启动器，保持 ComfyUI 继续运行；\n"
-                    "2. 停止 ComfyUI 并退出；\n"
-                    "3. 取消，返回启动器。"
+                from ui_qt.widgets.custom_confirm_dialog import CustomConfirmDialog
+                
+                dialog = CustomConfirmDialog(
+                    self,
+                    title="退出确认",
+                    content=(
+                        "检测到 ComfyUI 仍在运行。\n\n"
+                        "您可以选择停止服务并退出，或者仅退出启动器（保持服务后台运行）。"
+                    ),
+                    buttons=[
+                        {"text": "取消", "role": "normal"},
+                        {"text": "仅退出启动器", "role": "normal"},
+                        {"text": "停止服务并退出", "role": "destructive"},
+                    ],
+                    default_index=2,
+                    theme_manager=getattr(self, "theme_manager", None)
                 )
-                btn_exit_only = box.addButton("退出启动器（保持运行）", QtWidgets.QMessageBox.AcceptRole)
-                btn_stop_exit = box.addButton("停止 ComfyUI 并退出", QtWidgets.QMessageBox.DestructiveRole)
-                btn_cancel = box.addButton("取消", QtWidgets.QMessageBox.RejectRole)
-                box.setDefaultButton(btn_stop_exit)
-                box.exec_()
-                res_btn = box.clickedButton()
+                if dialog.exec_() == QtWidgets.QDialog.Accepted:
+                    idx = dialog.get_result()
+                else:
+                    idx = 0  # Cancel
             except Exception:
-                res_btn = None
-            # 取消：不退出
-            if res_btn is btn_cancel or res_btn is None:
+                idx = 0 # Default to cancel on error
+
+            # 0: 取消
+            if idx == 0:
                 try:
                     event.ignore()
                 except Exception:
                     pass
                 return
-            # 停止并退出
-            if res_btn is btn_stop_exit:
+            # 2: 停止并退出
+            if idx == 2:
                 try:
                     self._shutting_down = True
                 except Exception:
@@ -1909,7 +1952,7 @@ class PyQtLauncher(QtWidgets.QMainWindow):
                 except Exception:
                     pass
             else:
-                # 仅退出启动器，保持 ComfyUI 运行
+                # 1: 仅退出启动器
                 try:
                     self._shutting_down = True
                 except Exception:

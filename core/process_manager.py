@@ -30,6 +30,7 @@ class ProcessManager:
         """
         self.app = app
         self.comfyui_process = None
+        self._stopping = False  # 防止停止过程中重复点击
 
     def toggle_comfyui(self): #
         # 防抖与状态保护：启动进行中时忽略重复点击
@@ -37,6 +38,13 @@ class ProcessManager:
             if getattr(self.app, '_launching', False):
                 try:
                     self.app.logger.warning("忽略重复点击：正在启动中")
+                except Exception:
+                    pass
+                return
+            # 新增：停止过程中也忽略点击
+            if getattr(self, '_stopping', False):
+                try:
+                    self.app.logger.warning("忽略重复点击：正在停止中")
                 except Exception:
                     pass
                 return
@@ -101,6 +109,17 @@ class ProcessManager:
 
     def start_comfyui(self): #
         try:
+            # 设置正在启动状态
+            self.app._launching = True
+            try:
+                self.app.big_btn.set_state("starting")
+                self.app.big_btn.set_text("正在启动…")
+                # 强制刷新 UI
+                from PyQt5 import QtWidgets
+                QtWidgets.QApplication.processEvents()
+            except Exception:
+                pass
+
             from core.launcher_cmd import build_launch_params
             cmd, env, run_cwd, py, main = build_launch_params(self.app)
             try:
@@ -207,6 +226,11 @@ class ProcessManager:
         self.comfyui_process = None
 
     def stop_comfyui(self): #
+        # 防止重复触发停止
+        if getattr(self, '_stopping', False):
+            return True
+        self._stopping = True
+
         try:
             self.app.big_btn.set_state("starting")
             self.app.big_btn.set_text("正在停止…")
@@ -214,38 +238,41 @@ class ProcessManager:
             pass
         def _bg():
             try:
-                from core.runner_stop import stop as run_stop
-                killed = False
                 try:
-                    # 若未跟踪到子进程，先尝试全局关闭（适配外部启动实例）
-                    if not (self.comfyui_process and self.comfyui_process.poll() is None):
-                        try:
-                            self.app.stop_all_comfyui_instances()
-                        except Exception:
-                            pass
+                    from core.runner_stop import stop as run_stop
+                    killed = False
+                    try:
+                        # 若未跟踪到子进程，先尝试全局关闭（适配外部启动实例）
+                        if not (self.comfyui_process and self.comfyui_process.poll() is None):
+                            try:
+                                self.app.stop_all_comfyui_instances()
+                            except Exception:
+                                pass
+                    except Exception:
+                        pass
+                    killed = run_stop(self.app, self)
+                    try:
+                        if killed:
+                            try:
+                                self.app.ui_post(self.on_process_ended)
+                            except Exception:
+                                pass
+                        else:
+                            try:
+                                self.app.ui_post(self._refresh_running_status)
+                            except Exception:
+                                pass
+                        
+                    except Exception:
+                        pass
                 except Exception:
                     pass
-                killed = run_stop(self.app, self)
-                try:
-                    if killed:
-                        try:
-                            self.app.ui_post(self.on_process_ended)
-                        except Exception:
-                            pass
-                    else:
-                        try:
-                            self.app.ui_post(self._refresh_running_status)
-                        except Exception:
-                            pass
-                    
-                except Exception:
-                    pass
-            except Exception:
-                pass
+            finally:
+                self._stopping = False
         try:
             threading.Thread(target=_bg, daemon=True).start()
         except Exception:
-            pass
+            self._stopping = False
         return True
 
     def stop_comfyui_sync(self):
@@ -308,14 +335,18 @@ class ProcessManager:
                     pass
                 return
             try:
-                from PyQt5 import QtWidgets
-                QtWidgets.QMessageBox.critical(None, title, msg)
+                from ui_qt.widgets.dialog_helper import DialogHelper
+                DialogHelper.show_error(self.app, title, msg)
             except Exception:
                 try:
-                    # 作为回退，使用控制台日志
-                    self.app.logger.error(f"{title}: {msg}")
+                    # Fallback to older method if DialogHelper fails
+                    from PyQt5 import QtWidgets
+                    QtWidgets.QMessageBox.critical(None, title, msg)
                 except Exception:
-                    pass
+                    try:
+                        self.app.logger.error(f"{title}: {msg}")
+                    except Exception:
+                        pass
         except Exception:
             try:
                 self.app.logger.error(f"{title}: {msg}")
@@ -324,17 +355,27 @@ class ProcessManager:
 
     def _ask_yes_no(self, title: str, msg: str, default: bool = True) -> bool:
         try:
-            from PyQt5 import QtWidgets, QtCore
-            btn = QtWidgets.QMessageBox.question(
-                None,
-                title,
-                msg,
-                QtWidgets.QMessageBox.Yes | QtWidgets.QMessageBox.No,
-                QtWidgets.QMessageBox.Yes if default else QtWidgets.QMessageBox.No,
+            from ui_qt.widgets.dialog_helper import DialogHelper
+            return DialogHelper.show_confirmation(
+                self.app, 
+                title, 
+                msg, 
+                yes_text="是", 
+                no_text="否"
             )
-            return btn == QtWidgets.QMessageBox.Yes
         except Exception:
-            return default
+            try:
+                from PyQt5 import QtWidgets
+                btn = QtWidgets.QMessageBox.question(
+                    None,
+                    title,
+                    msg,
+                    QtWidgets.QMessageBox.Yes | QtWidgets.QMessageBox.No,
+                    QtWidgets.QMessageBox.Yes if default else QtWidgets.QMessageBox.No,
+                )
+                return btn == QtWidgets.QMessageBox.Yes
+            except Exception:
+                return default
 
     def _find_pids_by_port_safe(self, port_str): #
         # 解析端口并通过 psutil 或 netstat 查找 PID 列表

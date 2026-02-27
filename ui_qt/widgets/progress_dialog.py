@@ -1,0 +1,99 @@
+
+from PyQt5 import QtWidgets, QtCore, QtGui
+from ui_qt.theme_manager import ThemeManager
+
+class ProgressDialog(QtWidgets.QDialog):
+    """
+    一个简单的无边框进度弹窗，支持显示状态文本和进度条（脉冲或确定进度）
+    """
+    def __init__(self, parent=None, title="处理中", theme_manager=None):
+        super().__init__(parent)
+        self.setWindowFlags(QtCore.Qt.Dialog | QtCore.Qt.FramelessWindowHint | QtCore.Qt.WindowStaysOnTopHint)
+        self.setAttribute(QtCore.Qt.WA_TranslucentBackground)
+        self.setModal(True)
+        self.theme_manager = theme_manager
+        
+        # UI Setup
+        layout = QtWidgets.QVBoxLayout(self)
+        layout.setContentsMargins(0, 0, 0, 0)
+        
+        self.container = QtWidgets.QFrame()
+        self.container.setObjectName("ProgressContainer")
+        
+        # 默认样式，会被 theme_manager 覆盖
+        bg = "#1F2937"
+        border = "#374151"
+        text = "#E5E7EB"
+        
+        if self.theme_manager:
+            c = self.theme_manager.colors
+            bg = c.get('content_bg', bg)
+            border = c.get('group_border', border)
+            text = c.get('text', text)
+            
+        self.container.setStyleSheet(f"""
+            QFrame#ProgressContainer {{
+                background-color: {bg};
+                border: 1px solid {border};
+                border-radius: 12px;
+            }}
+            QLabel {{
+                color: {text};
+                font: 10pt "Microsoft YaHei UI";
+                background: transparent;
+            }}
+        """)
+        
+        inner_layout = QtWidgets.QVBoxLayout(self.container)
+        inner_layout.setContentsMargins(20, 20, 20, 20)
+        inner_layout.setSpacing(15)
+        
+        # 标题
+        self.lbl_title = QtWidgets.QLabel(title)
+        self.lbl_title.setStyleSheet("font: bold 12pt 'Microsoft YaHei UI';")
+        self.lbl_title.setAlignment(QtCore.Qt.AlignCenter)
+        inner_layout.addWidget(self.lbl_title)
+        
+        # 状态文本
+        self.lbl_status = QtWidgets.QLabel("正在初始化...")
+        self.lbl_status.setAlignment(QtCore.Qt.AlignCenter)
+        self.lbl_status.setWordWrap(True)
+        inner_layout.addWidget(self.lbl_status)
+        
+        # 进度条
+        self.pbar = QtWidgets.QProgressBar()
+        self.pbar.setFixedHeight(6)
+        self.pbar.setTextVisible(False)
+        self.pbar.setRange(0, 0) # 默认脉冲模式
+        
+        accent = "#6366F1"
+        if self.theme_manager:
+            accent = self.theme_manager.colors.get('accent', accent)
+            
+        self.pbar.setStyleSheet(f"""
+            QProgressBar {{
+                background-color: rgba(0,0,0,0.1);
+                border-radius: 3px;
+                border: none;
+            }}
+            QProgressBar::chunk {{
+                background-color: {accent};
+                border-radius: 3px;
+            }}
+        """)
+        inner_layout.addWidget(self.pbar)
+        
+        layout.addWidget(self.container)
+        self.setFixedSize(350, 160)
+        
+    def set_status(self, text):
+        self.lbl_status.setText(text)
+        QtWidgets.QApplication.processEvents()
+        
+    def set_progress(self, value, maximum=100):
+        if maximum <= 0:
+            self.pbar.setRange(0, 0)
+        else:
+            self.pbar.setRange(0, maximum)
+            self.pbar.setValue(value)
+        QtWidgets.QApplication.processEvents()

@@ -409,8 +409,11 @@ class AnnouncementService:
                             self._log('info', 'announcement: using cache for popup size=%d', len(txt))
                             def _show_cache():
                                 try:
-                                    from PyQt5 import QtWidgets
-                                    QtWidgets.QMessageBox.information(getattr(self.app, 'window', None) or None, "公告", txt)
+                                    from ui_qt.widgets.announcement_dialog import AnnouncementDialog
+                                    parent = getattr(self.app, 'window', None)
+                                    theme_manager = getattr(self.app, 'theme_manager', None)
+                                    dlg = AnnouncementDialog(parent, title="公告", content=txt, theme_manager=theme_manager)
+                                    dlg.exec_()
                                 except Exception:
                                     pass
                             try:
@@ -466,49 +469,40 @@ class AnnouncementService:
                 pass
             def _show_popup():
                 try:
-                    from PyQt5 import QtWidgets
+                    from ui_qt.widgets.announcement_dialog import AnnouncementDialog
                     self._log('info', 'announcement: show title=%s size=%d source=%s', title, len(content), data.get('source'))
-                    dlg = QtWidgets.QDialog(getattr(self.app, 'window', None) or None)
-                    dlg.setWindowTitle(title)
-                    layout = QtWidgets.QVBoxLayout(dlg)
-                    text = QtWidgets.QTextEdit()
-                    text.setReadOnly(True)
-                    text.setPlainText(content)
-                    layout.addWidget(text)
-                    btns = QtWidgets.QDialogButtonBox()
-                    ack_btn = btns.addButton("知道了", QtWidgets.QDialogButtonBox.AcceptRole)
-                    mute_btn = btns.addButton("不再弹出", QtWidgets.QDialogButtonBox.DestructiveRole)
-                    layout.addWidget(btns)
-                    def _ack():
-                        try:
-                            if aid:
-                                self._mark_seen(aid)
-                                self._log('debug', 'announcement: marked seen id=%s', aid[:8])
-                        except Exception:
-                            pass
-                        dlg.accept()
-                    def _mute():
-                        try:
-                            if aid:
-                                mf2 = self._get_seen_file().parent / 'announcement_muted.json'
-                                lst2 = []
-                                try:
-                                    if mf2.exists():
-                                        lst2 = json.loads(mf2.read_text(encoding='utf-8')) or []
-                                except Exception:
+                    
+                    # 获取主窗口作为父对象，以便正确应用主题
+                    parent = getattr(self.app, 'window', None)
+                    theme_manager = getattr(self.app, 'theme_manager', None)
+                    
+                    dlg = AnnouncementDialog(parent, title=title, content=content, theme_manager=theme_manager)
+                    
+                    if dlg.exec_() == 1: # Accepted
+                        action = dlg.get_action()
+                        if action == "ack":
+                            try:
+                                if aid:
+                                    self._mark_seen(aid)
+                                    self._log('debug', 'announcement: marked seen id=%s', aid[:8])
+                            except Exception:
+                                pass
+                        elif action == "mute":
+                            try:
+                                if aid:
+                                    mf2 = self._get_seen_file().parent / 'announcement_muted.json'
                                     lst2 = []
-                                if aid not in lst2:
-                                    lst2.append(aid)
-                                    mf2.write_text(json.dumps(lst2, ensure_ascii=False, indent=2), encoding='utf-8')
-                                self._log('info', 'announcement: muted id=%s', aid[:8])
-                        except Exception:
-                            pass
-                        dlg.accept()
-                    ack_btn.clicked.connect(_ack)
-                    mute_btn.clicked.connect(_mute)
-                    dlg.resize(max(560, dlg.sizeHint().width()), max(380, dlg.sizeHint().height()))
-                    dlg.setModal(True)
-                    dlg.exec_()
+                                    try:
+                                        if mf2.exists():
+                                            lst2 = json.loads(mf2.read_text(encoding='utf-8')) or []
+                                    except Exception:
+                                        lst2 = []
+                                    if aid not in lst2:
+                                        lst2.append(aid)
+                                        mf2.write_text(json.dumps(lst2, ensure_ascii=False, indent=2), encoding='utf-8')
+                                    self._log('info', 'announcement: muted id=%s', aid[:8])
+                            except Exception:
+                                pass
                 except Exception:
                     pass
             try:
@@ -536,8 +530,9 @@ class AnnouncementService:
                 pass
         if not data:
             try:
-                from PyQt5 import QtWidgets
-                QtWidgets.QMessageBox.information(getattr(self.app, 'window', None) or None, "公告", "暂无公告")
+                from ui_qt.widgets.dialog_helper import DialogHelper
+                parent = getattr(self.app, 'window', None)
+                DialogHelper.show_info(parent, "公告", "暂无公告")
             except Exception:
                 pass
             return
@@ -545,19 +540,16 @@ class AnnouncementService:
         content = data.get("content") or ""
         def _show():
             try:
-                from PyQt5 import QtWidgets
-                dlg = QtWidgets.QDialog(getattr(self.app, 'window', None) or None)
-                dlg.setWindowTitle(title)
-                layout = QtWidgets.QVBoxLayout(dlg)
-                text = QtWidgets.QTextEdit()
-                text.setReadOnly(True)
-                text.setPlainText(content)
-                layout.addWidget(text)
-                btns = QtWidgets.QDialogButtonBox(QtWidgets.QDialogButtonBox.Ok)
-                layout.addWidget(btns)
-                btns.accepted.connect(dlg.accept)
-                dlg.resize(max(560, dlg.sizeHint().width()), max(380, dlg.sizeHint().height()))
-                dlg.setModal(True)
+                from ui_qt.widgets.announcement_dialog import AnnouncementDialog
+                parent = getattr(self.app, 'window', None)
+                theme_manager = getattr(self.app, 'theme_manager', None)
+                
+                # 缓存的公告只读，不提供 Mute 选项，所以我们可以只给一个“关闭”或“知道了”按钮
+                # 复用 AnnouncementDialog，但按钮可能需要调整，或者直接用默认
+                # 这里我们稍微 hack 一下，或者给 AnnouncementDialog 加参数
+                # 为简单起见，直接使用，点击任意按钮都关闭即可
+                
+                dlg = AnnouncementDialog(parent, title=title, content=content, theme_manager=theme_manager)
                 dlg.exec_()
             except Exception:
                 pass
