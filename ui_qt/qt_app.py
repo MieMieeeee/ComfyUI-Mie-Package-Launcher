@@ -1284,6 +1284,7 @@ class PyQtLauncher(QtWidgets.QMainWindow):
 
         # Create page instances using new refactored pages
         page_launch = LaunchPage(app=self, theme_manager=self.theme_manager)
+        self._launch_page = page_launch  # 保存引用，用于后续更新显示
         try:
             if hasattr(self, "big_btn"):
                 self.big_btn.attach(page_launch.btn_toggle)
@@ -1395,6 +1396,9 @@ class PyQtLauncher(QtWidgets.QMainWindow):
         _select_tab("launch")
 
         # 验证路径（在获取版本信息之前）
+        # 标记验证状态，用于后续决定是否提示用户配置
+        self._root_validation_failed = False
+        self._python_validation_failed = False
         try:
             from pathlib import Path as P
             comfy_root = Path(self.config.get("paths", {}).get("comfyui_root") or ".").resolve()
@@ -1403,57 +1407,47 @@ class PyQtLauncher(QtWidgets.QMainWindow):
 
             # 验证ComfyUI目录
             if not (comfy_dir.exists() and (comfy_dir / "main.py").exists()):
-                from ui_qt.widgets.custom_confirm_dialog import CustomConfirmDialog
-                dlg = CustomConfirmDialog(
-                    parent=self,
-                    title="路径验证失败",
-                    content=(
-                        "ComfyUI 目录未找到或无效。\n\n"
-                        f"根目录：{comfy_root}\n"
-                        f"ComfyUI 目录：{comfy_dir}\n"
-                        "请选择正确的根目录（包含 ComfyUI 文件夹的父目录）。"
-                    ),
-                    buttons=[{"text": "确定", "role": "primary"}],
-                    default_index=0,
-                    theme_manager=self.theme_manager
-                )
-                dlg.exec_()
-                # 验证失败，关闭应用
-                self.close()
-                return
-
-            # 验证Python路径
-            if python_path and not python_path.exists():
-                from ui_qt.widgets.custom_confirm_dialog import CustomConfirmDialog
-                dlg = CustomConfirmDialog(
-                    parent=self,
-                    title="Python 路径验证失败",
-                    content=(
-                        "Python 可执行文件未找到。\n\n"
-                        f"当前路径：{self.python_exec}\n\n"
-                        "请选择 Python 可执行文件（python_embeded/python.exe）。"
-                    ),
-                    buttons=[{"text": "确定", "role": "primary"}],
-                    default_index=0,
-                    theme_manager=self.theme_manager
-                )
-                dlg.exec_()
-                # 验证失败，关闭应用
-                self.close()
-                return
+                self._root_validation_failed = True
+                # 不在这里弹窗，而是在窗口显示后弹窗，这样窗口大小已经设置正确
+            else:
+                # 验证Python路径（仅当根目录验证通过时才检查）
+                if python_path and not python_path.exists():
+                    self._python_validation_failed = True
+                    # 不在这里弹窗，而是在窗口显示后弹窗
         except Exception:
-            pass
+            self._root_validation_failed = True
+
+        # 调试日志：确认验证状态
+        if getattr(self, "logger", None):
+            if self._root_validation_failed:
+                self.logger.info("根目录验证失败，等待用户配置...")
+            elif self._python_validation_failed:
+                self.logger.info("Python路径验证失败，等待用户配置...")
+            else:
+                self.logger.info("验证通过，准备获取版本信息...")
 
         try:
             self.get_version_info("all")
         except Exception:
             pass
 
+        # 调试日志：确认 get_version_info 之后
+        if getattr(self, "logger", None):
+            self.logger.info("get_version_info 之后，准备设置侧边栏...")
+
         # Initialize sidebar visibility based on config
         self._update_sidebar_visibility()
 
+        # 调试日志：确认 _update_sidebar_visibility 之后
+        if getattr(self, "logger", None):
+            self.logger.info("_update_sidebar_visibility 之后，准备设置窗口大小...")
+
         # 在所有内容和滚动区域构建完成后，再根据右侧内容区域设置窗口初始大小
         try:
+            # 调试日志：进入窗口大小设置
+            if getattr(self, "logger", None):
+                self.logger.info("开始设置窗口大小...")
+
             primary_screen = QtWidgets.QApplication.primaryScreen()
             avail_geo = primary_screen.availableGeometry()
             s_w, s_h = avail_geo.width(), avail_geo.height()
@@ -1465,13 +1459,28 @@ class PyQtLauncher(QtWidgets.QMainWindow):
             final_w = min(base_w, s_w - 40)
             final_h = min(base_h, s_h - 80)
 
+            # 调试日志
+            try:
+                if getattr(self, "logger", None):
+                    self.logger.info("窗口初始化: 屏幕=%dx%d, base=%dx%d, final=%dx%d", s_w, s_h, base_w, base_h, final_w, final_h)
+                    self.logger.info("页面大小: sizeHint=%dx%d", self.sizeHint().width(), self.sizeHint().height())
+            except Exception as e:
+                if getattr(self, "logger", None):
+                    self.logger.info("日志输出异常: %s", str(e))
+
             self.resize(final_w, final_h)
+
+            # 调试日志：检查 resize 后的窗口大小
+            if getattr(self, "logger", None):
+                self.logger.info("resize() 后窗口大小: %dx%d", self.width(), self.height())
+
             self.move(
                 avail_geo.x() + (s_w - final_w) // 2,
                 avail_geo.y() + (s_h - final_h) // 2
             )
-        except Exception:
-            pass
+        except Exception as e:
+            if getattr(self, "logger", None):
+                self.logger.info("窗口大小设置异常: %s", str(e))
 
     def _confirm_restart_on_theme_change(self, new_theme: str, old_theme: str) -> bool:
         """弹窗确认：切换主题将重启启动器，不影响已启动的 ComfyUI"""
@@ -1590,6 +1599,13 @@ class PyQtLauncher(QtWidgets.QMainWindow):
 
     def _update_sidebar_visibility(self):
         """Update sidebar visibility based on collapse state"""
+        # 调试日志
+        try:
+            if getattr(self, "logger", None):
+                self.logger.info("_update_sidebar_visibility 开始执行...")
+        except Exception:
+            pass
+
         is_collapsed = self._sidebar_collapsed
 
         # Update collapse/expand button visibility
@@ -1617,6 +1633,13 @@ class PyQtLauncher(QtWidgets.QMainWindow):
                 btn.setText(emoji if is_collapsed else full_text)
 
     def get_version_info(self, scope="all"):
+        # 调试日志：确认进入 get_version_info
+        try:
+            if getattr(self, "logger", None):
+                self.logger.info("get_version_info 方法开始执行...")
+        except Exception:
+            pass
+
         try:
             if getattr(self, "logger", None):
                 self.logger.info("UI: 触发版本刷新 scope=%s", scope)
@@ -2053,6 +2076,14 @@ class PyQtLauncher(QtWidgets.QMainWindow):
             pass
         self.show()
 
+        # 调试日志：检查 show() 后的窗口大小
+        try:
+            if getattr(self, "logger", None):
+                self.logger.info("show() 后窗口大小: %dx%d", self.width(), self.height())
+                self.logger.info("centralWidget 大小: %dx%d", self.centralWidget().width(), self.centralWidget().height() if self.centralWidget() else 0)
+        except Exception:
+            pass
+
         # 强制刷新布局以适配 High DPI 缩放
         try:
             self.qt_app.processEvents()
@@ -2061,11 +2092,203 @@ class PyQtLauncher(QtWidgets.QMainWindow):
                 self.centralWidget().updateGeometry()
         except Exception:
             pass
+
+        # 调试日志：检查 updateGeometry 后的窗口大小
+        try:
+            if getattr(self, "logger", None):
+                self.logger.info("updateGeometry 后窗口大小: %dx%d", self.width(), self.height())
+                # 检查根目录配置
+                comfy_root = self.config.get("paths", {}).get("comfyui_root", "NOT_SET")
+                self.logger.info("当前根目录配置: %s", comfy_root)
+        except Exception:
+            pass
+
+        # 检查路径验证状态，如果失败则提示用户配置
+        self._show_validation_dialog_if_needed()
+
         try:
             self.qt_app.aboutToQuit.connect(self._on_app_quit_cleanup)
         except Exception:
             pass
         self.qt_app.exec_()
+
+    def _show_validation_dialog_if_needed(self):
+        """在窗口显示后检查验证状态并弹窗提示用户"""
+        try:
+            if getattr(self, "_root_validation_failed", False):
+                self._force_select_root_dir()
+                return
+
+            if getattr(self, "_python_validation_failed", False):
+                from ui_qt.widgets.custom_confirm_dialog import CustomConfirmDialog
+                dlg = CustomConfirmDialog(
+                    parent=self,
+                    title="Python 路径验证失败",
+                    content=(
+                        "Python 可执行文件未找到。\n\n"
+                        f"当前路径：{self.python_exec}\n\n"
+                        "请在「启动」页面点击「选择」按钮设置正确的 Python 路径\n"
+                        "（python_embeded/python.exe）。"
+                    ),
+                    buttons=[{"text": "我知道了", "role": "primary"}],
+                    default_index=0,
+                    theme_manager=self.theme_manager
+                )
+                dlg.exec_()
+        except Exception as e:
+            if getattr(self, "logger", None):
+                self.logger.warning("显示验证对话框失败: %s", str(e))
+
+    def _force_select_root_dir(self):
+        """强制用户选择有效的根目录"""
+        from pathlib import Path as P
+        from ui_qt.widgets.custom_confirm_dialog import CustomConfirmDialog
+
+        while True:
+            comfy_root = Path(self.config.get("paths", {}).get("comfyui_root") or ".").resolve()
+            comfy_dir = comfy_root / "ComfyUI"
+
+            # 显示提示对话框
+            dlg = CustomConfirmDialog(
+                parent=self,
+                title="请设置根目录",
+                content=(
+                    "ComfyUI 目录未找到或无效。\n\n"
+                    f"当前根目录：{comfy_root}\n"
+                    f"ComfyUI 目录：{comfy_dir}\n\n"
+                    "请选择包含 ComfyUI 文件夹的父目录。"
+                ),
+                buttons=[{"text": "选择目录", "role": "primary"}, {"text": "退出程序", "role": "secondary"}],
+                default_index=0,
+                theme_manager=self.theme_manager
+            )
+            dlg.exec_()
+            result = dlg.get_result()  # 获取按钮索引：0=选择目录，1=退出程序
+
+            # 用户选择退出
+            if result == 1:
+                self.close()
+                return
+
+            # 用户选择目录
+            d = QtWidgets.QFileDialog.getExistingDirectory(
+                self,
+                "选择 ComfyUI 根目录",
+                str(Path.cwd())
+            )
+
+            if d:
+                # 验证选择的目录
+                selected_comfy_dir = Path(d) / "ComfyUI"
+                if selected_comfy_dir.exists() and (selected_comfy_dir / "main.py").exists():
+                    # 验证通过，保存配置
+                    self.config.setdefault('paths', {})['comfyui_root'] = d
+                    try:
+                        saved_config = self.services.config.save(self.config)
+                        if saved_config is not None:
+                            self.config = saved_config
+                    except Exception:
+                        pass
+
+                    # 更新 Python 路径
+                    try:
+                        base = Path(d).resolve()
+                        python_embeded_dir = base / "python_embeded"
+                        python_exe_path = python_embeded_dir / "python.exe"
+                        if python_embeded_dir.exists() and python_exe_path.exists():
+                            self.python_exec = str(python_exe_path.resolve())
+                        else:
+                            from utils import paths as PATHS
+                            configured = self.config.get("paths", {}).get("python_path", "python_embeded/python.exe")
+                            py = PATHS.resolve_python_exec(selected_comfy_dir, configured)
+                            self.python_exec = str(py)
+                        self.config.setdefault('paths', {})['python_path'] = self.python_exec
+                        try:
+                            self.services.config.save(self.config)
+                        except Exception:
+                            pass
+                    except Exception:
+                        pass
+
+                    # 更新启动页面的显示
+                    try:
+                        if hasattr(self, '_launch_page') and self._launch_page:
+                            if hasattr(self._launch_page, '_root_show'):
+                                self._launch_page._root_show.setText(d)
+                            if hasattr(self._launch_page, '_py_show'):
+                                self._launch_page._py_show.setText(self.python_exec)
+                    except Exception:
+                        pass
+
+                    # 清除验证失败标志
+                    self._root_validation_failed = False
+
+                    # 获取版本信息（更新启动页面）
+                    try:
+                        self.get_version_info("all")
+                    except Exception:
+                        pass
+
+                    # 刷新版本页面的内核信息
+                    try:
+                        if hasattr(self, '_new_pages') and 'version' in self._new_pages:
+                            version_page = self._new_pages['version']
+                            if hasattr(version_page, '_refresh_kernel_section'):
+                                version_page._refresh_kernel_section()
+                    except Exception:
+                        pass
+
+                    # 刷新模型库页面的显示
+                    try:
+                        if hasattr(self, '_new_pages') and 'models' in self._new_pages:
+                                models_page = self._new_pages['models']
+                                if hasattr(models_page, 'refresh_from_config'):
+                                    models_page.refresh_from_config()
+                    except Exception:
+                        pass
+
+                    # 显示成功提示
+                    success_dlg = CustomConfirmDialog(
+                        parent=self,
+                        title="设置成功",
+                        content=f"根目录已设置为：\n{d}\n\nComfyUI 目录：\n{selected_comfy_dir}",
+                        buttons=[{"text": "确定", "role": "primary"}],
+                        default_index=0,
+                        theme_manager=self.theme_manager
+                    )
+                    success_dlg.exec_()
+                    return
+                else:
+                    # 验证失败，显示错误并继续循环
+                    error_dlg = CustomConfirmDialog(
+                        parent=self,
+                        title="目录无效",
+                        content=(
+                            "选择的目录不包含有效的 ComfyUI。\n\n"
+                            f"选择的目录：{d}\n"
+                            f"期望的 ComfyUI 目录：{selected_comfy_dir}\n\n"
+                            "请确保选择的目录中包含 ComfyUI 文件夹，\n"
+                            "且 ComfyUI 文件夹中存在 main.py 文件。"
+                        ),
+                        buttons=[{"text": "重新选择", "role": "primary"}],
+                        default_index=0,
+                        theme_manager=self.theme_manager
+                    )
+                    error_dlg.exec_()
+            else:
+                # 用户取消了目录选择，显示提示并继续循环
+                cancel_dlg = CustomConfirmDialog(
+                    parent=self,
+                    title="未选择目录",
+                    content="必须选择一个有效的根目录才能使用启动器。\n\n是否继续选择？",
+                    buttons=[{"text": "继续选择", "role": "primary"}, {"text": "退出程序", "role": "secondary"}],
+                    default_index=0,
+                    theme_manager=self.theme_manager
+                )
+                cancel_dlg.exec_()
+                if cancel_dlg.get_result() == 1:
+                    self.close()
+                    return
 
     def _on_app_quit_cleanup(self):
         try:

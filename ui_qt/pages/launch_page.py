@@ -40,6 +40,14 @@ class LaunchPage(BasePage):
         layout.setContentsMargins(12, 12, 12, 12)
         layout.setSpacing(8)
 
+        # 调试日志：检查根目录设置
+        try:
+            comfy_root = self.app.config.get('paths', {}).get('comfyui_root', '.')
+            if hasattr(self.app, 'logger'):
+                self.app.logger.info("LaunchPage 初始化: comfyui_root=%s", comfy_root)
+        except Exception:
+            pass
+
         # ============== 启动控制区块 ==============
         top_row = QtWidgets.QHBoxLayout()
         top_row.setSpacing(15)
@@ -614,6 +622,7 @@ class LaunchPage(BasePage):
         root_show.setReadOnly(True)
         root_show.setStyleSheet(self.theme_manager.styles.input_style())
         root_show.setSizePolicy(QtWidgets.QSizePolicy.Expanding, QtWidgets.QSizePolicy.Fixed)
+        root_show.setMinimumWidth(520)
         if hasattr(self.app, 'config'):
             root_show.setText(str(Path(self.app.config.get('paths', {}).get('comfyui_root') or '.')))
 
@@ -657,7 +666,15 @@ class LaunchPage(BasePage):
             if hasattr(self.app, 'config'):
                 from pathlib import Path as _P
                 py_val = self.app.config.get('paths', {}).get('python_path') or ''
-                py_show.setText(str(_P(py_val).resolve()) if py_val else "未设置")
+                if py_val:
+                    py_path = _P(py_val)
+                    # 只有当路径存在时才显示，否则显示"未设置"
+                    if py_path.exists():
+                        py_show.setText(str(py_path.resolve()))
+                    else:
+                        py_show.setText("未设置")
+                else:
+                    py_show.setText("未设置")
         except Exception:
             py_show.setText("未设置")
 

@@ -8,25 +8,29 @@
     "extra_args": "",
     "attention_mode": "--use-sage-attention",
     "browser_open_mode": "disable",
-    "custom_browser_path": "",
+    "custom_browser_path": "C:/Program Files/Google/Chrome/Application/chrome.exe",
     "disable_all_custom_nodes": false,
-    "vram_mode": "--highvram"
+    "vram_mode": "",
+    "disable_api_nodes": false,
+    "use_new_manager": false
   },
   "ui_settings": {
     "window_width": 800,
     "window_height": 600,
-    "theme": "dark",
+    "theme": "light",
     "font_size": 9,
     "log_max_lines": 1000,
-    "window_size": "500x650"
+    "window_size": "500x650",
+    "sidebar_collapsed": false,
+    "ui_scale": 0.8
   },
   "paths": {
-    "comfyui_root": "F:/ComfyUI_Mie_V7.0",
+    "comfyui_root": "F:/ComfyUI_Mie_2026_V8.0",
     "python_embeded": "python_embeded",
     "custom_nodes": "ComfyUI/custom_nodes",
     "bat_files_directory": ".",
     "comfyui_path": "F:\\ComfyUI_Mie_V7.0\\ComfyUI",
-    "python_path": "F:\\ComfyUI_Mie_V7.0\\python_embeded\\python.exe"
+    "python_path": "F:\\ComfyUI_Mie_2026_V8.0\\python_embeded\\python.exe"
   },
   "advanced": {
     "check_environment_changes": true,
@@ -49,7 +53,7 @@
   },
   "integrations": {
     "comfyui_manager_git_set": true,
-    "comfyui_manager_git_path": "F:\\ComfyUI_Mie_V7.0\\tools\\PortableGit\\bin\\git.exe"
+    "comfyui_manager_git_path": "F:\\ComfyUI_Mie_2026_V8.0\\tools\\PortableGit\\bin\\git.exe"
   },
   "version_preferences": {
     "stable_only": true,

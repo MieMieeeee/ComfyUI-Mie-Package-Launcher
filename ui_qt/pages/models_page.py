@@ -50,16 +50,11 @@ class ModelsPage(BasePage):
         lbl_bp = QtWidgets.QLabel("模型库根路径:")
         lbl_bp.setStyleSheet(f"font-weight: bold; color: {self.theme_manager.colors.get('label')};")
 
-        init_base = ""
-        try:
-            if hasattr(self.app, 'services') and hasattr(self.app.services, 'model_path'):
-                init_base = self.app.services.model_path.get_external_path()
-        except Exception:
-            init_base = ""
-        self.edit_base_path = QtWidgets.QLineEdit(init_base)
+        self.edit_base_path = QtWidgets.QLineEdit()
         self.edit_base_path.setReadOnly(True)
         self.edit_base_path.setStyleSheet(self.theme_manager.styles.input_style())
         self.edit_base_path.setSizePolicy(QtWidgets.QSizePolicy.Expanding, QtWidgets.QSizePolicy.Fixed)
+        self.edit_base_path.setPlaceholderText("未配置")
 
         btn_sel_bp = QtWidgets.QPushButton("选择目录...")
         btn_sel_bp.setFixedWidth(100)
@@ -93,15 +88,7 @@ class ModelsPage(BasePage):
         info_row = QtWidgets.QHBoxLayout()
         info_row.setSpacing(15)
 
-        try:
-            base_path = init_base
-            if hasattr(self.app, 'services') and hasattr(self.app.services, 'model_path'):
-                cnt = len(self.app.services.model_path.get_mappings_for_base(base_path))
-            else:
-                cnt = 0
-        except Exception:
-            cnt = 0
-        self.lbl_count = QtWidgets.QLabel(f"当前已映射子文件夹: {cnt}")
+        self.lbl_count = QtWidgets.QLabel("当前已映射子文件夹: 0")
         self.lbl_count.setStyleSheet(f"color: {self.theme_manager.colors.get('label_muted')};")
 
         info_row.addWidget(self.lbl_count)
@@ -137,11 +124,38 @@ class ModelsPage(BasePage):
         self._page_title_refs.append(lbl_bp)
         if hasattr(self.app, "_theme_widgets"):
             self.app._theme_widgets.extend(self._styled_widgets)
-        # 初始刷新一次映射表
+
+        # 初始刷新一次映射表（从映射文件读取）
         try:
-            self._refresh_mapping_table()
+            self.refresh_from_config()
         except Exception:
             pass
+
+    def refresh_from_config(self):
+        """从映射文件刷新显示（设置根目录后调用）"""
+        try:
+            # 检查映射文件是否存在
+            if hasattr(self.app, 'services') and hasattr(self.app.services, 'model_path'):
+                yaml_path = self.app.services.model_path._get_yaml_path()
+                if yaml_path.exists():
+                    # 映射文件存在，读取 base_path
+                    base_path = self.app.services.model_path.get_external_path()
+                    self.edit_base_path.setText(base_path or "")
+                    # 刷新映射表
+                    self._refresh_mapping_table()
+                else:
+                    # 映射文件不存在，清空显示
+                    self.edit_base_path.setText("")
+                    self.table.setRowCount(0)
+                    self.lbl_count.setText("当前已映射子文件夹: 0")
+            else:
+                self.edit_base_path.setText("")
+                self.table.setRowCount(0)
+                self.lbl_count.setText("当前已映射子文件夹: 0")
+        except Exception:
+            self.edit_base_path.setText("")
+            self.table.setRowCount(0)
+            self.lbl_count.setText("当前已映射子文件夹: 0")
 
     def _select_base_path(self):
         """选择根目录"""
@@ -185,8 +199,13 @@ class ModelsPage(BasePage):
     def _refresh_mapping_table(self):
         """刷新映射表格"""
         base_path = self.edit_base_path.text().strip()
-        if hasattr(self.app, 'services') and hasattr(self.app.services, 'model_path'):
-            mappings = self.app.services.model_path.get_mappings_for_base(base_path)
+        # 只有设置了根路径且映射文件存在时才显示映射
+        if base_path and hasattr(self.app, 'services') and hasattr(self.app.services, 'model_path'):
+            yaml_path = self.app.services.model_path._get_yaml_path()
+            if yaml_path.exists():
+                mappings = self.app.services.model_path.get_mappings_for_base(base_path)
+            else:
+                mappings = []
         else:
             mappings = []
         self.table.setRowCount(len(mappings))
