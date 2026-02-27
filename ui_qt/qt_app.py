@@ -1458,15 +1458,12 @@ class PyQtLauncher(QtWidgets.QMainWindow):
             avail_geo = primary_screen.availableGeometry()
             s_w, s_h = avail_geo.width(), avail_geo.height()
 
-            # 先让布局把理想大小算出来（此时右侧页面已加入 QScrollArea）
-            self.adjustSize()
-            hint = self.sizeHint()
-
+            # 使用固定的窗口初始尺寸
             base_w = 1350
             base_h = 870
 
-            final_w = min(max(hint.width(), base_w), s_w - 40)
-            final_h = min(max(hint.height(), base_h), s_h - 80)
+            final_w = min(base_w, s_w - 40)
+            final_h = min(base_h, s_h - 80)
 
             self.resize(final_w, final_h)
             self.move(
