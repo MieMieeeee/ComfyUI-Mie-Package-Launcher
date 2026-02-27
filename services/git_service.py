@@ -98,9 +98,13 @@ class GitService:
                 integrations["comfyui_manager_git_path"] = git_path
                 try:
                     if getattr(self.app, 'services', None) and getattr(self.app.services, 'config', None):
-                        self.app.services.config.save(self.app.config)
+                        saved_config = self.app.services.config.save(self.app.config)
+                        if saved_config is not None:
+                            self.app.config = saved_config
                     else:
-                        self.app.config_manager.save_config(self.app.config)
+                        saved_config = self.app.config_manager.save_config(self.app.config)
+                        if saved_config is not None:
+                            self.app.config = saved_config
                 except Exception:
                     pass
             except Exception:

@@ -1393,6 +1393,57 @@ class PyQtLauncher(QtWidgets.QMainWindow):
         for key, b in btns.items():
             b.clicked.connect(lambda _, k=key: _select_tab(k))
         _select_tab("launch")
+
+        # 验证路径（在获取版本信息之前）
+        try:
+            from pathlib import Path as P
+            comfy_root = Path(self.config.get("paths", {}).get("comfyui_root") or ".").resolve()
+            comfy_dir = comfy_root / "ComfyUI"
+            python_path = Path(self.python_exec) if hasattr(self, 'python_exec') else None
+
+            # 验证ComfyUI目录
+            if not (comfy_dir.exists() and (comfy_dir / "main.py").exists()):
+                from ui_qt.widgets.custom_confirm_dialog import CustomConfirmDialog
+                dlg = CustomConfirmDialog(
+                    parent=self,
+                    title="路径验证失败",
+                    content=(
+                        "ComfyUI 目录未找到或无效。\n\n"
+                        f"根目录：{comfy_root}\n"
+                        f"ComfyUI 目录：{comfy_dir}\n"
+                        "请选择正确的根目录（包含 ComfyUI 文件夹的父目录）。"
+                    ),
+                    buttons=[{"text": "确定", "role": "primary"}],
+                    default_index=0,
+                    theme_manager=self.theme_manager
+                )
+                dlg.exec_()
+                # 验证失败，关闭应用
+                self.close()
+                return
+
+            # 验证Python路径
+            if python_path and not python_path.exists():
+                from ui_qt.widgets.custom_confirm_dialog import CustomConfirmDialog
+                dlg = CustomConfirmDialog(
+                    parent=self,
+                    title="Python 路径验证失败",
+                    content=(
+                        "Python 可执行文件未找到。\n\n"
+                        f"当前路径：{self.python_exec}\n\n"
+                        "请选择 Python 可执行文件（python_embeded/python.exe）。"
+                    ),
+                    buttons=[{"text": "确定", "role": "primary"}],
+                    default_index=0,
+                    theme_manager=self.theme_manager
+                )
+                dlg.exec_()
+                # 验证失败，关闭应用
+                self.close()
+                return
+        except Exception:
+            pass
+
         try:
             self.get_version_info("all")
         except Exception:

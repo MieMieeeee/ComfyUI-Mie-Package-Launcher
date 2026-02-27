@@ -908,7 +908,10 @@ class LaunchPage(BasePage):
             if hasattr(self.app, 'config'):
                 self.app.config.setdefault('paths', {})['comfyui_root'] = d
                 try:
-                    self.app.services.config.save(self.app.config)
+                    # 保存配置并同步更新app.config引用
+                    saved_config = self.app.services.config.save(self.app.config)
+                    if saved_config is not None:
+                        self.app.config = saved_config
                 except Exception:
                     pass
             
@@ -939,7 +942,9 @@ class LaunchPage(BasePage):
                 try:
                     self.app.config.setdefault('paths', {})['python_path'] = self.app.python_exec
                     if hasattr(self.app, 'services') and hasattr(self.app.services, 'config'):
-                        self.app.services.config.save(self.app.config)
+                        saved_config = self.app.services.config.save(self.app.config)
+                        if saved_config is not None:
+                            self.app.config = saved_config
                 except Exception:
                     pass
                 try:
@@ -968,7 +973,9 @@ class LaunchPage(BasePage):
         try:
             self.app.config.setdefault('paths', {})['python_path'] = p
             if hasattr(self.app, 'services') and hasattr(self.app.services, 'config'):
-                self.app.services.config.save(self.app.config)
+                saved_config = self.app.services.config.save(self.app.config)
+                if saved_config is not None:
+                    self.app.config = saved_config
         except Exception:
             pass
         try:

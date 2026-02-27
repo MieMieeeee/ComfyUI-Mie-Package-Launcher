@@ -154,21 +154,24 @@ class ConfigManager:
         except Exception:
             pass
     
-    def save_config(self, config_data: Optional[Dict[str, Any]] = None):
+    def save_config(self, config_data: Optional[Dict[str, Any]] = None) -> Dict[str, Any]:
         """
         保存配置到文件
-        
+
         Args:
             config_data: 要保存的配置数据，如果为 None 则保存当前配置
+
+        Returns:
+            保存后的配置字典
         """
         if config_data is not None:
             self.config = config_data
-            
+
         try:
             self.logger.info("保存配置到: %s", str(self.config_file))
         except Exception:
             pass
-            
+
         try:
             with open(self.config_file, 'w', encoding='utf-8') as f:
                 json.dump(self.config, f, indent=2, ensure_ascii=False)
@@ -181,6 +184,8 @@ class ConfigManager:
                 self.logger.error("配置保存失败: %s", str(e))
             except Exception:
                 pass
+
+        return self.config.copy()
     
     def get(self, key_path: str, default: Any = None) -> Any:
         """

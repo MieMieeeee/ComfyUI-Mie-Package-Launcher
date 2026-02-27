@@ -9,6 +9,7 @@ from ui_qt.widgets import InfoCard, StyledTableWidget
 from ui_qt.theme_styles import ThemeStyles
 from utils import common as COMMON
 from utils.common import run_hidden
+from ui_qt.widgets.progress_dialog import ProgressDialog
 
 
 class VersionPage(BasePage):
@@ -227,7 +228,7 @@ class VersionPage(BasePage):
             self.app._upgrade_latest(stable_only)
 
     def _on_update_clicked(self):
-        """点击更新时，按钮显示“更新中…”，禁用并变灰，完成后恢复"""
+        """点击更新时，按钮显示"更新中…"，禁用并变灰，完成后恢复"""
         btn = getattr(self, "btn_upd", None)
         if getattr(self.app, "_update_running", False):
             return
@@ -268,49 +269,78 @@ class VersionPage(BasePage):
         if not commit_hash:
             return
 
+        # 显示进度对话框
+        progress = ProgressDialog(parent=self, title="切换提交中", theme_manager=self.theme_manager)
+        progress.set_status("正在切换 ComfyUI 到指定提交...")
+        progress.set_progress(0, maximum=0)
+        progress.show()
+
         try:
             if hasattr(self.app, "logger"):
                 self.app.logger.info(f"UI: 请求切换到提交 {commit_hash}")
+
             base = Path(self.app.config.get("paths", {}).get("comfyui_root") or ".").resolve()
             root = (base / "ComfyUI").resolve()
-            COMMON.run_hidden([getattr(self.app, 'git_path', 'git') or "git", "checkout", commit_hash], cwd=str(root))
+
+            # 执行git checkout
+            progress.set_status("正在执行 git checkout...")
+            result = COMMON.run_hidden(
+                [getattr(self.app, 'git_path', 'git') or "git", "checkout", commit_hash],
+                cwd=str(root)
+            )
+
+            if result.returncode != 0:
+                raise RuntimeError(f"Git checkout 失败: {result.stderr or '未知错误'}")
 
             # 刷新版本信息
+            progress.set_status("正在刷新版本信息...")
             if hasattr(self.app, 'get_version_info'):
                 self.app.get_version_info("all")
             self._refresh_kernel_section()
 
+            progress.close()
             from ui_qt.widgets.dialog_helper import DialogHelper
             DialogHelper.show_info(self, "切换成功", f"已切换到提交 {commit_hash}")
         except Exception as e:
+            progress.close()
             from ui_qt.widgets.dialog_helper import DialogHelper
             DialogHelper.show_warning(self, "切换失败", str(e))
 
     def _fetch_remote_and_refresh(self):
         """从远程刷新提交历史"""
+        # 显示进度对话框
+        progress = ProgressDialog(parent=self, title="刷新提交历史中", theme_manager=self.theme_manager)
+        progress.set_status("正在从远程获取提交历史...")
+        progress.set_progress(0, maximum=0)
+        progress.show()
+
         try:
             from ui_qt.widgets.dialog_helper import DialogHelper
             base = Path(self.app.config.get("paths", {}).get("comfyui_root") or ".").resolve()
             root = (base / "ComfyUI").resolve()
             if not root.exists():
+                progress.close()
                 DialogHelper.show_warning(self, "失败", "ComfyUI目录不存在")
                 return
 
             # Fetch
+            progress.set_status("正在执行 git fetch...")
             if hasattr(self.app, "logger"):
                 self.app.logger.info("UI: 正在执行 git fetch...")
             run_hidden([getattr(self.app, 'git_path', 'git') or "git", "fetch"], cwd=str(root))
 
             # Refresh info
+            progress.set_status("正在刷新表格...")
             self._refresh_kernel_section(force_remote=True)
 
             # Trigger version check
             if hasattr(self.app, 'get_version_info'):
                 self.app.get_version_info("core_only")
 
+            progress.close()
             DialogHelper.show_info(self, "完成", "已刷新提交历史")
         except Exception as e:
-            from ui_qt.widgets.dialog_helper import DialogHelper
+            progress.close()
             DialogHelper.show_warning(self, "失败", str(e))
 
     def _refresh_kernel_section(self, force_remote=False):
@@ -404,7 +434,7 @@ class VersionPage(BasePage):
                     # 提交信息列
                     try:
                         if (_kw_fix and _kw_fix.search(val)) or (_kw_ver and _kw_ver.search(val)):
-                            # fix 或版本关键词 - 使用强调色（text 颜色）
+                            # fix 或版本关键词 - 使用强调色（text 需色）
                             f = item.font()
                             f.setBold(True)
                             item.setFont(f)
@@ -448,6 +478,7 @@ class VersionPage(BasePage):
     def update_theme(self, theme_styles=None):
         """更新主题"""
         super().update_theme(theme_styles)
+
         title_color = self.theme_manager.colors.get('label')
         for ref in self._page_title_refs:
             ref.setStyleSheet(f"font: bold 12pt 'Microsoft YaHei UI'; color: {title_color}; margin-top: 10px;" if "提交历史" in ref.text() else f"font: bold 16pt 'Microsoft YaHei UI'; color: {title_color}; margin-bottom: 5px;")

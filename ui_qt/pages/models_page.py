@@ -7,6 +7,7 @@ from PyQt5 import QtWidgets, QtCore, QtGui
 from .base_page import BasePage
 from ui_qt.widgets import InfoCard, StyledTableWidget, PrimaryButton
 from ui_qt.theme_styles import ThemeStyles
+from ui_qt.widgets.dialog_helper import DialogHelper
 
 
 class ModelsPage(BasePage):
@@ -152,7 +153,8 @@ class ModelsPage(BasePage):
                 self.edit_base_path.setText(path_str)
             except Exception:
                 self.edit_base_path.setText(d)
-            self._refresh_mapping_table()
+            # 自动更新映射配置
+            self._update_mapping()
 
     def _update_mapping(self):
         """更新映射配置"""
@@ -162,10 +164,10 @@ class ModelsPage(BasePage):
                 raise RuntimeError("model_path 服务不可用")
             success = self.app.services.model_path.update_mapping(path)
             if success:
-                QtWidgets.QMessageBox.information(self, "成功", "外置模型库映射已更新！\n请重启 ComfyUI 生效。")
+                DialogHelper.show_info(self, "成功", "外置模型库映射已更新！\n请重启 ComfyUI 生效。")
             self._refresh_mapping_table()
         except Exception as e:
-            QtWidgets.QMessageBox.warning(self, "失败", f"更新映射配置失败：{e}")
+            DialogHelper.show_warning(self, "失败", f"更新映射配置失败：{e}")
 
     def _open_yaml_file(self):
         """打开配置文件"""
@@ -176,9 +178,9 @@ class ModelsPage(BasePage):
             if yaml_path.exists():
                 QtGui.QDesktopServices.openUrl(QtCore.QUrl.fromLocalFile(str(yaml_path)))
             else:
-                QtWidgets.QMessageBox.information(self, "提示", "配置文件 extra_model_paths.yaml 尚未创建。")
+                DialogHelper.show_info(self, "提示", "配置文件 extra_model_paths.yaml 尚未创建。")
         except Exception as e:
-            QtWidgets.QMessageBox.warning(self, "失败", f"打开配置文件失败：{e}")
+            DialogHelper.show_warning(self, "失败", f"打开配置文件失败：{e}")
 
     def _refresh_mapping_table(self):
         """刷新映射表格"""
