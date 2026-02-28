@@ -8,6 +8,7 @@ from PyQt5 import QtWidgets, QtCore, QtGui
 from PyQt5.QtCore import Qt
 from .base_page import BasePage
 from ui_qt.theme_styles import ThemeStyles
+from ui_qt.widgets.custom import NoWheelComboBox
 
 
 class LaunchPage(BasePage):
@@ -193,7 +194,7 @@ class LaunchPage(BasePage):
         # 显存策略
         opt_label = QtWidgets.QLabel("显存策略：")
         opt_label.setStyleSheet(lbl_style)
-        opt_widget = QtWidgets.QComboBox()
+        opt_widget = NoWheelComboBox()
         opt_widget.addItems([
             "由 ComfyUI 决定（推荐）",
             "显存充足 (High)",
@@ -220,7 +221,7 @@ class LaunchPage(BasePage):
         # 注意力优化
         attn_label = QtWidgets.QLabel("注意力优化：")
         attn_label.setStyleSheet(lbl_style)
-        attn_combo = QtWidgets.QComboBox()
+        attn_combo = NoWheelComboBox()
         attn_combo.setStyleSheet(self.theme_manager.styles.input_style())
 
         attn_opts = [
@@ -255,7 +256,7 @@ class LaunchPage(BasePage):
         # 自动打开浏览器
         open_label = QtWidgets.QLabel("自动打开浏览器：")
         open_label.setStyleSheet(lbl_style)
-        open_combo = QtWidgets.QComboBox()
+        open_combo = NoWheelComboBox()
         open_combo.setStyleSheet(self.theme_manager.styles.input_style())
 
         open_opts = [
@@ -421,7 +422,7 @@ class LaunchPage(BasePage):
         lbl_style = f"color: {self.theme_manager.colors.get('label_muted')}; font-weight: bold;"
 
         # HF 镜像
-        env_hf_combo = QtWidgets.QComboBox()
+        env_hf_combo = NoWheelComboBox()
         env_hf_combo.addItems(["不使用", "hf-mirror", "自定义"])
         env_hf_combo.setMinimumWidth(120)
         env_hf_combo.setStyleSheet(self.theme_manager.styles.input_style())
@@ -483,7 +484,7 @@ class LaunchPage(BasePage):
         env_layout.addWidget(_add_hf_container, 0, 1)
 
         # GitHub 代理
-        env_gh_combo = QtWidgets.QComboBox()
+        env_gh_combo = NoWheelComboBox()
         env_gh_combo.addItems(["不使用", "gh-proxy", "自定义"])
         env_gh_combo.setMinimumWidth(120)
         env_gh_combo.setStyleSheet(self.theme_manager.styles.input_style())
@@ -546,7 +547,7 @@ class LaunchPage(BasePage):
         env_layout.addWidget(_add_gh_container, 1, 1)
 
         # PyPI 代理
-        env_pypi_combo = QtWidgets.QComboBox()
+        env_pypi_combo = NoWheelComboBox()
         env_pypi_combo.addItems(["不使用", "阿里云", "自定义"])
         env_pypi_combo.setMinimumWidth(120)
         env_pypi_combo.setStyleSheet(self.theme_manager.styles.input_style())

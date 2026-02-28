@@ -6,6 +6,7 @@ from pathlib import Path
 from PyQt5 import QtWidgets, QtCore, QtGui
 from .base_page import BasePage
 from ui_qt.widgets import InfoCard, StyledTableWidget
+from ui_qt.widgets.custom import NoWheelComboBox
 from ui_qt.theme_styles import ThemeStyles
 from utils import common as COMMON
 from utils.common import run_hidden
@@ -88,7 +89,7 @@ class VersionPage(BasePage):
         lbl_gh = QtWidgets.QLabel("GitHub代理:")
         lbl_gh.setStyleSheet(lbl_style)
 
-        self.pv_proxy_combo = QtWidgets.QComboBox()
+        self.pv_proxy_combo = NoWheelComboBox()
         self.pv_proxy_combo.addItems(["不使用", "gh-proxy", "自定义"])
         self.pv_proxy_combo.setFixedWidth(140)
         self.pv_proxy_combo.setStyleSheet(self.theme_manager.styles.input_style())

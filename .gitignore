@@ -2,6 +2,10 @@
 .DS_Store
 Thumbs.db
 
+# AI
+.trae/
+.claude/
+
 # Python cache
 __pycache__/
 *.py[cod]
@@ -17,8 +21,13 @@ venv/
 .idea/
 .vscode/
 
+# docs
+docs/*.txt
+docs/*.json
+
 # Logs
 *.log
+launcher/
 
 # Build outputs (PyInstaller, etc.)
 dist/
