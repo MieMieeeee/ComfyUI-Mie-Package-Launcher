@@ -37,7 +37,7 @@ class VersionPage(BasePage):
         layout.addWidget(title)
         self._page_title_refs = [title]
 
-        # 版本信息卡片
+        # 版本信息卡片（包含版本信息、设置面板和操作按钮）
         info_card = InfoCard("当前版本信息", self.theme_manager.styles)
         layout.addWidget(info_card)
 
@@ -141,7 +141,7 @@ class VersionPage(BasePage):
 
         info_layout.addWidget(self.settings_panel)
 
-        # 操作按钮行
+        # 操作按钮行（放在 info_card 里面）
         btn_row = QtWidgets.QHBoxLayout()
         btn_row.setSpacing(12)
 
@@ -176,13 +176,14 @@ class VersionPage(BasePage):
         btn_row.addWidget(self.btn_refresh)
         btn_row.addStretch(1)
 
-        layout.addLayout(btn_row)
+        info_layout.addLayout(btn_row)
 
-        # 提交历史标题
-        hist_label = QtWidgets.QLabel("提交历史")
-        hist_label.setStyleSheet(f"font: bold 12pt 'Microsoft YaHei UI'; color: {self.theme_manager.colors.get('label')}; margin-top: 10px;")
-        layout.addWidget(hist_label)
-        self._page_title_refs.append(hist_label)
+        # 提交历史卡片（包含标题和表格）
+        history_card = InfoCard("提交历史", self.theme_manager.styles)
+        layout.addWidget(history_card)
+
+        history_layout = history_card.layout()
+        history_layout.setSpacing(10)
 
         # 提交历史表格
         self.history_table = StyledTableWidget(self.theme_manager.styles)
@@ -196,7 +197,7 @@ class VersionPage(BasePage):
         header.setSectionResizeMode(2, QtWidgets.QHeaderView.ResizeToContents)
         header.setSectionResizeMode(3, QtWidgets.QHeaderView.Stretch)
 
-        layout.addWidget(self.history_table)
+        history_layout.addWidget(self.history_table)
 
         # 添加样式组件引用
         self._styled_widgets = [info_card, self.history_table, self.settings_panel]
@@ -208,9 +209,34 @@ class VersionPage(BasePage):
         self.app._version_commit_label = self.lbl_ver_commit
         self.app._history_table = self.history_table
 
-        # 初始化刷新版本信息与提交历史
+        # 分页相关
+        self._commit_page = 1
+        self._commits_per_page = 50
+        self._total_commits = 0
+
+        # 翻页控件
+        page_row = QtWidgets.QHBoxLayout()
+        page_row.addStretch(1)
+
+        self.lbl_page_info = QtWidgets.QLabel("第 1 页")
+        self.lbl_page_info.setStyleSheet(f"color: {self.theme_manager.colors.get('label_muted')};")
+
+        self.btn_prev_page = QtWidgets.QPushButton("上一页")
+        self.btn_prev_page.setStyleSheet(self.theme_manager.styles.secondary_button_style())
+        self.btn_prev_page.clicked.connect(self._prev_page)
+
+        self.btn_next_page = QtWidgets.QPushButton("下一页")
+        self.btn_next_page.setStyleSheet(self.theme_manager.styles.secondary_button_style())
+        self.btn_next_page.clicked.connect(self._next_page)
+
+        page_row.addWidget(self.btn_prev_page)
+        page_row.addWidget(self.lbl_page_info)
+        page_row.addWidget(self.btn_next_page)
+        history_layout.addLayout(page_row)
+
+        # 延迟刷新版本信息与提交历史（避免阻塞 UI 显示）
         try:
-            self._refresh_kernel_section()
+            QtCore.QTimer.singleShot(100, self._refresh_kernel_section)
         except Exception:
             pass
 
@@ -343,6 +369,26 @@ class VersionPage(BasePage):
             progress.close()
             DialogHelper.show_warning(self, "失败", str(e))
 
+    def _prev_page(self):
+        """上一页"""
+        if self._commit_page > 1:
+            self._commit_page -= 1
+            self._load_commit_history()
+
+    def _next_page(self):
+        """下一页"""
+        total_pages = (self._total_commits + self._commits_per_page - 1) // self._commits_per_page
+        if self._commit_page < total_pages:
+            self._commit_page += 1
+            self._load_commit_history()
+
+    def _update_page_info(self):
+        """更新翻页信息"""
+        total_pages = max(1, (self._total_commits + self._commits_per_page - 1) // self._commits_per_page)
+        self.lbl_page_info.setText(f"第 {self._commit_page}/{total_pages} 页")
+        self.btn_prev_page.setEnabled(self._commit_page > 1)
+        self.btn_next_page.setEnabled(self._commit_page < total_pages)
+
     def _refresh_kernel_section(self, force_remote=False):
         """刷新版本信息"""
         try:
@@ -377,10 +423,32 @@ class VersionPage(BasePage):
         except Exception:
             root = Path.cwd()
 
+        git = getattr(self.app, 'git_path', 'git') or "git"
         target = "HEAD"
-        if show_remote:
+
+        # 智能判断：检查 HEAD 是否落后于远程分支
+        # 如果落后（如 checkout 到旧版本），使用远程分支显示完整历史
+        try:
+            # 获取上游分支名称
+            r_up = run_hidden([git, "rev-parse", "--abbrev-ref", "--symbolic-full-name", "@{u}"],
+                            capture_output=True, text=True, timeout=3, cwd=str(root))
+            if r_up.returncode == 0 and r_up.stdout.strip():
+                upstream = r_up.stdout.strip()
+                # 检查 HEAD 是否包含上游的最新提交（HEAD..upstream 是否为空）
+                r_behind = run_hidden([git, "rev-list", "--count", f"HEAD..{upstream}"],
+                                     capture_output=True, text=True, timeout=3, cwd=str(root))
+                if r_behind.returncode == 0 and r_behind.stdout.strip():
+                    behind_count = int(r_behind.stdout.strip())
+                    if behind_count > 0:
+                        # HEAD 落后于上游，使用上游分支显示完整历史
+                        target = upstream
+        except Exception:
+            pass
+
+        # 如果明确要求显示远程，强制使用远程分支
+        if show_remote and target == "HEAD":
             try:
-                r_up = run_hidden([getattr(self.app, 'git_path', 'git') or "git", "rev-parse", "--abbrev-ref", "--symbolic-full-name", "@{u}"],
+                r_up = run_hidden([git, "rev-parse", "--abbrev-ref", "--symbolic-full-name", "@{u}"],
                                 capture_output=True, text=True, timeout=3, cwd=str(root))
                 if r_up.returncode == 0 and r_up.stdout.strip():
                     target = r_up.stdout.strip()
@@ -389,8 +457,23 @@ class VersionPage(BasePage):
             except Exception:
                 target = "origin/HEAD"
 
-        r = run_hidden([getattr(self.app, 'git_path', 'git') or "git", "log", "--date=short",
-                       "--pretty=format:%h|%ad|%an|%s", "-n", "50", target],
+        # 获取总提交数（用于分页）
+        try:
+            r_count = run_hidden([git, "rev-list", "--count", target],
+                                capture_output=True, text=True, timeout=5, cwd=str(root))
+            if r_count.returncode == 0 and r_count.stdout.strip():
+                self._total_commits = int(r_count.stdout.strip())
+            else:
+                self._total_commits = 0
+        except Exception:
+            self._total_commits = 0
+
+        # 计算分页偏移
+        skip = (self._commit_page - 1) * self._commits_per_page
+
+        r = run_hidden([git, "log", "--date=short",
+                       "--pretty=format:%h|%ad|%an|%s", "-n", str(self._commits_per_page),
+                       "--skip", str(skip), target],
                       capture_output=True, text=True, timeout=8, cwd=str(root))
 
         rows = []
@@ -402,8 +485,9 @@ class VersionPage(BasePage):
 
         # Fallback to local HEAD if remote failed
         if (r.returncode != 0 or not rows) and show_remote:
-            r = run_hidden([getattr(self.app, 'git_path', 'git') or "git", "log", "--date=short",
-                          "--pretty=format:%h|%ad|%an|%s", "-n", "50", "HEAD"],
+            r = run_hidden([git, "log", "--date=short",
+                          "--pretty=format:%h|%ad|%an|%s", "-n", str(self._commits_per_page),
+                          "--skip", str(skip), "HEAD"],
                          capture_output=True, text=True, timeout=8, cwd=str(root))
             if r.returncode == 0 and r.stdout:
                 for line in r.stdout.splitlines():
@@ -411,14 +495,15 @@ class VersionPage(BasePage):
                     if len(parts) == 4:
                         rows.append(parts)
 
+        # 更新翻页信息
+        self._update_page_info()
+
         self.history_table.setRowCount(len(rows))
 
         try:
             import re
-            _kw_fix = re.compile(r"(?i)\bfix\b")
-            _kw_ver = re.compile(r"v\d+(?:\.\d+)*")
+            _kw_ver = re.compile(r"ComfyUI v\d+\.\d+\.\d+")
         except Exception:
-            _kw_fix = None
             _kw_ver = None
 
         for ri, cols in enumerate(rows):
@@ -433,8 +518,8 @@ class VersionPage(BasePage):
                 if ci == 3:
                     # 提交信息列
                     try:
-                        if (_kw_fix and _kw_fix.search(val)) or (_kw_ver and _kw_ver.search(val)):
-                            # fix 或版本关键词 - 使用强调色（text 需色）
+                        if _kw_ver and _kw_ver.search(val):
+                            # 版本关键词 - 使用强调色
                             f = item.font()
                             f.setBold(True)
                             item.setFont(f)
@@ -450,10 +535,8 @@ class VersionPage(BasePage):
         """重新刷新表格项的颜色（主题切换时调用）"""
         import re
         try:
-            _kw_fix = re.compile(r"(?i)\bfix\b")
-            _kw_ver = re.compile(r"v\d+(?:\.\d+)*")
+            _kw_ver = re.compile(r"ComfyUI v\d+\.\d+\.\d+")
         except Exception:
-            _kw_fix = None
             _kw_ver = None
 
         for row in range(self.history_table.rowCount()):
@@ -466,8 +549,8 @@ class VersionPage(BasePage):
                     # 提交信息列
                     val = item.text()
                     try:
-                        if (_kw_fix and _kw_fix.search(val)) or (_kw_ver and _kw_ver.search(val)):
-                            # fix 或版本关键词 - 使用强调色
+                        if _kw_ver and _kw_ver.search(val):
+                            # 版本关键词 - 使用强调色
                             item.setForeground(QtGui.QBrush(QtGui.QColor(self.theme_manager.colors.get('text'))))
                         else:
                             # 其他 - 使用 muted 文本颜色
@@ -509,6 +592,15 @@ class VersionPage(BasePage):
             self.btn_upd.setStyleSheet(btn_style)
             self.btn_switch.setStyleSheet(btn_style)
             self.btn_refresh.setStyleSheet(btn_style)
+
+        # 更新翻页按钮样式
+        if hasattr(self, 'btn_prev_page') and hasattr(self, 'btn_next_page'):
+            page_btn_style = self.theme_manager.styles.secondary_button_style()
+            self.btn_prev_page.setStyleSheet(page_btn_style)
+            self.btn_next_page.setStyleSheet(page_btn_style)
+
+        if hasattr(self, 'lbl_page_info'):
+            self.lbl_page_info.setStyleSheet(f"color: {self.theme_manager.colors.get('label_muted')};")
 
         # 重新应用表格项颜色（因为表格内容有硬编码颜色）
         self._refresh_table_item_colors()

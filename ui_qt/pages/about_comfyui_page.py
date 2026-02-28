@@ -116,9 +116,10 @@ class AboutComfyUIPage(BasePage):
         layout.addWidget(banner_label)
 
         # 描述文本
+        muted_color = self.theme_manager.colors.get('label_muted')
         desc = QtWidgets.QLabel(
             "<div style='text-align: center;'>"
-            "<p style='font-size: 14px; color: {self.theme_manager.colors.get('label_muted')}; line-height: 160%;'>"
+            f"<p style='font-size: 14px; color: {muted_color}; line-height: 160%;'>"
             "ComfyUI 以模块化节点为核心，支持灵活的工作流构建与高效的推理执行。<br>"
             "让创作者与开发者都能快速搭建生成式 AI 应用。"
             "</p>"
@@ -137,6 +138,9 @@ class AboutComfyUIPage(BasePage):
         content_layout.addWidget(desc)
 
         layout.addWidget(content)
+
+        # 保存引用以便主题切换时更新
+        self._desc_label = desc
 
         return card
 
@@ -178,3 +182,18 @@ class AboutComfyUIPage(BasePage):
                     widget.update_theme(self.theme_manager.styles)
                 except Exception:
                     pass
+
+        # 更新描述文本颜色
+        if hasattr(self, "_desc_label"):
+            try:
+                muted_color = self.theme_manager.colors.get('label_muted')
+                self._desc_label.setText(
+                    "<div style='text-align: center;'>"
+                    f"<p style='font-size: 14px; color: {muted_color}; line-height: 160%;'>"
+                    "ComfyUI 以模块化节点为核心，支持灵活的工作流构建与高效的推理执行。<br>"
+                    "让创作者与开发者都能快速搭建生成式 AI 应用。"
+                    "</p>"
+                    "</div>"
+                )
+            except Exception:
+                pass

@@ -210,6 +210,35 @@ class VersionService(IVersionService):
             commit = None
         return {"tag": tag, "commit": commit}
 
+    def get_stable_version_map(self, force_refresh: bool = False) -> Dict[str, str]:
+        """获取稳定版本的 commit -> tag 映射"""
+        cache = getattr(self.app, '_stable_version_map_cache', None)
+        if cache and (not force_refresh):
+            return cache
+
+        result = {}
+        try:
+            releases = self._get_releases(force_refresh=force_refresh)
+            for rel in releases:
+                if rel.get('prerelease', False):
+                    continue  # 跳过预发布版本
+                tag = str(rel.get('tag_name', '')).strip()
+                if not tag:
+                    continue
+                # 获取 tag 对应的 commit
+                commit = self._tag_commit(tag)
+                if commit:
+                    # 存储完整哈希
+                    result[commit] = tag
+        except Exception:
+            pass
+
+        try:
+            setattr(self.app, '_stable_version_map_cache', result)
+        except Exception:
+            pass
+        return result
+
     def upgrade_latest(self, stable_only: bool = True) -> Dict[str, Any]:
         if stable_only:
             info = self.get_latest_stable_kernel(force_refresh=True)

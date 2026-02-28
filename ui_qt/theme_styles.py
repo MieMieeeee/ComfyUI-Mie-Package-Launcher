@@ -458,6 +458,8 @@ class ThemeStyles:
 
     # ==================== 表格样式 ====================
     def table_style(self) -> str:
+        # 根据主题选择不同的 hover 颜色
+        hover_bg = "rgba(255, 255, 255, 0.08)" if self.c.dark else "rgba(0, 0, 0, 0.05)"
         return f"""
         QTableWidget {{
             border: none;
@@ -483,7 +485,11 @@ class ThemeStyles:
             color: {self.c.get('table_selected_text')};
         }}
         QTableWidget::item:hover {{
-            background-color: rgba(255, 255, 255, 0.05);
+            background-color: {hover_bg};
+        }}
+        QTableWidget::item:selected:hover {{
+            background-color: {self.c.get('table_selected_bg')};
+            color: {self.c.get('table_selected_text')};
         }}
         QScrollBar:vertical {{
             background: transparent;
