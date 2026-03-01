@@ -32,6 +32,8 @@ launcher/
 # Build outputs (PyInstaller, etc.)
 dist/
 build/
+comfyui_launcher_pyqt.dist/
+
 
 # Launcher runtime cache
 launcher_cache.json

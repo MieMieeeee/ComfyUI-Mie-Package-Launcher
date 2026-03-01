@@ -37,12 +37,12 @@ if getattr(sys, 'frozen', False):
     qt_bin_path = os.path.join(base_dir, '_internal', 'PyQt5', 'Qt', 'bin')
     if not os.path.exists(qt_bin_path):
         qt_bin_path = os.path.join(base_dir, '_internal', 'PyQt5', 'Qt5', 'bin')
-    
+
     if os.path.exists(qt_bin_path):
         # 1. Update PATH (Traditional method)
         os.environ['PATH'] = qt_bin_path + os.pathsep + os.environ.get('PATH', '')
         print(f"[DEBUG] Added Qt bin to PATH: {qt_bin_path}")
-        
+
         # 2. Use add_dll_directory for Python 3.8+ (Modern method, often required)
         if hasattr(os, 'add_dll_directory'):
             try:
@@ -57,7 +57,7 @@ if getattr(sys, 'frozen', False):
             import ctypes
             # Order matters: Core -> Gui -> Widgets
             # Also load d3dcompiler_47.dll if present (often needed by Qt5Gui)
-            qt_dlls = ['Qt5Core.dll', 'd3dcompiler_47.dll', 'Qt5Gui.dll', 'Qt5Widgets.dll'] 
+            qt_dlls = ['Qt5Core.dll', 'd3dcompiler_47.dll', 'Qt5Gui.dll', 'Qt5Widgets.dll']
             for dll_name in qt_dlls:
                 dll_full_path = os.path.join(qt_bin_path, dll_name)
                 if os.path.exists(dll_full_path):
@@ -72,6 +72,40 @@ if getattr(sys, 'frozen', False):
         except Exception as e:
             print(f"[ERROR] Failed to pre-load Qt DLLs: {e}")
 
+
+def _show_single_instance_dialog():
+    """显示单实例提示弹窗"""
+    try:
+        from PyQt5 import QtWidgets, QtCore, QtGui
+        from ui_qt.widgets.custom_confirm_dialog import CustomConfirmDialog
+
+        # 创建 QApplication（如果不存在）
+        app = QtWidgets.QApplication.instance()
+        if app is None:
+            app = QtWidgets.QApplication(sys.argv)
+
+        # 设置高分屏支持
+        try:
+            if hasattr(QtCore.Qt, 'AA_EnableHighDpiScaling'):
+                QtWidgets.QApplication.setAttribute(QtCore.Qt.AA_EnableHighDpiScaling, True)
+            if hasattr(QtCore.Qt, 'AA_UseHighDpiPixmaps'):
+                QtWidgets.QApplication.setAttribute(QtCore.Qt.AA_UseHighDpiPixmaps, True)
+        except Exception:
+            pass
+
+        dialog = CustomConfirmDialog(
+            parent=None,
+            title="程序已运行",
+            content="ComfyUI 启动器已在运行中。\n\n请检查任务栏或系统托盘。",
+            buttons=[{"text": "确定", "role": "primary"}],
+            default_index=0,
+            theme_manager=None  # 使用默认深色主题
+        )
+        dialog.exec_()
+    except Exception as e:
+        # 如果弹窗失败，打印到控制台
+        print(f"[单实例] 程序已运行: {e}")
+
 # -----------------------------------------------------------------------------
 
 # 你的原 import 继续
@@ -81,6 +115,7 @@ from ui_qt.qt_app import PyQtLauncher
 if __name__ == "__main__":
     lock = SingletonLock("comfyui_launcher_pyqt.lock")
     if not lock.acquire():
+        _show_single_instance_dialog()
         sys.exit(0)
     try:
         app = PyQtLauncher()

@@ -46,20 +46,40 @@ def install_logging(app_name: str = "comfyui_launcher", log_root=None) -> loggin
         else:
             # Best-effort root detection when not provided
             root_candidates = []
+
+            # Nuitka: __compiled__ 存在，sys.argv[0] 是主 exe 路径
             try:
-                root_candidates.append(Path(__file__).resolve().parent.parent)
-            except Exception:
-                pass
+                is_nuitka = __compiled__ is not None
+            except NameError:
+                is_nuitka = False
+
+            if is_nuitka:
+                # Nuitka standalone: 使用主 exe 所在目录
+                try:
+                    root_candidates.append(Path(sys.argv[0]).resolve().parent)
+                except Exception:
+                    pass
+
+            # PyInstaller: sys._MEIPASS
             try:
                 from sys import _MEIPASS  # type: ignore
                 if _MEIPASS:
                     root_candidates.append(Path(_MEIPASS))
             except Exception:
                 pass
+
+            # 源码目录
+            try:
+                root_candidates.append(Path(__file__).resolve().parent.parent)
+            except Exception:
+                pass
+
+            # 可执行文件目录（PyInstaller 时是 exe，Nuitka 时是 python.exe）
             try:
                 root_candidates.append(Path(sys.executable).resolve().parent)
             except Exception:
                 pass
+
             root_candidates.append(Path.cwd())
             root = None
             for cand in root_candidates:

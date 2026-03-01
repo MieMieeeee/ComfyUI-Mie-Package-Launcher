@@ -133,10 +133,38 @@ class VersionPage(BasePage):
             cb_deps.setChecked(self.app.auto_update_deps_var.get())
             cb_deps.toggled.connect(lambda c: (self.app.auto_update_deps_var.set(c), self._save_config()))
 
+        # 超时选择器（放在同一行）
+        lbl_timeout = QtWidgets.QLabel("超时:")
+        lbl_timeout.setStyleSheet(lbl_style)
+
+        self.timeout_combo = NoWheelComboBox()
+        self.timeout_combo.addItems(["60秒", "120秒", "180秒", "300秒", "600秒"])
+        self.timeout_combo.setFixedWidth(85)
+        self.timeout_combo.setStyleSheet(self.theme_manager.styles.input_style())
+
+        # 设置当前值
+        if hasattr(self.app, 'update_timeout_var'):
+            current_timeout = self.app.update_timeout_var.get()
+            timeout_map = {60: 0, 120: 1, 180: 2, 300: 3, 600: 4}
+            self.timeout_combo.setCurrentIndex(timeout_map.get(current_timeout, 1))
+
+            def _timeout_changed(text):
+                try:
+                    seconds = int(text.replace("秒", ""))
+                    self.app.update_timeout_var.set(seconds)
+                    self._save_config()
+                except Exception:
+                    pass
+
+            self.timeout_combo.currentTextChanged.connect(_timeout_changed)
+
         row_strat.addWidget(lbl_st)
         row_strat.addWidget(cb_stable)
         row_strat.addSpacing(15)
         row_strat.addWidget(cb_deps)
+        row_strat.addSpacing(15)
+        row_strat.addWidget(lbl_timeout)
+        row_strat.addWidget(self.timeout_combo)
         row_strat.addStretch(1)
         sp_layout.addLayout(row_strat)
 

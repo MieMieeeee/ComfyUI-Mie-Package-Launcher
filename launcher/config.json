@@ -57,6 +57,7 @@
   },
   "version_preferences": {
     "stable_only": true,
-    "auto_update_deps": true
+    "auto_update_deps": true,
+    "update_timeout": 120
   }
 }

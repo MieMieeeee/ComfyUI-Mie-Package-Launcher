@@ -131,66 +131,147 @@ class VersionService(IVersionService):
         return base
 
     def _get_releases(self, force_refresh: bool = False) -> List[Dict[str, Any]]:
+        logger = getattr(self.app, 'logger', None)
+        if logger:
+            logger.info("[_get_releases] 开始, force_refresh=%s", force_refresh)
+
         cache = getattr(self.app, '_releases_cache', None)
         if cache and (not force_refresh):
+            if logger:
+                logger.info("[_get_releases] 使用缓存, 返回 %d 条", len(cache))
             return cache
+
         owner, repo = self._origin_repo()
         if not owner or not repo:
+            if logger:
+                logger.warning("[_get_releases] 无法获取 owner/repo")
             return []
+
         url = self._compute_api_url(owner, repo)
+        if logger:
+            logger.info("[_get_releases] 请求 URL=%s", url)
+
+        def _fetch():
+            import socket
+            socket.setdefaulttimeout(15)
+            try:
+                req = Request(url, headers={'Accept': 'application/vnd.github+json', 'User-Agent': 'ComfyUI-Launcher'})
+                with urlopen(req, timeout=15) as resp:
+                    data = json.loads(resp.read().decode('utf-8'))
+                    return data if isinstance(data, list) else None
+            except Exception as e:
+                if logger:
+                    logger.warning("[_get_releases._fetch] 失败: %s", str(e))
+                return None
+            finally:
+                try:
+                    socket.setdefaulttimeout(None)
+                except Exception:
+                    pass
+
         try:
-            req = Request(url, headers={'Accept': 'application/vnd.github+json', 'User-Agent': 'ComfyUI-Launcher'})
-            with urlopen(req, timeout=10) as resp:
-                data = json.loads(resp.read().decode('utf-8'))
-                if isinstance(data, list):
-                    setattr(self.app, '_releases_cache', data)
-                    return data
-        except Exception:
-            return []
+            import concurrent.futures
+            with concurrent.futures.ThreadPoolExecutor(max_workers=1) as executor:
+                future = executor.submit(_fetch)
+                try:
+                    data = future.result(timeout=20)  # 20秒总超时
+                    if data:
+                        setattr(self.app, '_releases_cache', data)
+                        if logger:
+                            logger.info("[_get_releases] 成功, 获取 %d 条 releases", len(data))
+                        return data
+                    else:
+                        if logger:
+                            logger.warning("[_get_releases] 返回数据为空")
+                except concurrent.futures.TimeoutError:
+                    if logger:
+                        logger.warning("[_get_releases] 超时（20秒）")
+        except Exception as e:
+            if logger:
+                logger.error("[_get_releases] 异常: %s", str(e))
+
+        if logger:
+            logger.info("[_get_releases] 结束, 返回空列表")
         return []
 
     def get_latest_stable_kernel(self, force_refresh: bool = False) -> Dict[str, Any]:
+        logger = getattr(self.app, 'logger', None)
+        if logger:
+            logger.info("[get_latest_stable_kernel] 开始, force_refresh=%s", force_refresh)
+
         cache = getattr(self.app, '_stable_kernel_cache', None)
         if cache and (not force_refresh):
+            if logger:
+                logger.info("[get_latest_stable_kernel] 使用缓存: tag=%s", cache.get('tag'))
             return cache
-            
+
         # 1. 尝试从 GitHub API 获取最新稳定 Release
+        if logger:
+            logger.info("[get_latest_stable_kernel] 步骤1: 尝试从 GitHub API 获取")
         releases = self._get_releases(force_refresh=True)
         latest_tag = None
         for rel in releases:
             if not rel.get('prerelease', False):
                 latest_tag = rel.get('tag_name')
+                if logger:
+                    logger.info("[get_latest_stable_kernel] 步骤1完成: 从 API 获取到 %s", latest_tag)
                 break
-        
+
         # 2. 如果 API 获取失败，尝试从 git tags 获取
         if not latest_tag:
+            if logger:
+                logger.info("[get_latest_stable_kernel] 步骤2: API 未获取到，尝试从 git tags 获取")
             try:
                 # 先 fetch tags
+                if logger:
+                    logger.info("[get_latest_stable_kernel] 执行 git fetch --tags")
                 self._run_git(['git', 'fetch', '--tags'], cwd=self._repo_root(), timeout=15)
+
                 # 列出所有 tags
+                if logger:
+                    logger.info("[get_latest_stable_kernel] 执行 git tag --list")
                 tags = self._list_tags()
-                # 过滤稳定版并排序（简单假设语义化版本，或者依赖 git tag 排序）
+                if logger:
+                    logger.info("[get_latest_stable_kernel] 获取到 %d 个 tags", len(tags))
+
+                # 过滤稳定版并排序
                 stable_tags = [t for t in tags if self.is_stable_version(t)]
-                # 这里假设 git tag --list 已经按版本排序，取最后一个；或者我们需要自己排序
+                if logger:
+                    logger.info("[get_latest_stable_kernel] 过滤后 %d 个稳定版 tags", len(stable_tags))
+
                 if stable_tags:
-                    # 简单的版本排序尝试
                     try:
                         stable_tags.sort(key=lambda x: [int(p) for p in re.findall(r'\d+', x)] if re.findall(r'\d+', x) else [0])
                     except:
                         pass
                     latest_tag = stable_tags[-1]
-            except Exception:
-                pass
+                    if logger:
+                        logger.info("[get_latest_stable_kernel] 步骤2完成: 从 git tags 获取到 %s", latest_tag)
+            except Exception as e:
+                if logger:
+                    logger.warning("[get_latest_stable_kernel] 步骤2失败: %s", str(e))
 
         if not latest_tag:
-             return {"tag": None, "commit": None, "timestamp": int(time.time()), "success": False, "error": "No stable tag found"}
+            if logger:
+                logger.error("[get_latest_stable_kernel] 失败: 未找到稳定版本")
+            return {"tag": None, "commit": None, "timestamp": int(time.time()), "success": False, "error": "No stable tag found"}
 
         # 3. 获取 tag 对应的 commit
-        # 确保本地有这个 tag 的 commit
-        self._run_git(['git', 'fetch', 'origin', 'tag', latest_tag], cwd=self._repo_root(), timeout=15)
-        
+        if logger:
+            logger.info("[get_latest_stable_kernel] 步骤3: 获取 tag %s 对应的 commit", latest_tag)
+        try:
+            self._run_git(['git', 'fetch', 'origin', 'tag', latest_tag], cwd=self._repo_root(), timeout=15)
+        except Exception as e:
+            if logger:
+                logger.warning("[get_latest_stable_kernel] fetch tag 失败: %s", str(e))
+
         commit = self._tag_commit(latest_tag)
+        if logger:
+            logger.info("[get_latest_stable_kernel] 步骤3完成: commit=%s", commit)
+
         data = {"tag": latest_tag, "commit": commit, "timestamp": int(time.time()), "success": bool(latest_tag and commit)}
+        if logger:
+            logger.info("[get_latest_stable_kernel] 结束: tag=%s, commit=%s, success=%s", latest_tag, commit, data.get('success'))
         try:
             setattr(self.app, '_stable_kernel_cache', data)
         except Exception:

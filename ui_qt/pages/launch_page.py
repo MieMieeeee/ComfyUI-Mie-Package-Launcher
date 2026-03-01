@@ -771,10 +771,39 @@ class LaunchPage(BasePage):
         except Exception:
             pass
 
+        # 超时选择器
+        lbl_timeout = QtWidgets.QLabel("超时:")
+        lbl_timeout.setStyleSheet(lbl_style)
+
+        self.timeout_combo = NoWheelComboBox()
+        self.timeout_combo.addItems(["60秒", "120秒", "180秒", "300秒", "600秒"])
+        self.timeout_combo.setFixedWidth(85)
+        self.timeout_combo.setStyleSheet(self.theme_manager.styles.input_style())
+
+        try:
+            current_timeout = self.app.update_timeout_var.get()
+            timeout_map = {60: 0, 120: 1, 180: 2, 300: 3, 600: 4}
+            self.timeout_combo.setCurrentIndex(timeout_map.get(current_timeout, 1))
+
+            def _timeout_changed(text):
+                try:
+                    seconds = int(text.replace("秒", ""))
+                    self.app.update_timeout_var.set(seconds)
+                    self._save_config()
+                except Exception:
+                    pass
+
+            self.timeout_combo.currentTextChanged.connect(_timeout_changed)
+        except Exception:
+            pass
+
         opts_row.addWidget(lbl_st)
         opts_row.addWidget(cb_stable)
         opts_row.addSpacing(12)
         opts_row.addWidget(cb_deps)
+        opts_row.addSpacing(12)
+        opts_row.addWidget(lbl_timeout)
+        opts_row.addWidget(self.timeout_combo)
         opts_row.addStretch(1)
         opts_row.addWidget(btn_update)
         layout.addLayout(opts_row)

@@ -288,6 +288,10 @@ class PyQtLauncher(QtWidgets.QMainWindow):
             self.auto_update_deps_var = BoolVar(bool(vp.get("auto_update_deps", True)))
         except Exception:
             self.auto_update_deps_var = BoolVar(True)
+        try:
+            self.update_timeout_var = Var(int(vp.get("update_timeout", 120)))
+        except Exception:
+            self.update_timeout_var = Var(120)
         class _VMStub:
             def __init__(self, app_):
                 self.app = app_
@@ -1169,7 +1173,15 @@ class PyQtLauncher(QtWidgets.QMainWindow):
             prev = getattr(self, "_theme_value", "dark")
             if theme == prev:
                 return
+
+            logger = getattr(self, "logger", None)
+            if logger:
+                logger.info("主题切换请求: %s -> %s", prev, theme)
+
             proceed = self._confirm_restart_on_theme_change(theme, prev)
+            if logger:
+                logger.info("用户确认重启: %s", proceed)
+
             if not proceed:
                 # 恢复按钮选中状态
                 for b in self._theme_buttons:
@@ -1183,9 +1195,13 @@ class PyQtLauncher(QtWidgets.QMainWindow):
             except Exception:
                 pass
             try:
+                if logger:
+                    logger.info("准备调用 _restart_app (通过 QTimer)")
                 from PyQt5.QtCore import QTimer
                 QTimer.singleShot(200, self._restart_app)
-            except Exception:
+            except Exception as e:
+                if logger:
+                    logger.info("QTimer 失败，直接调用 _restart_app: %s", str(e))
                 self._restart_app()
 
         btn_dark.clicked.connect(lambda: _on_theme_change(btn_dark))
@@ -1503,22 +1519,20 @@ class PyQtLauncher(QtWidgets.QMainWindow):
             self._restart_in_progress = True
         except Exception:
             pass
+
+        logger = getattr(self, "logger", None)
+
         try:
-            if getattr(self, "logger", None):
-                self.logger.info("主题切换：准备重启应用以完整应用样式")
+            if logger:
+                logger.info("主题切换：准备重启应用以完整应用样式")
         except Exception:
             pass
-        
+
         try:
-            # 清理定时器和日志，释放文件句柄
+            # 清理定时器
             try:
                 if hasattr(self, "_sync_timer"):
                     self._sync_timer.stop()
-            except Exception:
-                pass
-            try:
-                import logging as _L
-                _L.shutdown()
             except Exception:
                 pass
 
@@ -1526,7 +1540,7 @@ class PyQtLauncher(QtWidgets.QMainWindow):
             import subprocess
             from pathlib import Path
             cwd = Path.cwd()
-            
+
             env = dict(os.environ)
             # 移除可能导致问题的环境变量
             for k in list(env.keys()):
@@ -1536,10 +1550,28 @@ class PyQtLauncher(QtWidgets.QMainWindow):
             env.pop("PYTHONHOME", None)
             env.pop("PYTHONPATH", None)
 
-            exe = str(Path(sys.executable).resolve())
-            
+            # 检测运行环境
+            # Nuitka: __compiled__ 存在（是版本对象，不是 True）
+            # PyInstaller: 设置 sys._MEIPASS，且 sys.frozen = True
+            try:
+                is_nuitka = __compiled__ is not None
+            except NameError:
+                is_nuitka = False
+            is_pyinstaller = hasattr(sys, '_MEIPASS')
+
+            # 获取正确的可执行文件路径
+            if is_nuitka:
+                # Nuitka: sys.executable 是 python.exe，sys.argv[0] 才是主 exe
+                exe = str(Path(sys.argv[0]).resolve())
+            elif is_pyinstaller:
+                # PyInstaller: sys.executable 是打包的 exe
+                exe = str(Path(sys.executable).resolve())
+            else:
+                # 开发环境: sys.executable 是 python.exe
+                exe = str(Path(sys.executable).resolve())
+
             # 区分开发环境与打包环境的参数构造
-            if getattr(sys, 'frozen', False):
+            if is_nuitka or is_pyinstaller:
                 # 打包环境：sys.executable 是 exe 本身，sys.argv[0] 也是 exe 路径
                 # 我们只需要 [exe, arg1, arg2...]
                 args = [exe] + sys.argv[1:]
@@ -1547,7 +1579,20 @@ class PyQtLauncher(QtWidgets.QMainWindow):
                 # 开发环境：sys.executable 是 python.exe，sys.argv[0] 是脚本路径
                 # 我们需要 [python.exe, script.py, arg1, arg2...]
                 args = [exe] + sys.argv
-            
+
+            # 在关闭日志之前记录关键信息
+            if logger:
+                logger.info("重启检测: is_nuitka=%s, is_pyinstaller=%s, sys.executable=%s",
+                           is_nuitka, is_pyinstaller, sys.executable)
+                logger.info("重启参数: exe=%s, args=%s, cwd=%s", exe, args, cwd)
+
+            # 现在关闭日志
+            try:
+                import logging as _L
+                _L.shutdown()
+            except Exception:
+                pass
+
             kwargs = {}
             if os.name == "nt":
                 try:
@@ -1559,8 +1604,8 @@ class PyQtLauncher(QtWidgets.QMainWindow):
                     pass
             else:
                 kwargs['start_new_session'] = True
-            
-            subprocess.Popen(
+
+            proc = subprocess.Popen(
                 args,
                 cwd=str(cwd),
                 env=env,
@@ -1570,8 +1615,18 @@ class PyQtLauncher(QtWidgets.QMainWindow):
                 stderr=subprocess.DEVNULL,
                 **kwargs
             )
-        except Exception:
-            pass
+
+            # 用 print 作为最后的日志（因为 logging 已关闭）
+            print(f"[重启] 进程已启动: pid={proc.pid}, exe={exe}")
+
+        except Exception as e:
+            try:
+                from utils.logging import get_logger
+                logger = get_logger("comfyui_launcher")
+                if logger:
+                    logger.error("重启失败: %s", str(e))
+            except Exception:
+                pass
         
         try:
             QtWidgets.QApplication.quit()
@@ -1719,6 +1774,7 @@ class PyQtLauncher(QtWidgets.QMainWindow):
             )
             self.services.config.set("version_preferences.stable_only", bool(self.stable_only_var.get()))
             self.services.config.set("version_preferences.auto_update_deps", bool(self.auto_update_deps_var.get()))
+            self.services.config.set("version_preferences.update_timeout", int(self.update_timeout_var.get()))
             self.services.config.save(None)
             self.config = self.services.config.get_config()
         except Exception:
@@ -1806,59 +1862,129 @@ class PyQtLauncher(QtWidgets.QMainWindow):
         # 创建并显示进度弹窗
         try:
             from ui_qt.widgets.progress_dialog import ProgressDialog
-            pd = ProgressDialog(self, title="正在更新", theme_manager=getattr(self, "theme_manager", None))
+            pd = ProgressDialog(self, title="正在更新", theme_manager=getattr(self, "theme_manager", None), show_cancel=True)
             pd.set_status("正在检查更新...")
+
+            # 设置取消回调：恢复按钮状态
+            def _on_cancel():
+                try:
+                    self._update_running = False
+                except Exception:
+                    pass
+                # 调用 on_done 回调恢复按钮
+                if on_done:
+                    try:
+                        on_done()
+                    except Exception:
+                        pass
+
+            pd.set_cancel_callback(_on_cancel)
+
             pd.show()
             # 强制刷新以显示弹窗
             QtWidgets.QApplication.processEvents()
         except Exception:
             pd = None
 
+        # 获取超时时间
+        timeout_seconds = 120
+        try:
+            timeout_seconds = int(self.update_timeout_var.get())
+        except Exception:
+            pass
+
         def _worker():
             core_res = None
             req_res = None
-            
-            # 1. 更新内核
-            if pd:
-                self.ui_post(lambda: pd.set_status("正在更新 ComfyUI 内核..."))
-            try:
-                core_res = self.services.version.upgrade_latest(stable_only=stable_only)
-            except Exception as e:
-                core_res = {"component": "core", "error": str(e)}
-            
-            # 2. 更新依赖
-            if pd:
-                self.ui_post(lambda: pd.set_status("正在同步依赖库 (requirements)..."))
-            try:
-                if hasattr(self, "auto_update_deps_var") and bool(self.auto_update_deps_var.get()):
-                    req_res = self.services.update.sync_requirements_files()
-            except Exception as e:
-                req_res = {"component": "requirements", "error": str(e)}
-            
-            # 3. 更新前端和模板库
-            if self.update_frontend_var.get():
-                if pd:
-                    self.ui_post(lambda: pd.set_status("正在更新前端包..."))
-                try:
-                    self.services.update.update_frontend(False)
-                except Exception:
-                    pass
-            
-            if self.update_template_var.get():
-                if pd:
-                    self.ui_post(lambda: pd.set_status("正在更新模板库..."))
-                try:
-                    self.services.update.update_templates(False)
-                except Exception:
-                    pass
 
             try:
-                if getattr(self, "logger", None):
-                    self.logger.info("更新结果 core=%s requirements=%s", str(core_res), str(req_res))
-                    if isinstance(core_res, dict) and core_res.get("error"):
-                        self.logger.warning("内核更新失败: %s", str(core_res.get("error")))
-            except Exception:
-                pass
+                # 检查是否已取消
+                if pd and pd.is_cancelled():
+                    core_res = {"component": "core", "error": "用户取消"}
+                    return
+
+                # 1. 更新内核（带超时）
+                if pd:
+                    self.ui_post(lambda: pd.set_status("正在更新 ComfyUI 内核..."))
+
+                logger = getattr(self, "logger", None)
+                if logger:
+                    logger.info("开始更新内核，超时设置: %s秒", timeout_seconds)
+
+                try:
+                    import concurrent.futures
+                    with concurrent.futures.ThreadPoolExecutor(max_workers=1) as executor:
+                        future = executor.submit(self.services.version.upgrade_latest, stable_only)
+                        try:
+                            core_res = future.result(timeout=timeout_seconds)
+                            if logger:
+                                logger.info("内核更新完成: %s", str(core_res))
+                        except concurrent.futures.TimeoutError:
+                            if logger:
+                                logger.warning("内核更新超时（%s秒）", timeout_seconds)
+                            core_res = {"component": "core", "error": f"更新超时（{timeout_seconds}秒）"}
+                            # 尝试取消线程
+                            try:
+                                future.cancel()
+                            except Exception:
+                                pass
+                except Exception as e:
+                    if logger:
+                        logger.error("内核更新异常: %s", str(e))
+                    core_res = {"component": "core", "error": str(e)}
+
+                # 检查是否已取消
+                if pd and pd.is_cancelled():
+                    if core_res is None:
+                        core_res = {"component": "core", "error": "用户取消"}
+                    return
+
+                # 2. 更新依赖
+                if pd:
+                    self.ui_post(lambda: pd.set_status("正在同步依赖库 (requirements)..."))
+                try:
+                    if hasattr(self, "auto_update_deps_var") and bool(self.auto_update_deps_var.get()):
+                        req_res = self.services.update.sync_requirements_files()
+                except Exception as e:
+                    req_res = {"component": "requirements", "error": str(e)}
+
+                # 检查是否已取消
+                if pd and pd.is_cancelled():
+                    return
+
+                # 3. 更新前端和模板库
+                if self.update_frontend_var.get():
+                    if pd:
+                        self.ui_post(lambda: pd.set_status("正在更新前端包..."))
+                    try:
+                        self.services.update.update_frontend(False)
+                    except Exception:
+                        pass
+
+                if self.update_template_var.get():
+                    if pd:
+                        self.ui_post(lambda: pd.set_status("正在更新模板库..."))
+                    try:
+                        self.services.update.update_templates(False)
+                    except Exception:
+                        pass
+
+                try:
+                    if getattr(self, "logger", None):
+                        self.logger.info("更新结果 core=%s requirements=%s", str(core_res), str(req_res))
+                        if isinstance(core_res, dict) and core_res.get("error"):
+                            self.logger.warning("内核更新失败: %s", str(core_res.get("error")))
+                except Exception:
+                    pass
+            except Exception as e:
+                # 确保异常时也有结果
+                if core_res is None:
+                    core_res = {"component": "core", "error": str(e)}
+                try:
+                    if getattr(self, "logger", None):
+                        self.logger.error("更新过程异常: %s", str(e))
+                except Exception:
+                    pass
 
             def _finish():
                 try:
@@ -1972,11 +2098,24 @@ class PyQtLauncher(QtWidgets.QMainWindow):
             return False
 
     def closeEvent(self, event):
+        logger = getattr(self, "logger", None)
+        try:
+            if logger:
+                logger.info("closeEvent 触发")
+        except Exception:
+            pass
+
         running = False
         try:
             running = self._is_comfyui_running()
         except Exception:
             running = False
+
+        try:
+            if logger:
+                logger.info("ComfyUI 运行状态: %s", running)
+        except Exception:
+            pass
         if running:
             try:
                 from ui_qt.widgets.custom_confirm_dialog import CustomConfirmDialog
@@ -2040,6 +2179,22 @@ class PyQtLauncher(QtWidgets.QMainWindow):
                 event.accept()
             except Exception:
                 pass
+
+        # 确保应用完全退出
+        try:
+            if logger:
+                logger.info("调用 QApplication.quit()")
+        except Exception:
+            pass
+        try:
+            QtWidgets.QApplication.quit()
+        except Exception:
+            pass
+        try:
+            if logger:
+                logger.info("closeEvent 完成")
+        except Exception:
+            pass
 
     def run(self):
         try:
@@ -2106,6 +2261,14 @@ class PyQtLauncher(QtWidgets.QMainWindow):
         # 检查路径验证状态，如果失败则提示用户配置
         self._show_validation_dialog_if_needed()
 
+        # 检查是否在验证对话框中用户选择了退出
+        if getattr(self, "_early_exit", False):
+            try:
+                QtWidgets.QApplication.quit()
+            except Exception:
+                pass
+            return
+
         try:
             self.qt_app.aboutToQuit.connect(self._on_app_quit_cleanup)
         except Exception:
@@ -2167,6 +2330,9 @@ class PyQtLauncher(QtWidgets.QMainWindow):
 
             # 用户选择退出
             if result == 1:
+                # 在 exec_() 开始之前调用 close() 不会终止程序
+                # 需要设置标志并在 run() 中检查
+                self._early_exit = True
                 self.close()
                 return
 

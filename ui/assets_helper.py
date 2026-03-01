@@ -3,9 +3,34 @@ import sys
 import os
 
 
+def _get_nuitka_asset_dir():
+    """获取 Nuitka 打包后的资源目录"""
+    # 检测 Nuitka: __compiled__ 存在（是版本对象）
+    try:
+        is_nuitka = __compiled__ is not None
+    except NameError:
+        is_nuitka = False
+
+    if is_nuitka:
+        # Nuitka standalone: 资源在 exe 同级目录
+        # sys.argv[0] 是主 exe 路径
+        try:
+            return Path(sys.argv[0]).resolve().parent
+        except Exception:
+            pass
+    return None
+
+
 def resolve_asset(filename: str) -> Path:
-    """在多种运行环境中解析资源路径（PyInstaller/源码/当前目录）。"""
+    """在多种运行环境中解析资源路径（PyInstaller/Nuitka/源码/当前目录）。"""
     candidates = []
+
+    # Nuitka 资源路径（优先）
+    nuitka_dir = _get_nuitka_asset_dir()
+    if nuitka_dir:
+        candidates.append(nuitka_dir / 'assets' / filename)
+
+    # PyInstaller 资源路径
     try:
         candidates.append(Path(getattr(sys, '_MEIPASS', '')) / 'assets' / filename)
     except Exception:
@@ -60,6 +85,13 @@ def resolve_asset_variants(filenames):
 def icon_base_paths():
     """收集用于查找图标的基础目录列表。"""
     bases = []
+
+    # Nuitka 资源路径（优先）
+    nuitka_dir = _get_nuitka_asset_dir()
+    if nuitka_dir:
+        bases.append(nuitka_dir)
+
+    # PyInstaller 资源路径
     try:
         bases.append(Path(getattr(sys, '_MEIPASS', '')))
     except Exception:
