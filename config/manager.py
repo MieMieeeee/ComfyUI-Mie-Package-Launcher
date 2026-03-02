@@ -46,7 +46,7 @@ class ConfigManager:
                 "theme": "default",
                 "font_size": 9,
                 "log_max_lines": 1000,
-                "window_size": "500x650"
+                "window_size": "500x680"
             },
             "paths": {
                 "comfyui_root": ".",

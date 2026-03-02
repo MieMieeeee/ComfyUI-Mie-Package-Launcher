@@ -721,12 +721,18 @@ class LaunchPage(BasePage):
             ("Python", getattr(self.app, 'python_version', None), "🐍"),
             ("Torch", getattr(self.app, 'torch_version', None), "🔥"),
             ("Git", getattr(self.app, 'git_status', None), "🐙"),
+            ("显卡驱动", getattr(self.app, 'gpu_driver_status', None), "🖥️"),
         ]
 
         for i, (title, src, ico) in enumerate(version_items):
             card = self._create_version_item(title, src or "获取中...", ico)
             r, cidx = divmod(i, 3)
-            cur_grid.addWidget(card, r, cidx)
+            
+            # 特殊处理显卡驱动，让它占据整行，防止显卡型号过长被截断
+            if title == "显卡驱动":
+                cur_grid.addWidget(card, r, 0, 1, 3)
+            else:
+                cur_grid.addWidget(card, r, cidx)
 
         for col in range(3):
             cur_grid.setColumnStretch(col, 1)
@@ -737,7 +743,7 @@ class LaunchPage(BasePage):
 
         lbl_style = f"color: {self.theme_manager.colors.get('label_dim')}; font: 10pt 'Microsoft YaHei UI';"
 
-        lbl_st = QtWidgets.QLabel("升级策略:")
+        lbl_st = QtWidgets.QLabel("内核升级策略:")
         lbl_st.setStyleSheet(lbl_style)
 
         cb_stable = QtWidgets.QCheckBox("仅更新到稳定版")
@@ -747,7 +753,7 @@ class LaunchPage(BasePage):
         except Exception:
             pass
 
-        cb_deps = QtWidgets.QCheckBox("自动更新依赖库")
+        cb_deps = QtWidgets.QCheckBox("同时更新依赖库")
         try:
             cb_deps.setChecked(self.app.auto_update_deps_var.get())
             cb_deps.toggled.connect(lambda c: (self.app.auto_update_deps_var.set(c), self._save_config()))

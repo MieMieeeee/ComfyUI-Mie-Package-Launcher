@@ -20,7 +20,10 @@ def find_pids_by_port_safe(port: str):
                     conns = p.connections(kind='inet')
                     for conn in conns:
                         try:
-                            if getattr(conn, 'laddr', None) and getattr(conn.laddr, 'port', None) == int(port):
+                            # 只查找 LISTEN 状态的进程，避免误杀连接到该端口的浏览器
+                            if (getattr(conn, 'status', None) == 'LISTEN' and
+                                getattr(conn, 'laddr', None) and
+                                getattr(conn.laddr, 'port', None) == int(port)):
                                 if p.pid and p.pid > 0:
                                     pids.add(p.pid)
                         except Exception:
@@ -37,12 +40,13 @@ def find_pids_by_port_safe(port: str):
         r = run_hidden(cmd, capture_output=True, text=True, encoding=preferred_enc, errors="ignore")
         if r.returncode == 0 and r.stdout:
             pids = set()
-            pattern_tcp = re.compile(rf"^\s*TCP\s+\S+:{port}\s+\S+:\S+\s+(LISTENING|ESTABLISHED)\s+(\d+)\s*$", re.IGNORECASE)
+            # 只查找 LISTENING 状态的进程，避免误杀连接到该端口的浏览器
+            pattern_tcp = re.compile(rf"^\s*TCP\s+\S+:{port}\s+\S+:\S+\s+LISTENING\s+(\d+)\s*$", re.IGNORECASE)
             for line in r.stdout.splitlines():
                 m = pattern_tcp.match(line)
                 if m:
                     try:
-                        pid_val = int(m.group(2))
+                        pid_val = int(m.group(1))
                         if pid_val > 0:
                             pids.add(pid_val)
                     except Exception:

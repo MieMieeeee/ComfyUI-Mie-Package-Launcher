@@ -120,7 +120,7 @@ class VersionPage(BasePage):
         # 策略复选框行
         row_strat = QtWidgets.QHBoxLayout()
         row_strat.setContentsMargins(0, 0, 0, 0)
-        lbl_st = QtWidgets.QLabel("升级策略:")
+        lbl_st = QtWidgets.QLabel("内核升级策略:")
         lbl_st.setStyleSheet(lbl_style)
 
         cb_stable = QtWidgets.QCheckBox("仅更新到稳定版")
@@ -128,7 +128,7 @@ class VersionPage(BasePage):
             cb_stable.setChecked(self.app.stable_only_var.get())
             cb_stable.toggled.connect(lambda c: (self.app.stable_only_var.set(c), self._save_config()))
 
-        cb_deps = QtWidgets.QCheckBox("自动更新依赖库 (包括前端及模板库)")
+        cb_deps = QtWidgets.QCheckBox("同时更新依赖库")
         if hasattr(self.app, 'auto_update_deps_var'):
             cb_deps.setChecked(self.app.auto_update_deps_var.get())
             cb_deps.toggled.connect(lambda c: (self.app.auto_update_deps_var.set(c), self._save_config()))

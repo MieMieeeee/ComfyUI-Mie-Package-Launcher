@@ -1,5 +1,6 @@
 import os
 import subprocess
+import time
 from utils.common import run_hidden
 
 try:
@@ -18,15 +19,27 @@ def stop(app, pm):
         pid_str = str(pm.comfyui_process.pid)
         if os.name == 'nt':
             try:
-                r_soft = run_hidden(["taskkill", "/PID", pid_str, "/T"], capture_output=True, text=True)
+                # 先尝试软终止
+                r_soft = run_hidden(["taskkill", "/PID", pid_str], capture_output=True, text=True)
                 try:
-                    app.logger.info("停止跟踪进程: taskkill /T rc=%s", getattr(r_soft, 'returncode', 'N/A'))
+                    app.logger.info("停止跟踪进程: taskkill rc=%s", getattr(r_soft, 'returncode', 'N/A'))
                 except Exception:
                     pass
-                if r_soft.returncode == 0:
-                    killed = True
-                else:
-                    r_hard = run_hidden(["taskkill", "/PID", pid_str, "/T", "/F"], capture_output=True, text=True)
+
+                # 等待进程结束（最多 3 秒）
+                for _ in range(30):
+                    if pm.comfyui_process.poll() is not None:
+                        killed = True
+                        break
+                    time.sleep(0.1)
+
+                # 如果进程还在，强制终止
+                if not killed:
+                    try:
+                        app.logger.info("软终止未成功，尝试强制终止 PID=%s", pid_str)
+                    except Exception:
+                        pass
+                    r_hard = run_hidden(["taskkill", "/PID", pid_str, "/F"], capture_output=True, text=True)
                     try:
                         app.logger.info("停止跟踪进程: taskkill /F rc=%s", getattr(r_hard, 'returncode', 'N/A'))
                     except Exception:

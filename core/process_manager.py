@@ -548,7 +548,8 @@ class ProcessManager:
         if os.name == 'nt':
             try:
                 for pid in pids:
-                    run_hidden(["taskkill", "/PID", str(pid), "/T", "/F"], capture_output=True, text=True) #
+                    # 不使用 /T 参数，避免误杀子进程（如浏览器）
+                    run_hidden(["taskkill", "/PID", str(pid), "/F"], capture_output=True, text=True)
                 killed_any = True
                 try:
                     self.app.logger.info("taskkill 强制终止：%s", ", ".join(map(str, pids)))

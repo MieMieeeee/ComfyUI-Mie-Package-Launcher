@@ -93,6 +93,7 @@ class VersionWorker(QtCore.QThread):
     templateVersion = QtCore.pyqtSignal(str)
     coreVersion = QtCore.pyqtSignal(str)
     gitStatus = QtCore.pyqtSignal(str)
+    gpuDriverStatus = QtCore.pyqtSignal(str)
     def __init__(self, app, scope="all"):
         super().__init__()
         self.app = app
@@ -105,6 +106,19 @@ class VersionWorker(QtCore.QThread):
         except Exception:
             base = Path(".").resolve()
             root = base / "ComfyUI"
+
+        if not root.exists():
+            if self.scope in ("all", "python_related"):
+                self.pythonVersion.emit("未找到")
+                self.torchVersion.emit("未找到")
+                self.frontendVersion.emit("未找到")
+                self.templateVersion.emit("未找到")
+                self.gpuDriverStatus.emit("未检测")
+            if self.scope in ("all", "core_only", "selected"):
+                self.coreVersion.emit("未找到")
+                self.gitStatus.emit("未找到")
+            return
+
         try:
             self.app.logger.info("UI: 版本线程启动 scope=%s root=%s py=%s", str(self.scope), str(root), str(self.app.python_exec))
         except Exception:
@@ -136,6 +150,14 @@ class VersionWorker(QtCore.QThread):
                     self.app.logger.info("UI: 模板库版本=%s", vt or "未安装")
                 except Exception:
                     self.templateVersion.emit("获取失败")
+                # 检测显卡驱动状态
+                try:
+                    gpu_status = self._check_gpu_driver()
+                    self.gpuDriverStatus.emit(gpu_status)
+                    self.app.logger.info("UI: 显卡驱动状态=%s", gpu_status)
+                except Exception as e:
+                    self.gpuDriverStatus.emit("检测失败")
+                    self.app.logger.warning("UI: 显卡驱动检测失败: %s", e)
             if self.scope in ("all", "core_only", "selected"):
                 try:
                     git_cmd, git_text = self.app.resolve_git()
@@ -175,20 +197,118 @@ class VersionWorker(QtCore.QThread):
         except Exception:
             pass
 
+    def _check_gpu_driver(self):
+        """检测显卡驱动状态"""
+        import subprocess
+        try:
+            self.app.logger.info("UI: 开始检测显卡驱动状态...")
+            self.app.logger.info("UI: python_exec=%s", self.app.python_exec)
+        except Exception:
+            pass
+
+        try:
+            check_script = '''
+import sys
+try:
+    import torch
+    # 先尝试获取设备数量，这会触发驱动检测
+    device_count = torch._C._cuda_getDeviceCount()
+    if device_count > 0:
+        # 尝试获取设备名称，可能会失败
+        try:
+            gpu_name = torch.cuda.get_device_name(0)
+            sys.stdout.write("OK:" + gpu_name + "\\n")
+            sys.stdout.flush()
+        except Exception as e:
+            sys.stdout.write("OK:CUDA可用\\n")
+            sys.stdout.flush()
+    else:
+        sys.stdout.write("INFO:无可用GPU\\n")
+        sys.stdout.flush()
+except RuntimeError as e:
+    err_str = str(e)
+    if "NotSupported" in err_str:
+        sys.stdout.write("WARN:驱动过旧\\n")
+    elif "NotReady" in err_str:
+        sys.stdout.write("WARN:显卡未就绪\\n")
+    else:
+        sys.stdout.write("ERROR:" + err_str[:40] + "\\n")
+    sys.stdout.flush()
+except ImportError:
+    sys.stdout.write("INFO:torch未安装\\n")
+    sys.stdout.flush()
+except Exception as e:
+    sys.stdout.write("ERROR:" + str(e)[:40] + "\\n")
+    sys.stdout.flush()
+'''
+            r = run_hidden([self.app.python_exec, "-c", check_script],
+                              capture_output=True, text=True, timeout=15)
+            result = r.stdout.strip()
+            returncode = r.returncode
+
+            # 记录详细日志
+            try:
+                self.app.logger.info("UI: 显卡检测 returncode=%d stdout='%s'", returncode, result[:100] if result else "(empty)")
+                if r.stderr:
+                    self.app.logger.info("UI: 显卡检测 stderr: %s", r.stderr.strip()[:200])
+            except Exception:
+                pass
+
+            if result.startswith("OK:"):
+                gpu_name = result[3:].strip()
+                status = f"✓ {gpu_name}" if gpu_name else "✓ CUDA可用"
+                try:
+                    self.app.logger.info("UI: 显卡驱动检测成功 - %s", gpu_name)
+                except Exception:
+                    pass
+                return status
+            elif result.startswith("WARN:"):
+                status = "⚠ " + result[5:].strip()
+                try:
+                    self.app.logger.warning("UI: 显卡驱动警告 - %s", result[5:].strip())
+                except Exception:
+                    pass
+                return status
+            elif result.startswith("INFO:"):
+                status = result[5:].strip()
+                try:
+                    self.app.logger.info("UI: 显卡驱动检测 - %s", status)
+                except Exception:
+                    pass
+                return status
+            elif result.startswith("ERROR:"):
+                try:
+                    self.app.logger.error("UI: 显卡驱动检测错误 - %s", result[6:])
+                except Exception:
+                    pass
+                return "检测失败"
+            else:
+                # result 为空或无法识别
+                try:
+                    self.app.logger.error("UI: 显卡驱动检测返回空或无法识别 - stdout='%s' stderr='%s'",
+                                          result[:50] if result else "(empty)",
+                                          r.stderr.strip()[:50] if r.stderr else "(empty)")
+                except Exception:
+                    pass
+                return "检测失败"
+        except subprocess.TimeoutExpired:
+            try:
+                self.app.logger.error("UI: 显卡驱动检测超时")
+            except Exception:
+                pass
+            return "检测超时"
+        except Exception as e:
+            try:
+                self.app.logger.error("UI: 显卡驱动检测异常 - %s", str(e))
+            except Exception:
+                pass
+            return "检测失败"
+
 from ui_qt.widgets.custom import CircleAvatar, NoWheelComboBox
 
 class PyQtLauncher(QtWidgets.QMainWindow):
     def __init__(self):
-        # 适配 4K/2K 高分屏：在创建 QApplication 之前启用缩放支持
-        try:
-            os.environ["QT_AUTO_SCREEN_SCALE_FACTOR"] = "1"
-            if hasattr(QtCore.Qt, 'AA_EnableHighDpiScaling'):
-                QtWidgets.QApplication.setAttribute(QtCore.Qt.AA_EnableHighDpiScaling, True)
-            if hasattr(QtCore.Qt, 'AA_UseHighDpiPixmaps'):
-                QtWidgets.QApplication.setAttribute(QtCore.Qt.AA_UseHighDpiPixmaps, True)
-        except Exception:
-            pass
-
+        # 高分屏适配已在 comfyui_launcher_pyqt.py 中完成（必须在 QApplication 创建之前）
         self.qt_app = QtWidgets.QApplication.instance() or QtWidgets.QApplication(sys.argv)
         super().__init__()
         self._invoker = UiInvoker(self)
@@ -274,6 +394,7 @@ class PyQtLauncher(QtWidgets.QMainWindow):
         self.template_version = Var("获取中…")
         self.python_version = Var("获取中…")
         self.torch_version = Var("获取中…")
+        self.gpu_driver_status = Var("检测中…")
         self.git_status = Var("检测中…")
         self.update_core_var = BoolVar(True)
         self.update_frontend_var = BoolVar(True)
@@ -360,6 +481,9 @@ class PyQtLauncher(QtWidgets.QMainWindow):
     @QtCore.pyqtSlot(str)
     def _on_torch_version(self, v):
         self.torch_version.set(v)
+    @QtCore.pyqtSlot(str)
+    def _on_gpu_driver_status(self, v):
+        self.gpu_driver_status.set(v)
     @QtCore.pyqtSlot(str)
     def _on_frontend_version(self, v):
         self.frontend_version.set(v)
@@ -1470,7 +1594,7 @@ class PyQtLauncher(QtWidgets.QMainWindow):
 
             # 使用固定的窗口初始尺寸
             base_w = 1350
-            base_h = 870
+            base_h = 900
 
             final_w = min(base_w, s_w - 40)
             final_h = min(base_h, s_h - 80)
@@ -1734,6 +1858,7 @@ class PyQtLauncher(QtWidgets.QMainWindow):
             w.frontendVersion.connect(self._on_frontend_version)
             w.templateVersion.connect(self._on_template_version)
             w.coreVersion.connect(self._on_core_version)
+            w.gpuDriverStatus.connect(self._on_gpu_driver_status)
             w.gitStatus.connect(self._on_git_status)
             self._ver_worker = w
             try:

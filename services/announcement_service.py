@@ -410,16 +410,20 @@ class AnnouncementService:
                             def _show_cache():
                                 try:
                                     from ui_qt.widgets.announcement_dialog import AnnouncementDialog
-                                    parent = getattr(self.app, 'window', None)
+                                    parent = self._get_main_window()
                                     theme_manager = getattr(self.app, 'theme_manager', None)
                                     dlg = AnnouncementDialog(parent, title="公告", content=txt, theme_manager=theme_manager)
                                     dlg.exec_()
-                                except Exception:
-                                    pass
+                                except Exception as e:
+                                    self._log('warning', 'announcement: _show_cache error=%s', e)
+                            # 使用 ui_post 确保在主线程中执行
                             try:
-                                self.app.root.after(0, _show_cache)
-                            except Exception:
-                                pass
+                                if hasattr(self.app, 'ui_post'):
+                                    self.app.ui_post(_show_cache)
+                                else:
+                                    self.app.root.after(0, _show_cache)
+                            except Exception as e:
+                                self._log('warning', 'announcement: ui_post error=%s', e)
                         else:
                             try:
                                 (Path.cwd() / 'launcher' / 'announcement_debug.log').write_text('no_data_and_empty_cache', encoding='utf-8')
@@ -471,13 +475,13 @@ class AnnouncementService:
                 try:
                     from ui_qt.widgets.announcement_dialog import AnnouncementDialog
                     self._log('info', 'announcement: show title=%s size=%d source=%s', title, len(content), data.get('source'))
-                    
+
                     # 获取主窗口作为父对象，以便正确应用主题
-                    parent = getattr(self.app, 'window', None)
+                    parent = self._get_main_window()
                     theme_manager = getattr(self.app, 'theme_manager', None)
-                    
+
                     dlg = AnnouncementDialog(parent, title=title, content=content, theme_manager=theme_manager)
-                    
+
                     if dlg.exec_() == 1: # Accepted
                         action = dlg.get_action()
                         if action == "ack":
@@ -503,12 +507,16 @@ class AnnouncementService:
                                     self._log('info', 'announcement: muted id=%s', aid[:8])
                             except Exception:
                                 pass
-                except Exception:
-                    pass
+                except Exception as e:
+                    self._log('warning', 'announcement: _show_popup error=%s', e)
+            # 使用 ui_post 确保在主线程中执行
             try:
-                self.app.root.after_idle(_show_popup)
-            except Exception:
-                pass
+                if hasattr(self.app, 'ui_post'):
+                    self.app.ui_post(_show_popup)
+                else:
+                    self.app.root.after_idle(_show_popup)
+            except Exception as e:
+                self._log('warning', 'announcement: ui_post error=%s', e)
         try:
             threading.Thread(target=worker, daemon=True).start()
         except Exception:
@@ -531,29 +539,29 @@ class AnnouncementService:
         if not data:
             try:
                 from ui_qt.widgets.dialog_helper import DialogHelper
-                parent = getattr(self.app, 'window', None)
+                parent = self._get_main_window()
                 DialogHelper.show_info(parent, "公告", "暂无公告")
-            except Exception:
-                pass
+            except Exception as e:
+                self._log('warning', 'announcement: show_cached_popup no data error=%s', e)
             return
         title = data.get("title") or "公告"
         content = data.get("content") or ""
-        def _show():
-            try:
-                from ui_qt.widgets.announcement_dialog import AnnouncementDialog
-                parent = getattr(self.app, 'window', None)
-                theme_manager = getattr(self.app, 'theme_manager', None)
-                
-                # 缓存的公告只读，不提供 Mute 选项，所以我们可以只给一个“关闭”或“知道了”按钮
-                # 复用 AnnouncementDialog，但按钮可能需要调整，或者直接用默认
-                # 这里我们稍微 hack 一下，或者给 AnnouncementDialog 加参数
-                # 为简单起见，直接使用，点击任意按钮都关闭即可
-                
-                dlg = AnnouncementDialog(parent, title=title, content=content, theme_manager=theme_manager)
-                dlg.exec_()
-            except Exception:
-                pass
+
+        # 直接显示对话框
         try:
-            self.app.root.after(0, _show)
-        except Exception:
-            pass
+            from ui_qt.widgets.announcement_dialog import AnnouncementDialog
+            parent = self._get_main_window()
+            theme_manager = getattr(self.app, 'theme_manager', None)
+            dlg = AnnouncementDialog(parent, title=title, content=content, theme_manager=theme_manager)
+            dlg.exec_()
+        except Exception as e:
+            self._log('warning', 'announcement: show_cached_popup error=%s', e)
+
+    def _get_main_window(self):
+        """获取主窗口，兼容不同的 app 结构"""
+        # PyQtLauncher 本身就是 QMainWindow
+        from PyQt5 import QtWidgets
+        if isinstance(self.app, QtWidgets.QMainWindow):
+            return self.app
+        # 尝试获取 window 属性
+        return getattr(self.app, 'window', None)

@@ -1,5 +1,11 @@
 import os
 import sys
+import warnings
+
+# Suppress sipPyTypeDict deprecation warning
+warnings.filterwarnings("ignore", category=DeprecationWarning, message=".*sipPyTypeDict.*")
+
+from PyQt5 import QtWidgets, QtCore, QtGui
 
 # -----------------------------------------------------------------------------
 # Fix for PyQt5 plugins + DLL path in PyInstaller onedir + Enigma Virtual Box
@@ -76,22 +82,19 @@ if getattr(sys, 'frozen', False):
 def _show_single_instance_dialog():
     """显示单实例提示弹窗"""
     try:
-        from PyQt5 import QtWidgets, QtCore, QtGui
         from ui_qt.widgets.custom_confirm_dialog import CustomConfirmDialog
 
-        # 创建 QApplication（如果不存在）
+        # 设置高分屏支持（必须在 QApplication 创建之前）
         app = QtWidgets.QApplication.instance()
         if app is None:
+            try:
+                if hasattr(QtCore.Qt, 'AA_EnableHighDpiScaling'):
+                    QtWidgets.QApplication.setAttribute(QtCore.Qt.AA_EnableHighDpiScaling, True)
+                if hasattr(QtCore.Qt, 'AA_UseHighDpiPixmaps'):
+                    QtWidgets.QApplication.setAttribute(QtCore.Qt.AA_UseHighDpiPixmaps, True)
+            except Exception:
+                pass
             app = QtWidgets.QApplication(sys.argv)
-
-        # 设置高分屏支持
-        try:
-            if hasattr(QtCore.Qt, 'AA_EnableHighDpiScaling'):
-                QtWidgets.QApplication.setAttribute(QtCore.Qt.AA_EnableHighDpiScaling, True)
-            if hasattr(QtCore.Qt, 'AA_UseHighDpiPixmaps'):
-                QtWidgets.QApplication.setAttribute(QtCore.Qt.AA_UseHighDpiPixmaps, True)
-        except Exception:
-            pass
 
         dialog = CustomConfirmDialog(
             parent=None,
@@ -106,6 +109,91 @@ def _show_single_instance_dialog():
         # 如果弹窗失败，打印到控制台
         print(f"[单实例] 程序已运行: {e}")
 
+
+class SplashScreen(QtWidgets.QWidget):
+    """简单的启动画面"""
+
+    def __init__(self):
+        super().__init__()
+        self.setWindowFlags(
+            QtCore.Qt.FramelessWindowHint |
+            QtCore.Qt.WindowStaysOnTopHint |
+            QtCore.Qt.Tool
+        )
+        self.setAttribute(QtCore.Qt.WA_TranslucentBackground)
+        self.setFixedSize(280, 160)
+
+        # 主容器
+        container = QtWidgets.QFrame(self)
+        container.setObjectName("splashContainer")
+        container.setGeometry(0, 0, 280, 160)
+        container.setStyleSheet("""
+            QFrame#splashContainer {
+                background-color: #1F2937;
+                border: 1px solid #374151;
+                border-radius: 12px;
+            }
+            QLabel {
+                background: transparent;
+            }
+        """)
+
+        layout = QtWidgets.QVBoxLayout(container)
+        layout.setContentsMargins(20, 25, 20, 20)
+        layout.setSpacing(12)
+        layout.setAlignment(QtCore.Qt.AlignCenter)
+
+        # Logo - 使用项目图标
+        logo_label = QtWidgets.QLabel()
+        logo_label.setAlignment(QtCore.Qt.AlignCenter)
+        logo_label.setFixedHeight(48)
+        # 尝试加载图标文件
+        try:
+            from ui.assets_helper import resolve_asset
+            icon_path = resolve_asset('rabbit.png')
+            if icon_path.exists():
+                pixmap = QtGui.QPixmap(str(icon_path))
+                if not pixmap.isNull():
+                    # 缩放图片，保持宽高比，高度固定48
+                    scaled = pixmap.scaledToHeight(48, QtCore.Qt.SmoothTransformation)
+                    logo_label.setPixmap(scaled)
+                else:
+                    logo_label.setText("🐰")
+                    logo_label.setStyleSheet("font-size: 48px;")
+            else:
+                logo_label.setText("🐰")
+                logo_label.setStyleSheet("font-size: 48px;")
+        except Exception:
+            logo_label.setText("🐰")
+            logo_label.setStyleSheet("font-size: 48px;")
+        layout.addWidget(logo_label, 0, QtCore.Qt.AlignHCenter)
+
+        # 标题
+        title_label = QtWidgets.QLabel("ComfyUI 启动器")
+        title_label.setStyleSheet("font: bold 14pt 'Microsoft YaHei UI'; color: #F3F4F6;")
+        title_label.setAlignment(QtCore.Qt.AlignCenter)
+        layout.addWidget(title_label)
+
+        # 加载提示
+        self.status_label = QtWidgets.QLabel("正在加载...")
+        self.status_label.setStyleSheet("font: 10pt 'Microsoft YaHei UI'; color: #9CA3AF;")
+        self.status_label.setAlignment(QtCore.Qt.AlignCenter)
+        layout.addWidget(self.status_label)
+
+        # 居中显示
+        screen = QtWidgets.QApplication.primaryScreen()
+        if screen:
+            geo = screen.availableGeometry()
+            self.move(
+                geo.x() + (geo.width() - self.width()) // 2,
+                geo.y() + (geo.height() - self.height()) // 2
+            )
+
+    def set_status(self, text):
+        self.status_label.setText(text)
+        QtWidgets.QApplication.processEvents()
+
+
 # -----------------------------------------------------------------------------
 
 # 你的原 import 继续
@@ -117,8 +205,32 @@ if __name__ == "__main__":
     if not lock.acquire():
         _show_single_instance_dialog()
         sys.exit(0)
+
     try:
-        app = PyQtLauncher()
-        app.run()
+        # 设置高分屏支持（必须在 QApplication 创建之前）
+        try:
+            if hasattr(QtCore.Qt, 'AA_EnableHighDpiScaling'):
+                QtWidgets.QApplication.setAttribute(QtCore.Qt.AA_EnableHighDpiScaling, True)
+            if hasattr(QtCore.Qt, 'AA_UseHighDpiPixmaps'):
+                QtWidgets.QApplication.setAttribute(QtCore.Qt.AA_UseHighDpiPixmaps, True)
+        except Exception:
+            pass
+
+        # 创建 QApplication
+        app = QtWidgets.QApplication(sys.argv)
+
+        # 显示启动画面
+        splash = SplashScreen()
+        splash.show()
+        QtWidgets.QApplication.processEvents()
+
+        # 创建主窗口
+        splash.set_status("正在初始化...")
+        window = PyQtLauncher()
+
+        # 关闭启动画面并显示主窗口
+        splash.close()
+        window.run()
+
     finally:
         lock.release()
