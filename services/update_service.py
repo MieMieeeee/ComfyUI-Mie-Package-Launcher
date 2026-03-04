@@ -360,7 +360,8 @@ class UpdateService:
         satisfied_all = []
         for rf in req_files:
             try:
-                res = PIPUTILS.install_requirements_file(rf, self._resolve_python_exec(), index_url=idx, upgrade=False, logger=self.app.logger)
+                # 使用 upgrade=True 来升级所有依赖（包括前端包和模板库）
+                res = PIPUTILS.install_requirements_file(rf, self._resolve_python_exec(), index_url=idx, upgrade=True, logger=self.app.logger)
                 ok = res.get("success") and not res.get("error")
                 sync_summary.append(f"{rf.name}: {'OK' if ok else 'FAIL'}")
                 for item in (res.get("installed") or []):

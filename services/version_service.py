@@ -3,7 +3,7 @@ import time
 import json
 from urllib.request import urlopen, Request
 from pathlib import Path
-from typing import Dict, Any, Optional, Tuple, List
+from typing import Dict, Any, Optional, Tuple, List, Callable
 from services.interfaces import IVersionService
 from utils.common import run_hidden
 
@@ -11,27 +11,37 @@ from utils.common import run_hidden
 class VersionService(IVersionService):
     def __init__(self, app):
         self.app = app
+        self._api_failed = False  # 标记 API 是否已失败，避免重复尝试
 
     def refresh(self, scope: str = "all") -> None:
         from core.version_service import refresh_version_info
         refresh_version_info(self.app, scope)
 
-    def is_stable_version(self, tag: str) -> bool:
-        # 优先通过 GitHub Releases 判断：存在且非 prerelease 即稳定
+    def is_stable_version(self, tag: str, use_api: bool = True) -> bool:
+        """判断是否为稳定版本
+
+        Args:
+            tag: 版本标签
+            use_api: 是否尝试使用 GitHub API（如果 API 已失败则跳过）
+        """
         if not tag:
             return False
-        try:
-            releases = self._get_releases()
-            for rel in releases:
-                if str(rel.get('tag_name', '')).strip() == tag:
-                    return bool(not rel.get('prerelease', False))
-        except Exception:
-            pass
+
+        # 如果 API 已失败，直接使用语义化版本规则
+        if use_api and not self._api_failed:
+            try:
+                releases = self._get_releases()
+                for rel in releases:
+                    if str(rel.get('tag_name', '')).strip() == tag:
+                        return bool(not rel.get('prerelease', False))
+            except Exception:
+                pass
+
         # 回退到语义化版本规则
         t = tag.strip().lower()
         if t.startswith('v'):
             t = t[1:]
-        if any(x in t for x in ['-alpha', '-beta', '-rc', 'dev']):
+        if any(x in t for x in ['-alpha', '-beta', '-rc', 'dev', '-pre']):
             return False
         return bool(re.match(r"^\d+\.\d+\.\d+(?:[+][\w.-]+)?$", t))
 
@@ -130,7 +140,13 @@ class VersionService(IVersionService):
             pass
         return base
 
-    def _get_releases(self, force_refresh: bool = False) -> List[Dict[str, Any]]:
+    def _get_releases(self, force_refresh: bool = False, mark_failed: bool = True) -> List[Dict[str, Any]]:
+        """获取 GitHub Releases
+
+        Args:
+            force_refresh: 是否强制刷新缓存
+            mark_failed: 失败时是否标记 API 已失败（避免后续重复尝试）
+        """
         logger = getattr(self.app, 'logger', None)
         if logger:
             logger.info("[_get_releases] 开始, force_refresh=%s", force_refresh)
@@ -140,6 +156,12 @@ class VersionService(IVersionService):
             if logger:
                 logger.info("[_get_releases] 使用缓存, 返回 %d 条", len(cache))
             return cache
+
+        # 如果之前已失败且不强制刷新，直接返回空
+        if self._api_failed and not force_refresh:
+            if logger:
+                logger.info("[_get_releases] API 之前已失败，跳过")
+            return []
 
         owner, repo = self._origin_repo()
         if not owner or not repo:
@@ -153,10 +175,10 @@ class VersionService(IVersionService):
 
         def _fetch():
             import socket
-            socket.setdefaulttimeout(15)
+            socket.setdefaulttimeout(10)
             try:
                 req = Request(url, headers={'Accept': 'application/vnd.github+json', 'User-Agent': 'ComfyUI-Launcher'})
-                with urlopen(req, timeout=15) as resp:
+                with urlopen(req, timeout=10) as resp:
                     data = json.loads(resp.read().decode('utf-8'))
                     return data if isinstance(data, list) else None
             except Exception as e:
@@ -174,9 +196,10 @@ class VersionService(IVersionService):
             with concurrent.futures.ThreadPoolExecutor(max_workers=1) as executor:
                 future = executor.submit(_fetch)
                 try:
-                    data = future.result(timeout=20)  # 20秒总超时
+                    data = future.result(timeout=15)  # 15秒总超时
                     if data:
                         setattr(self.app, '_releases_cache', data)
+                        self._api_failed = False  # 成功则重置失败标记
                         if logger:
                             logger.info("[_get_releases] 成功, 获取 %d 条 releases", len(data))
                         return data
@@ -185,19 +208,40 @@ class VersionService(IVersionService):
                             logger.warning("[_get_releases] 返回数据为空")
                 except concurrent.futures.TimeoutError:
                     if logger:
-                        logger.warning("[_get_releases] 超时（20秒）")
+                        logger.warning("[_get_releases] 超时（15秒）")
         except Exception as e:
             if logger:
                 logger.error("[_get_releases] 异常: %s", str(e))
+
+        # 标记 API 失败，避免后续重复尝试
+        if mark_failed:
+            self._api_failed = True
+            if logger:
+                logger.info("[_get_releases] 标记 API 失败，后续将使用 git 方案")
 
         if logger:
             logger.info("[_get_releases] 结束, 返回空列表")
         return []
 
-    def get_latest_stable_kernel(self, force_refresh: bool = False) -> Dict[str, Any]:
+    def get_latest_stable_kernel(self, force_refresh: bool = False, on_progress: Callable[[str], None] = None) -> Dict[str, Any]:
+        """获取最新稳定内核版本
+
+        Args:
+            force_refresh: 是否强制刷新缓存
+            on_progress: 进度回调函数，接收状态字符串
+        """
         logger = getattr(self.app, 'logger', None)
         if logger:
             logger.info("[get_latest_stable_kernel] 开始, force_refresh=%s", force_refresh)
+
+        def report(status: str):
+            if on_progress:
+                try:
+                    on_progress(status)
+                except Exception:
+                    pass
+            if logger:
+                logger.info("[get_latest_stable_kernel] %s", status)
 
         cache = getattr(self.app, '_stable_kernel_cache', None)
         if cache and (not force_refresh):
@@ -206,36 +250,32 @@ class VersionService(IVersionService):
             return cache
 
         # 1. 尝试从 GitHub API 获取最新稳定 Release
-        if logger:
-            logger.info("[get_latest_stable_kernel] 步骤1: 尝试从 GitHub API 获取")
-        releases = self._get_releases(force_refresh=True)
+        report("正在从 GitHub API 获取版本信息...")
+        releases = self._get_releases(force_refresh=True, mark_failed=True)
         latest_tag = None
         for rel in releases:
             if not rel.get('prerelease', False):
                 latest_tag = rel.get('tag_name')
-                if logger:
-                    logger.info("[get_latest_stable_kernel] 步骤1完成: 从 API 获取到 %s", latest_tag)
+                report(f"从 API 获取到最新稳定版: {latest_tag}")
                 break
 
         # 2. 如果 API 获取失败，尝试从 git tags 获取
         if not latest_tag:
-            if logger:
-                logger.info("[get_latest_stable_kernel] 步骤2: API 未获取到，尝试从 git tags 获取")
+            report("API 获取失败，切换到 git 方案...")
             try:
                 # 先 fetch tags
-                if logger:
-                    logger.info("[get_latest_stable_kernel] 执行 git fetch --tags")
-                self._run_git(['git', 'fetch', '--tags'], cwd=self._repo_root(), timeout=15)
+                report("正在获取远程 tags...")
+                self._run_git(['git', 'fetch', '--tags'], cwd=self._repo_root(), timeout=30)
 
                 # 列出所有 tags
-                if logger:
-                    logger.info("[get_latest_stable_kernel] 执行 git tag --list")
+                report("正在分析本地 tags...")
                 tags = self._list_tags()
                 if logger:
                     logger.info("[get_latest_stable_kernel] 获取到 %d 个 tags", len(tags))
 
-                # 过滤稳定版并排序
-                stable_tags = [t for t in tags if self.is_stable_version(t)]
+                # 过滤稳定版并排序（使用语义化版本规则，不调用 API）
+                report("正在筛选稳定版本...")
+                stable_tags = [t for t in tags if self.is_stable_version(t, use_api=False)]
                 if logger:
                     logger.info("[get_latest_stable_kernel] 过滤后 %d 个稳定版 tags", len(stable_tags))
 
@@ -245,29 +285,26 @@ class VersionService(IVersionService):
                     except:
                         pass
                     latest_tag = stable_tags[-1]
-                    if logger:
-                        logger.info("[get_latest_stable_kernel] 步骤2完成: 从 git tags 获取到 %s", latest_tag)
+                    report(f"从 git tags 获取到最新稳定版: {latest_tag}")
             except Exception as e:
                 if logger:
-                    logger.warning("[get_latest_stable_kernel] 步骤2失败: %s", str(e))
+                    logger.warning("[get_latest_stable_kernel] git 方案失败: %s", str(e))
+                report(f"git 方案失败: {str(e)[:50]}")
 
         if not latest_tag:
-            if logger:
-                logger.error("[get_latest_stable_kernel] 失败: 未找到稳定版本")
+            report("失败: 未找到稳定版本")
             return {"tag": None, "commit": None, "timestamp": int(time.time()), "success": False, "error": "No stable tag found"}
 
         # 3. 获取 tag 对应的 commit
-        if logger:
-            logger.info("[get_latest_stable_kernel] 步骤3: 获取 tag %s 对应的 commit", latest_tag)
+        report(f"正在获取 {latest_tag} 对应的 commit...")
         try:
-            self._run_git(['git', 'fetch', 'origin', 'tag', latest_tag], cwd=self._repo_root(), timeout=15)
+            self._run_git(['git', 'fetch', 'origin', 'tag', latest_tag], cwd=self._repo_root(), timeout=30)
         except Exception as e:
             if logger:
                 logger.warning("[get_latest_stable_kernel] fetch tag 失败: %s", str(e))
 
         commit = self._tag_commit(latest_tag)
-        if logger:
-            logger.info("[get_latest_stable_kernel] 步骤3完成: commit=%s", commit)
+        report(f"获取到 commit: {commit}")
 
         data = {"tag": latest_tag, "commit": commit, "timestamp": int(time.time()), "success": bool(latest_tag and commit)}
         if logger:
@@ -320,26 +357,45 @@ class VersionService(IVersionService):
             pass
         return result
 
-    def upgrade_latest(self, stable_only: bool = True) -> Dict[str, Any]:
+    def upgrade_latest(self, stable_only: bool = True, on_progress: Callable[[str], None] = None) -> Dict[str, Any]:
+        """升级到最新版本
+
+        Args:
+            stable_only: 是否只升级到稳定版
+            on_progress: 进度回调函数
+        """
+        def report(status: str):
+            if on_progress:
+                try:
+                    on_progress(status)
+                except Exception:
+                    pass
+
         if stable_only:
-            info = self.get_latest_stable_kernel(force_refresh=True)
+            report("正在查找最新稳定版本...")
+            info = self.get_latest_stable_kernel(force_refresh=True, on_progress=on_progress)
             if not info.get('success'):
                 return {"component": "core", "error_code": "NO_STABLE", "error": "no stable tag"}
+            report(f"正在切换到 {info.get('tag')}...")
             res = self._checkout_commit(info['commit'])
             try:
                 res.update({"tag": info.get("tag"), "commit": info.get("commit")})
             except Exception:
                 pass
+            if res.get('updated'):
+                report(f"已切换到 {info.get('tag')}")
             return res
         else:
             try:
                 repo = self._repo_root()
+                report("正在获取当前版本...")
                 try:
                     before = self._run_git(['git', 'rev-parse', 'HEAD'], capture_output=True, text=True, timeout=10, cwd=repo)
                     before_hash = (before.stdout or "").strip() if before and before.returncode == 0 else ""
                 except Exception:
                     before_hash = ""
 
+                report("正在从远程获取更新...")
                 fetch = self._run_git(['git', 'fetch', '--prune'], capture_output=True, text=True, timeout=30, cwd=repo)
                 if not fetch or fetch.returncode != 0:
                     msg = (fetch.stderr or fetch.stdout or "git fetch failed") if fetch else "git fetch failed"
@@ -362,11 +418,13 @@ class VersionService(IVersionService):
                         pass
                     if not br:
                         br = "master"
+                    report(f"正在切换到分支 {br}...")
                     rco = self._run_git(['git', 'checkout', br], capture_output=True, text=True, timeout=20, cwd=repo)
                     if not rco or rco.returncode != 0:
                         msg = (rco.stderr or rco.stdout or "git checkout failed") if rco else "git checkout failed"
                         return {"component": "core", "error": msg, "branch": br}
 
+                report(f"正在拉取 {br} 分支最新代码...")
                 pull = self._run_git(['git', 'pull', '--ff-only'], capture_output=True, text=True, timeout=60, cwd=repo)
                 if not pull or pull.returncode != 0:
                     pull2 = self._run_git(['git', 'pull'], capture_output=True, text=True, timeout=120, cwd=repo)

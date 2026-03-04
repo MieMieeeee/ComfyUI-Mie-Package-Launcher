@@ -42,10 +42,10 @@ def update_build_parameters():
     now = time.strftime('%Y-%m-%d %H:%M:%S', time.localtime())
     ver = params.get('version', 'v1.0.7')
     params['version'] = ver
-    params['suffix'] = f' · Nuitka 构建 {now}'
+    params['suffix'] = f' · 构建于 {now}'
     params['mode'] = 'nuitka_release'
     params['built_at'] = now
-    params['builder'] = 'nuitka'
+    params['builder'] = '黎黎原上咩'
 
     try:
         with open(bp_path, 'w', encoding='utf-8') as f:

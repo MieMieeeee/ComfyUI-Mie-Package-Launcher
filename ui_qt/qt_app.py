@@ -209,19 +209,52 @@ class VersionWorker(QtCore.QThread):
         try:
             check_script = '''
 import sys
+import warnings
+# 抑制 pynvml 弃用警告
+warnings.filterwarnings("ignore", message=".*pynvml.*")
 try:
     import torch
     # 先尝试获取设备数量，这会触发驱动检测
     device_count = torch._C._cuda_getDeviceCount()
     if device_count > 0:
-        # 尝试获取设备名称，可能会失败
+        # 尝试获取设备名称
         try:
             gpu_name = torch.cuda.get_device_name(0)
-            sys.stdout.write("OK:" + gpu_name + "\\n")
-            sys.stdout.flush()
-        except Exception as e:
-            sys.stdout.write("OK:CUDA可用\\n")
-            sys.stdout.flush()
+        except Exception:
+            gpu_name = ""
+
+        # 检查 CUDA capability 兼容性
+        # 输出格式: STATUS:GPU_NAME|CAP_MAJOR|CAP_MINOR|MIN_CAP|MAX_CAP|COMPATIBLE
+        cap_major, cap_minor = 0, 0
+        min_cap, max_cap = 0.0, 0.0
+        compatible = True
+        try:
+            cap_major, cap_minor = torch.cuda.get_device_capability(0)
+            device_cap = cap_major + cap_minor / 10.0
+
+            # 解析 PyTorch 支持的架构列表
+            arch_list = torch.cuda.get_arch_list()
+            for arch in arch_list:
+                if arch.startswith("sm_"):
+                    try:
+                        val = int(arch[3:]) / 10.0
+                        if min_cap == 0.0 or val < min_cap:
+                            min_cap = val
+                        if max_cap == 0.0 or val > max_cap:
+                            max_cap = val
+                    except ValueError:
+                        pass
+
+            # 检查设备 capability 是否在支持范围内（低于最小版本为不兼容）
+            if min_cap > 0 and device_cap < min_cap:
+                compatible = False
+        except Exception:
+            pass
+
+        # 输出: OK/WARN:GPU_NAME|cap_major|cap_minor|min_cap|max_cap|compatible
+        status = "OK" if compatible else "WARN"
+        sys.stdout.write(f"{status}:{gpu_name or 'GPU'}|{cap_major}|{cap_minor}|{min_cap:.1f}|{max_cap:.1f}|{compatible}\\n")
+        sys.stdout.flush()
     else:
         sys.stdout.write("INFO:无可用GPU\\n")
         sys.stdout.flush()
@@ -254,23 +287,53 @@ except Exception as e:
             except Exception:
                 pass
 
-            if result.startswith("OK:"):
-                gpu_name = result[3:].strip()
-                status = f"✓ {gpu_name}" if gpu_name else "✓ CUDA可用"
-                try:
-                    self.app.logger.info("UI: 显卡驱动检测成功 - %s", gpu_name)
-                except Exception:
-                    pass
-                return status
+            if result.startswith("OK:") or result.startswith("WARN:"):
+                # 解析新格式: STATUS:GPU_NAME|CAP_MAJOR|CAP_MINOR|MIN_CAP|MAX_CAP|COMPATIBLE
+                is_warn = result.startswith("WARN:")
+                data_part = result[5:] if is_warn else result[3:]
+                parts = data_part.split("|")
+
+                if len(parts) >= 6:
+                    gpu_name = parts[0].strip()
+                    cap_major = parts[1]
+                    cap_minor = parts[2]
+                    min_cap = parts[3]
+                    max_cap = parts[4]
+                    compatible = parts[5].lower() == "true"
+
+                    if not compatible:
+                        # 不兼容：显示警告
+                        status = f"⚠ {gpu_name} (CUDA {cap_major}.{cap_minor} < {min_cap} PyTorch不支持) - 仅支持CPU模式"
+                        try:
+                            self.app.logger.warning("UI: 显卡PyTorch不兼容 - %s", gpu_name)
+                        except Exception:
+                            pass
+                        return status
+                    else:
+                        # 兼容：显示正常
+                        status = f"✓ {gpu_name}"
+                        try:
+                            self.app.logger.info("UI: 显卡驱动检测成功 - %s", gpu_name)
+                        except Exception:
+                            pass
+                        return status
+                else:
+                    # 旧格式兼容
+                    gpu_name = data_part.strip()
+                    if is_warn:
+                        return "⚠ " + gpu_name
+                    return f"✓ {gpu_name}" if gpu_name else "✓ CUDA可用"
+
             elif result.startswith("WARN:"):
-                status = "⚠ " + result[5:].strip()
+                # 旧的WARN格式（驱动过旧等）
+                status = "⚠ " + result[5:].strip() + " - 仅支持CPU模式"
                 try:
                     self.app.logger.warning("UI: 显卡驱动警告 - %s", result[5:].strip())
                 except Exception:
                     pass
                 return status
             elif result.startswith("INFO:"):
-                status = result[5:].strip()
+                status = result[5:].strip() + " - 仅支持CPU模式"
                 try:
                     self.app.logger.info("UI: 显卡驱动检测 - %s", status)
                 except Exception:
@@ -2022,6 +2085,11 @@ class PyQtLauncher(QtWidgets.QMainWindow):
             core_res = None
             req_res = None
 
+            # 进度回调函数
+            def on_progress(status: str):
+                if pd and not pd.is_cancelled():
+                    self.ui_post(lambda s=status: pd.set_status(s))
+
             try:
                 # 检查是否已取消
                 if pd and pd.is_cancelled():
@@ -2029,8 +2097,7 @@ class PyQtLauncher(QtWidgets.QMainWindow):
                     return
 
                 # 1. 更新内核（带超时）
-                if pd:
-                    self.ui_post(lambda: pd.set_status("正在更新 ComfyUI 内核..."))
+                on_progress("正在更新 ComfyUI 内核...")
 
                 logger = getattr(self, "logger", None)
                 if logger:
@@ -2039,7 +2106,11 @@ class PyQtLauncher(QtWidgets.QMainWindow):
                 try:
                     import concurrent.futures
                     with concurrent.futures.ThreadPoolExecutor(max_workers=1) as executor:
-                        future = executor.submit(self.services.version.upgrade_latest, stable_only)
+                        future = executor.submit(
+                            self.services.version.upgrade_latest,
+                            stable_only,
+                            on_progress  # 传递进度回调
+                        )
                         try:
                             core_res = future.result(timeout=timeout_seconds)
                             if logger:
@@ -2065,8 +2136,7 @@ class PyQtLauncher(QtWidgets.QMainWindow):
                     return
 
                 # 2. 更新依赖
-                if pd:
-                    self.ui_post(lambda: pd.set_status("正在同步依赖库 (requirements)..."))
+                on_progress("正在同步依赖库 (requirements)...")
                 try:
                     if hasattr(self, "auto_update_deps_var") and bool(self.auto_update_deps_var.get()):
                         req_res = self.services.update.sync_requirements_files()
@@ -2077,22 +2147,25 @@ class PyQtLauncher(QtWidgets.QMainWindow):
                 if pd and pd.is_cancelled():
                     return
 
-                # 3. 更新前端和模板库
-                if self.update_frontend_var.get():
-                    if pd:
-                        self.ui_post(lambda: pd.set_status("正在更新前端包..."))
-                    try:
-                        self.services.update.update_frontend(False)
-                    except Exception:
-                        pass
+                # 3. 更新前端和模板库（仅当没有同步依赖库时才需要单独更新）
+                # 如果同步了依赖库（upgrade=True），前端包和模板库已经随依赖一起更新了
+                deps_synced = hasattr(self, "auto_update_deps_var") and bool(self.auto_update_deps_var.get())
+                if not deps_synced:
+                    if self.update_frontend_var.get():
+                        on_progress("正在更新前端包 (comfyui-frontend)...")
+                        try:
+                            self.services.update.update_frontend(False)
+                        except Exception:
+                            pass
 
-                if self.update_template_var.get():
-                    if pd:
-                        self.ui_post(lambda: pd.set_status("正在更新模板库..."))
-                    try:
-                        self.services.update.update_templates(False)
-                    except Exception:
-                        pass
+                    if self.update_template_var.get():
+                        on_progress("正在更新模板库 (comfyui-workflow-templates)...")
+                        try:
+                            self.services.update.update_templates(False)
+                        except Exception:
+                            pass
+
+                on_progress("更新完成")
 
                 try:
                     if getattr(self, "logger", None):

@@ -54,17 +54,35 @@ class LaunchPage(BasePage):
         top_row.setSpacing(15)
         layout.addLayout(top_row)
 
+        # 右侧按钮容器
+        right_container = QtWidgets.QWidget()
+        right_container.setFixedWidth(120)
+        right_layout = QtWidgets.QVBoxLayout(right_container)
+        right_layout.setContentsMargins(0, 0, 0, 0)
+        right_layout.setSpacing(8)
+
         # 启动大按钮
         btn_toggle = QtWidgets.QPushButton("🚀 一键启动")
         btn_toggle.setCursor(Qt.PointingHandCursor)
-        btn_toggle.setFixedWidth(120)
-        btn_toggle.setSizePolicy(QtWidgets.QSizePolicy.Fixed, QtWidgets.QSizePolicy.Expanding)
+        btn_toggle.setSizePolicy(QtWidgets.QSizePolicy.Expanding, QtWidgets.QSizePolicy.Expanding)
         btn_toggle.setStyleSheet(self._get_primary_button_style())
         btn_toggle.clicked.connect(self._on_toggle_launch)
         btn_toggle.setToolTip("启动或停止ComfyUI服务")
         self.btn_toggle = btn_toggle
         # 初始化按钮状态
         self._update_button_state()
+
+        # 常见问题按钮
+        btn_faq = QtWidgets.QPushButton("查看常见问题")
+        btn_faq.setCursor(Qt.PointingHandCursor)
+        btn_faq.setSizePolicy(QtWidgets.QSizePolicy.Expanding, QtWidgets.QSizePolicy.Expanding)
+        btn_faq.setStyleSheet(self._get_primary_button_style())
+        btn_faq.clicked.connect(lambda _: QtGui.QDesktopServices.openUrl(QtCore.QUrl("https://dcn8q5lcfe3s.feishu.cn/wiki/ELY2wwPgciIA56kS3eBciY4RnPd")))
+        btn_faq.setToolTip("查看常见问题解决方案")
+        self.btn_faq = btn_faq
+
+        right_layout.addWidget(btn_toggle, 4)
+        right_layout.addWidget(btn_faq, 1)
 
         # 启动控制表单
         form_group = QtWidgets.QGroupBox("启动控制")
@@ -78,7 +96,7 @@ class LaunchPage(BasePage):
         form_layout.setContentsMargins(12, 12, 12, 12)
 
         top_row.addWidget(form_group, 1)
-        top_row.addWidget(btn_toggle, 0)
+        top_row.addWidget(right_container, 0)
 
         # 添加阴影效果
         try:
@@ -92,12 +110,12 @@ class LaunchPage(BasePage):
 
         self._build_launch_controls(form_layout)
 
-        # 让一键启动按钮高度与启动控制区域保持一致
+        # 让右侧按钮区域高度与启动控制区域保持一致
         try:
             from PyQt5.QtCore import QTimer
             def _sync_btn_height():
                 try:
-                    btn_toggle.setFixedHeight(form_group.sizeHint().height())
+                    right_container.setFixedHeight(form_group.sizeHint().height())
                 except Exception:
                     pass
             QTimer.singleShot(0, _sync_btn_height)
@@ -865,12 +883,24 @@ class LaunchPage(BasePage):
 
         v_text = str(value_source.get() if hasattr(value_source, "get") else value_source)
         v = QtWidgets.QLabel(v_text)
-        v.setStyleSheet(f"font: bold 10pt \"Segoe UI\", \"Microsoft YaHei UI\"; color: {self.theme_manager.colors.get('text')}; background: transparent;")
+
+        # 检查是否需要显示为错误颜色（显卡驱动状态包含"仅支持CPU模式"）
+        if title == "显卡驱动" and "仅支持CPU模式" in v_text:
+            text_color = self.theme_manager.colors.get('error')
+        else:
+            text_color = self.theme_manager.colors.get('text')
+
+        v.setStyleSheet(f"font: bold 10pt \"Segoe UI\", \"Microsoft YaHei UI\"; color: {text_color}; background: transparent;")
         hb.addWidget(v)
 
         if hasattr(value_source, "bind"):
-            def _update_v(val, vv=v):
+            def _update_v(val, vv=v, tt=title, tm=self.theme_manager):
                 vv.setText(str(val))
+                # 更新时也检查颜色
+                if tt == "显卡驱动" and "仅支持CPU模式" in str(val):
+                    vv.setStyleSheet(f"font: bold 10pt \"Segoe UI\", \"Microsoft YaHei UI\"; color: {tm.colors.get('error')}; background: transparent;")
+                else:
+                    vv.setStyleSheet(f"font: bold 10pt \"Segoe UI\", \"Microsoft YaHei UI\"; color: {tm.colors.get('text')}; background: transparent;")
             value_source.bind(_update_v)
         try:
             self._version_value_refs.append(v)
@@ -1105,9 +1135,27 @@ class LaunchPage(BasePage):
         except Exception:
             pass
 
+    def _on_theme_changed(self, theme_styles):
+        """主题变更回调"""
+        self.update_theme(theme_styles)
+
     def update_theme(self, theme_styles=None):
         """更新主题"""
         super().update_theme(theme_styles)
+        
+        # 确保 styles 对象是最新的
+        if theme_styles is None:
+             theme_styles = self.theme_manager.styles
+
+        # 更新按钮
+        if hasattr(self, "btn_toggle"):
+            self.btn_toggle.setStyleSheet(theme_styles.primary_button_style())
+        if hasattr(self, "btn_faq"):
+            self.btn_faq.setStyleSheet(theme_styles.primary_button_style())
+        if hasattr(self, "_quick_dir_buttons"):
+            for btn in self._quick_dir_buttons:
+                btn.setStyleSheet(theme_styles.secondary_button_style())
+
         label_muted = self.theme_manager.colors.get('label_muted')
         text_color = self.theme_manager.colors.get('text')
         try:

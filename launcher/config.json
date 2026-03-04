@@ -17,7 +17,7 @@
   "ui_settings": {
     "window_width": 800,
     "window_height": 600,
-    "theme": "light",
+    "theme": "dark",
     "font_size": 9,
     "log_max_lines": 1000,
     "window_size": "500x650",
@@ -56,7 +56,7 @@
     "comfyui_manager_git_path": "F:\\ComfyUI_Mie_2026_V8.0\\tools\\PortableGit\\bin\\git.exe"
   },
   "version_preferences": {
-    "stable_only": true,
+    "stable_only": false,
     "auto_update_deps": true,
     "update_timeout": 120
   }

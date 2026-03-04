@@ -52,6 +52,12 @@ class AboutLauncherPage(BasePage):
                 "tooltip": "访问项目官方 GitHub 仓库"
             },
             {
+                "emoji": "📝",
+                "text": "常见问题及处理方法",
+                "url": "https://dcn8q5lcfe3s.feishu.cn/wiki/ELY2wwPgciIA56kS3eBciY4RnPd",
+                "tooltip": "查看常见问题和解决方法"
+            },
+            {
                 "emoji": "💬",
                 "text": "遇到问题？提个 Issue",
                 "url": "https://github.com/MieMieeeee/ComfyUI-Mie-Package-Launcher/issues/new",

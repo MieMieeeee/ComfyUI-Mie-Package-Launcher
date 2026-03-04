@@ -105,6 +105,10 @@ class ThemeColors:
             "theme_btn_bg": "transparent",
             "theme_btn_border": "rgba(255, 255, 255, 0.15)" if d else "rgba(0, 0, 0, 0.1)",
             "theme_btn_text": "#9CA3AF" if d else "#4B5563",
+
+            # 错误/警告
+            "error": "#EF4444" if d else "#DC2626",
+            "warning": "#F59E0B" if d else "#D97706",
         }
 
     def get(self, key: str, default: str = "") -> str:
