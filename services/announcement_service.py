@@ -485,12 +485,8 @@ class AnnouncementService:
                     if dlg.exec_() == 1: # Accepted
                         action = dlg.get_action()
                         if action == "ack":
-                            try:
-                                if aid:
-                                    self._mark_seen(aid)
-                                    self._log('debug', 'announcement: marked seen id=%s', aid[:8])
-                            except Exception:
-                                pass
+                            # 点击"知道了"不做任何记录，下次启动继续弹出
+                            self._log('debug', 'announcement: acknowledged (will show again) id=%s', aid[:8] if aid else '-')
                         elif action == "mute":
                             try:
                                 if aid:

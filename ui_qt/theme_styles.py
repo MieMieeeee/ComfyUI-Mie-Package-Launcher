@@ -438,23 +438,26 @@ class ThemeStyles:
     def theme_button_style(self) -> str:
         text = self.c.get("sidebar_text")
         text_muted = self.c.get("sidebar_text_muted")
-        hover_bg = "rgba(255, 255, 255, 0.06)" if self.c.dark else "rgba(15, 23, 42, 0.04)"
+        border_color = "rgba(255, 255, 255, 0.15)" if self.c.dark else "rgba(15, 23, 42, 0.15)"
+        hover_border = "rgba(255, 255, 255, 0.3)" if self.c.dark else "rgba(15, 23, 42, 0.3)"
         checked_bg = "rgba(129, 140, 248, 0.35)" if self.c.dark else "rgba(56, 189, 248, 0.25)"
+        checked_border = "rgba(129, 140, 248, 0.6)" if self.c.dark else "rgba(56, 189, 248, 0.5)"
         return f"""
         QPushButton#ThemeBtn {{
             background: transparent;
             color: {text_muted};
-            border: none;
-            border-radius: 0px;
-            padding: {self._px(6)}px 0;
+            border: 1px solid {border_color};
+            border-radius: 8px;
+            padding: {self._px(6)}px {self._px(8)}px;
             font: {self._pt(9)}pt "Microsoft YaHei UI";
         }}
         QPushButton#ThemeBtn:hover {{
-            background: {hover_bg};
+            border: 1px solid {hover_border};
             color: {text};
         }}
         QPushButton#ThemeBtn:checked {{
             background: {checked_bg};
+            border: 1px solid {checked_border};
             color: {text};
             font-weight: bold;
         }}

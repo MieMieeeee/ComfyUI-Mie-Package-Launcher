@@ -240,6 +240,7 @@ class ProcessManager:
             try:
                 try:
                     from core.runner_stop import stop as run_stop
+                    import time
                     killed = False
                     try:
                         # 若未跟踪到子进程，先尝试全局关闭（适配外部启动实例）
@@ -251,8 +252,35 @@ class ProcessManager:
                     except Exception:
                         pass
                     killed = run_stop(self.app, self)
+
+                    # 等待进程真正结束（最多等待 5 秒）
+                    for _ in range(50):
+                        still_running = False
+                        try:
+                            if self.comfyui_process and self.comfyui_process.poll() is None:
+                                still_running = True
+                            else:
+                                from core.probe import is_http_reachable
+                                still_running = is_http_reachable(self.app)
+                        except Exception:
+                            pass
+                        if not still_running:
+                            break
+                        time.sleep(0.1)
+
                     try:
-                        if killed:
+                        # 再次确认最终状态
+                        final_running = False
+                        try:
+                            if self.comfyui_process and self.comfyui_process.poll() is None:
+                                final_running = True
+                            else:
+                                from core.probe import is_http_reachable
+                                final_running = is_http_reachable(self.app)
+                        except Exception:
+                            pass
+
+                        if not final_running:
                             try:
                                 self.app.ui_post(self.on_process_ended)
                             except Exception:
@@ -262,7 +290,6 @@ class ProcessManager:
                                 self.app.ui_post(self._refresh_running_status)
                             except Exception:
                                 pass
-                        
                     except Exception:
                         pass
                 except Exception:
