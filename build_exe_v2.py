@@ -77,10 +77,12 @@ def build_nuitka():
     print(f"[版本] {params.get('version', 'unknown')}")
 
     # 输出配置
-    output_name = "ComfyUI启动器"
+    # 内部 exe 使用英文名，避免 Enigma Virtual Box 打包后与外层 exe 同名冲突
+    internal_name = "ComfyUI_Launcher_Internal"
+    output_name = "ComfyUI启动器"  # 最终输出目录名
     dist_base = os.path.join(project_dir, "dist")
     dist_dir = os.path.join(dist_base, f"{output_name}.dist")
-    exe_path = os.path.join(dist_dir, f"{output_name}.exe")
+    exe_path = os.path.join(dist_dir, f"{internal_name}.exe")
 
     # 如果已存在则删除旧的构建目录
     if os.path.exists(dist_dir):
@@ -112,7 +114,7 @@ def build_nuitka():
 
         # 输出目录
         f'--output-dir={dist_base}',
-        f'--output-filename={output_name}.exe',
+        f'--output-filename={internal_name}.exe',
 
         # 包含资源文件
         '--include-data-dir=assets=assets',
@@ -177,7 +179,7 @@ def build_nuitka():
 
         # 检查输出（Nuitka 实际输出目录基于脚本名）
         actual_dist_dir = os.path.join(dist_base, "comfyui_launcher_pyqt.dist")
-        actual_exe = os.path.join(actual_dist_dir, f"{output_name}.exe")
+        actual_exe = os.path.join(actual_dist_dir, f"{internal_name}.exe")
 
         if os.path.exists(actual_exe):
             # 重命名目录为目标名称
@@ -190,7 +192,7 @@ def build_nuitka():
                     exe_path = actual_exe
             if dist_dir != actual_dist_dir:
                 os.rename(actual_dist_dir, dist_dir)
-                exe_path = os.path.join(dist_dir, f"{output_name}.exe")
+                exe_path = os.path.join(dist_dir, f"{internal_name}.exe")
 
         if os.path.exists(exe_path):
             # 计算目录大小
@@ -207,6 +209,8 @@ def build_nuitka():
             print(f"[输出] EXE: {exe_path}")
             print(f"[体积] 总计: {size_mb:.1f} MB")
             print(f"\n[下一步] 使用 Enigma Virtual Box 打包 {output_name}.dist 目录")
+            print(f"[提示] 内部 exe 已命名为 {internal_name}.exe，避免与外层同名冲突")
+            print(f"[提示] Enigma 打包后的外层 exe 可以安全命名为 ComfyUI启动器.exe")
             print("=" * 60)
         else:
             print(f"\n❌ 未找到生成的 exe: {exe_path}")

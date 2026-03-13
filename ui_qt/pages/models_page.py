@@ -78,8 +78,13 @@ class ModelsPage(BasePage):
         btn_open_yaml.setFixedWidth(120)
         btn_open_yaml.clicked.connect(self._open_yaml_file)
 
+        btn_open_dir = PrimaryButton("打开模型库目录", self.theme_manager.styles)
+        btn_open_dir.setFixedWidth(130)
+        btn_open_dir.clicked.connect(self._open_model_dir)
+
         action_row.addWidget(btn_update)
         action_row.addWidget(btn_open_yaml)
+        action_row.addWidget(btn_open_dir)
         action_row.addStretch(1)
 
         config_layout.addLayout(action_row)
@@ -120,7 +125,7 @@ class ModelsPage(BasePage):
         layout.addWidget(mapping_card)
 
         # 添加样式组件引用
-        self._styled_widgets = [config_card, mapping_card, self.table, btn_update, btn_open_yaml]
+        self._styled_widgets = [config_card, mapping_card, self.table, btn_update, btn_open_yaml, btn_open_dir]
         self._page_title_refs.append(lbl_bp)
         if hasattr(self.app, "_theme_widgets"):
             self.app._theme_widgets.extend(self._styled_widgets)
@@ -195,6 +200,28 @@ class ModelsPage(BasePage):
                 DialogHelper.show_info(self, "提示", "配置文件 extra_model_paths.yaml 尚未创建。")
         except Exception as e:
             DialogHelper.show_warning(self, "失败", f"打开配置文件失败：{e}")
+
+    def _open_model_dir(self):
+        """打开模型库根目录"""
+        base_path = self.edit_base_path.text().strip()
+        if not base_path:
+            DialogHelper.show_info(self, "提示", "请先设置模型库根目录。")
+            return
+        import os
+        if os.path.isdir(base_path):
+            import subprocess
+            import platform
+            try:
+                if platform.system() == "Windows":
+                    subprocess.Popen(['explorer', base_path])
+                elif platform.system() == "Darwin":
+                    subprocess.Popen(['open', base_path])
+                else:
+                    subprocess.Popen(['xdg-open', base_path])
+            except Exception as e:
+                DialogHelper.show_warning(self, "失败", f"打开目录失败：{e}")
+        else:
+            DialogHelper.show_warning(self, "失败", f"目录不存在：{base_path}")
 
     def _refresh_mapping_table(self):
         """刷新映射表格"""

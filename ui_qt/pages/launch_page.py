@@ -145,7 +145,7 @@ class LaunchPage(BasePage):
 
         self._build_quick_dir(quick_layout)
 
-        # 将多余高度留给页面底部的弹性空白，而不是拉伸“版本与更新”等区块
+        # 将多余高度留给页面底部的弹性空白，而不是拉伸"版本与更新"等区块
         layout.addStretch(1)
 
         # 存储需要主题更新的组件
@@ -795,6 +795,24 @@ class LaunchPage(BasePage):
         except Exception:
             pass
 
+        # 刷新按钮
+        btn_refresh = QtWidgets.QPushButton("刷 新")
+        btn_refresh.setCursor(Qt.PointingHandCursor)
+        btn_refresh.setStyleSheet(self.theme_manager.styles.primary_button_style())
+        try:
+            w1 = btn_refresh.sizeHint().width()
+            btn_refresh.setText("刷新中...")
+            w2 = btn_refresh.sizeHint().width()
+            btn_refresh.setText("刷 新")
+            btn_refresh.setMinimumWidth(max(w1, w2))
+        except Exception:
+            pass
+        try:
+            btn_refresh.clicked.connect(self._on_refresh_clicked)
+        except Exception:
+            pass
+        self._refresh_btn = btn_refresh
+
         # 超时选择器
         lbl_timeout = QtWidgets.QLabel("超时:")
         lbl_timeout.setStyleSheet(lbl_style)
@@ -829,17 +847,19 @@ class LaunchPage(BasePage):
         opts_row.addWidget(lbl_timeout)
         opts_row.addWidget(self.timeout_combo)
         opts_row.addStretch(1)
+        opts_row.addWidget(btn_refresh)
+        opts_row.addSpacing(8)
         opts_row.addWidget(btn_update)
         layout.addLayout(opts_row)
 
     def _on_update_clicked(self):
-        """点击更新时，按钮显示“更新中…”，禁用并变灰，完成后恢复"""
+        """点击更新时，按钮显示"更新中..."，禁用并变灰，完成后恢复"""
         btn = getattr(self, "_update_btn", None)
         if getattr(self.app, "_update_running", False):
             return
         if btn:
             try:
-                btn.setText("更新中…")
+                btn.setText("更新中...")
                 btn.setEnabled(False)
                 QtWidgets.QApplication.processEvents()
             except Exception:
@@ -857,6 +877,30 @@ class LaunchPage(BasePage):
                     btn.setEnabled(True)
                 except Exception:
                     pass
+
+    def _on_refresh_clicked(self):
+        """刷新版本信息"""
+        btn = getattr(self, "_refresh_btn", None)
+        if btn:
+            try:
+                btn.setText("刷新中...")
+                btn.setEnabled(False)
+                QtWidgets.QApplication.processEvents()
+            except Exception:
+                pass
+        try:
+            self.app.get_version_info("all")
+        except Exception:
+            pass
+        # 延迟恢复按钮状态
+        def _restore():
+            if btn:
+                try:
+                    btn.setText("刷 新")
+                    btn.setEnabled(True)
+                except Exception:
+                    pass
+        QtCore.QTimer.singleShot(1500, _restore)
 
     def _create_version_item(self, title, value_source, icon_str):
         """创建版本信息条目"""
@@ -1142,7 +1186,7 @@ class LaunchPage(BasePage):
     def update_theme(self, theme_styles=None):
         """更新主题"""
         super().update_theme(theme_styles)
-        
+
         # 确保 styles 对象是最新的
         if theme_styles is None:
              theme_styles = self.theme_manager.styles
@@ -1155,6 +1199,12 @@ class LaunchPage(BasePage):
         if hasattr(self, "_quick_dir_buttons"):
             for btn in self._quick_dir_buttons:
                 btn.setStyleSheet(theme_styles.secondary_button_style())
+
+        # 更新版本区域的按钮
+        if hasattr(self, "_update_btn"):
+            self._update_btn.setStyleSheet(theme_styles.primary_button_style())
+        if hasattr(self, "_refresh_btn"):
+            self._refresh_btn.setStyleSheet(theme_styles.primary_button_style())
 
         label_muted = self.theme_manager.colors.get('label_muted')
         text_color = self.theme_manager.colors.get('text')

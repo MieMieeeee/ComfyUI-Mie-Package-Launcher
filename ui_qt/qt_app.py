@@ -198,7 +198,12 @@ class VersionWorker(QtCore.QThread):
             pass
 
     def _check_gpu_driver(self):
-        """检测显卡驱动状态"""
+        """检测显卡驱动状态
+
+        分两步检测：
+        1. 显卡型号检测（nvidia-smi 或 pynvml）- 稳定，不会崩溃
+        2. PyTorch 兼容性检测（torch）- 如果崩溃说明兼容性问题
+        """
         import subprocess
         try:
             self.app.logger.info("UI: 开始检测显卡驱动状态...")
@@ -206,166 +211,209 @@ class VersionWorker(QtCore.QThread):
         except Exception:
             pass
 
-        try:
-            check_script = '''
+        # ========== 第一步：检测显卡型号（用 pynvml，稳定） ==========
+        gpu_name = None
+        driver_version = None
+
+        # 方法1: 使用 pynvml（最稳定）
+        pynvml_script = '''
 import sys
+import os
 import warnings
-# 抑制 pynvml 弃用警告
-warnings.filterwarnings("ignore", message=".*pynvml.*")
+warnings.filterwarnings("ignore")
+
 try:
-    import torch
-    # 先尝试获取设备数量，这会触发驱动检测
-    device_count = torch._C._cuda_getDeviceCount()
-    if device_count > 0:
-        # 尝试获取设备名称
-        try:
-            gpu_name = torch.cuda.get_device_name(0)
-        except Exception:
-            gpu_name = ""
-
-        # 检查 CUDA capability 兼容性
-        # 输出格式: STATUS:GPU_NAME|CAP_MAJOR|CAP_MINOR|MIN_CAP|MAX_CAP|COMPATIBLE
-        cap_major, cap_minor = 0, 0
-        min_cap, max_cap = 0.0, 0.0
-        compatible = True
-        try:
-            cap_major, cap_minor = torch.cuda.get_device_capability(0)
-            device_cap = cap_major + cap_minor / 10.0
-
-            # 解析 PyTorch 支持的架构列表
-            arch_list = torch.cuda.get_arch_list()
-            for arch in arch_list:
-                if arch.startswith("sm_"):
-                    try:
-                        val = int(arch[3:]) / 10.0
-                        if min_cap == 0.0 or val < min_cap:
-                            min_cap = val
-                        if max_cap == 0.0 or val > max_cap:
-                            max_cap = val
-                    except ValueError:
-                        pass
-
-            # 检查设备 capability 是否在支持范围内（低于最小版本为不兼容）
-            if min_cap > 0 and device_cap < min_cap:
-                compatible = False
-        except Exception:
-            pass
-
-        # 输出: OK/WARN:GPU_NAME|cap_major|cap_minor|min_cap|max_cap|compatible
-        status = "OK" if compatible else "WARN"
-        sys.stdout.write(f"{status}:{gpu_name or 'GPU'}|{cap_major}|{cap_minor}|{min_cap:.1f}|{max_cap:.1f}|{compatible}\\n")
-        sys.stdout.flush()
+    import pynvml
+    pynvml.nvmlInit()
+    count = pynvml.nvmlDeviceGetCount()
+    if count > 0:
+        handle = pynvml.nvmlDeviceGetHandleByIndex(0)
+        name = pynvml.nvmlDeviceGetName(handle)
+        if isinstance(name, bytes):
+            name = name.decode("utf-8")
+        driver = pynvml.nvmlSystemGetDriverVersion()
+        if isinstance(driver, bytes):
+            driver = driver.decode("utf-8")
+        # 计算能力需要通过其他方式获取，pynvml 不直接支持
+        print(f"OK:{name}|{driver}", flush=True)
     else:
-        sys.stdout.write("INFO:无可用GPU\\n")
-        sys.stdout.flush()
-except RuntimeError as e:
-    err_str = str(e)
-    if "NotSupported" in err_str:
-        sys.stdout.write("WARN:驱动过旧\\n")
-    elif "NotReady" in err_str:
-        sys.stdout.write("WARN:显卡未就绪\\n")
-    else:
-        sys.stdout.write("ERROR:" + err_str[:40] + "\\n")
-    sys.stdout.flush()
+        print("INFO:无GPU", flush=True)
+    pynvml.nvmlShutdown()
 except ImportError:
-    sys.stdout.write("INFO:torch未安装\\n")
-    sys.stdout.flush()
+    print("INFO:pynvml未安装", flush=True)
 except Exception as e:
-    sys.stdout.write("ERROR:" + str(e)[:40] + "\\n")
-    sys.stdout.flush()
+    print(f"ERROR:{e}", flush=True)
 '''
-            r = run_hidden([self.app.python_exec, "-c", check_script],
-                              capture_output=True, text=True, timeout=15)
-            result = r.stdout.strip()
-            returncode = r.returncode
 
-            # 记录详细日志
-            try:
-                self.app.logger.info("UI: 显卡检测 returncode=%d stdout='%s'", returncode, result[:100] if result else "(empty)")
-                if r.stderr:
-                    self.app.logger.info("UI: 显卡检测 stderr: %s", r.stderr.strip()[:200])
-            except Exception:
-                pass
-
-            if result.startswith("OK:") or result.startswith("WARN:"):
-                # 解析新格式: STATUS:GPU_NAME|CAP_MAJOR|CAP_MINOR|MIN_CAP|MAX_CAP|COMPATIBLE
-                is_warn = result.startswith("WARN:")
-                data_part = result[5:] if is_warn else result[3:]
-                parts = data_part.split("|")
-
-                if len(parts) >= 6:
+        try:
+            r = run_hidden([self.app.python_exec, "-c", pynvml_script],
+                          capture_output=True, text=True, timeout=15)
+            if r.returncode == 0 and r.stdout.strip().startswith("OK:"):
+                parts = r.stdout.strip()[3:].split("|")
+                if len(parts) >= 1:
                     gpu_name = parts[0].strip()
-                    cap_major = parts[1]
-                    cap_minor = parts[2]
-                    min_cap = parts[3]
-                    max_cap = parts[4]
-                    compatible = parts[5].lower() == "true"
-
-                    if not compatible:
-                        # 不兼容：显示警告
-                        status = f"⚠ {gpu_name} (CUDA {cap_major}.{cap_minor} < {min_cap} PyTorch不支持) - 仅支持CPU模式"
-                        try:
-                            self.app.logger.warning("UI: 显卡PyTorch不兼容 - %s", gpu_name)
-                        except Exception:
-                            pass
-                        return status
-                    else:
-                        # 兼容：显示正常
-                        status = f"✓ {gpu_name}"
-                        try:
-                            self.app.logger.info("UI: 显卡驱动检测成功 - %s", gpu_name)
-                        except Exception:
-                            pass
-                        return status
-                else:
-                    # 旧格式兼容
-                    gpu_name = data_part.strip()
-                    if is_warn:
-                        return "⚠ " + gpu_name
-                    return f"✓ {gpu_name}" if gpu_name else "✓ CUDA可用"
-
-            elif result.startswith("WARN:"):
-                # 旧的WARN格式（驱动过旧等）
-                status = "⚠ " + result[5:].strip() + " - 仅支持CPU模式"
+                if len(parts) >= 2:
+                    driver_version = parts[1].strip()
                 try:
-                    self.app.logger.warning("UI: 显卡驱动警告 - %s", result[5:].strip())
+                    self.app.logger.info("UI: pynvml 检测成功 - GPU=%s Driver=%s", gpu_name, driver_version)
                 except Exception:
                     pass
-                return status
-            elif result.startswith("INFO:"):
-                status = result[5:].strip() + " - 仅支持CPU模式"
-                try:
-                    self.app.logger.info("UI: 显卡驱动检测 - %s", status)
-                except Exception:
-                    pass
-                return status
-            elif result.startswith("ERROR:"):
-                try:
-                    self.app.logger.error("UI: 显卡驱动检测错误 - %s", result[6:])
-                except Exception:
-                    pass
-                return "检测失败"
-            else:
-                # result 为空或无法识别
-                try:
-                    self.app.logger.error("UI: 显卡驱动检测返回空或无法识别 - stdout='%s' stderr='%s'",
-                                          result[:50] if result else "(empty)",
-                                          r.stderr.strip()[:50] if r.stderr else "(empty)")
-                except Exception:
-                    pass
-                return "检测失败"
-        except subprocess.TimeoutExpired:
-            try:
-                self.app.logger.error("UI: 显卡驱动检测超时")
-            except Exception:
-                pass
-            return "检测超时"
         except Exception as e:
             try:
-                self.app.logger.error("UI: 显卡驱动检测异常 - %s", str(e))
+                self.app.logger.warning("UI: pynvml 检测失败 - %s", str(e))
             except Exception:
                 pass
-            return "检测失败"
+
+        # 方法2: 使用 nvidia-smi 作为后备
+        if not gpu_name:
+            try:
+                import shutil
+                nvidia_smi_path = shutil.which("nvidia-smi")
+                if nvidia_smi_path:
+                    r = run_hidden([nvidia_smi_path, "--query-gpu=name,driver_version", "--format=csv,noheader,nounits"],
+                                  capture_output=True, text=True, timeout=10)
+                    if r.returncode == 0 and r.stdout.strip():
+                        lines = r.stdout.strip().splitlines()
+                        if lines:
+                            parts = lines[0].split(",")
+                            if len(parts) >= 1:
+                                gpu_name = parts[0].strip()
+                            if len(parts) >= 2:
+                                driver_version = parts[1].strip()
+                            try:
+                                self.app.logger.info("UI: nvidia-smi 检测成功 - GPU=%s Driver=%s", gpu_name, driver_version)
+                            except Exception:
+                                pass
+            except Exception as e:
+                try:
+                    self.app.logger.warning("UI: nvidia-smi 检测失败 - %s", str(e))
+                except Exception:
+                    pass
+
+        # ========== 第二步：检测 PyTorch 兼容性 ==========
+        # 使用简单的检测脚本，如果崩溃说明兼容性问题
+        torch_script = '''
+import sys
+import os
+import warnings
+warnings.filterwarnings("ignore")
+
+# 设置 DLL 路径
+if sys.platform == "win32" and hasattr(os, "add_dll_directory"):
+    cuda_path = os.environ.get("CUDA_PATH") or os.environ.get("CUDA_HOME")
+    if cuda_path:
+        cuda_bin = os.path.join(cuda_path, "bin")
+        if os.path.isdir(cuda_bin):
+            try:
+                os.add_dll_directory(cuda_bin)
+            except Exception:
+                pass
+
+try:
+    import torch
+    # 只做最基本的检测
+    count = torch._C._cuda_getDeviceCount()
+    if count > 0:
+        # 获取计算能力
+        try:
+            cap = torch.cuda.get_device_capability(0)
+            print(f"OK:{cap[0]}.{cap[1]}", flush=True)
+        except Exception as e:
+            print(f"WARN:{e}", flush=True)
+    else:
+        print("INFO:无CUDA设备", flush=True)
+except ImportError:
+    print("INFO:torch未安装", flush=True)
+except RuntimeError as e:
+    err = str(e)
+    if "not compiled with CUDA" in err:
+        print("INFO:torch无CUDA支持", flush=True)
+    else:
+        print(f"ERROR:{err[:60]}", flush=True)
+except Exception as e:
+    print(f"ERROR:{str(e)[:60]}", flush=True)
+'''
+
+        # 准备环境变量
+        env = os.environ.copy()
+        cuda_path = os.environ.get("CUDA_PATH") or os.environ.get("CUDA_HOME")
+        if cuda_path:
+            cuda_bin = os.path.join(cuda_path, "bin")
+            if os.path.isdir(cuda_bin):
+                env["PATH"] = cuda_bin + os.pathsep + env.get("PATH", "")
+
+        # 只尝试一次，不重试（崩溃就是兼容性问题）
+        torch_result = ""
+        torch_returncode = -1
+        try:
+            r = run_hidden([self.app.python_exec, "-c", torch_script],
+                          capture_output=True, text=True, timeout=15, env=env)
+            torch_result = r.stdout.strip()
+            torch_returncode = r.returncode
+
+            try:
+                self.app.logger.info("UI: PyTorch 检测 returncode=%d stdout='%s'",
+                                    torch_returncode, torch_result[:100] if torch_result else "(empty)")
+            except Exception:
+                pass
+        except subprocess.TimeoutExpired:
+            torch_returncode = -1
+            try:
+                self.app.logger.warning("UI: PyTorch 检测超时")
+            except Exception:
+                pass
+        except Exception as e:
+            try:
+                self.app.logger.error("UI: PyTorch 检测异常 - %s", str(e))
+            except Exception:
+                pass
+
+        # ========== 生成结果 ==========
+        display_name = gpu_name or "GPU"
+
+        # PyTorch 崩溃（ACCESS_VIOLATION 等致命错误）
+        if torch_returncode != 0 and not torch_result:
+            try:
+                self.app.logger.error("UI: PyTorch CUDA 运行时崩溃 (returncode=%d)，可能是显卡架构兼容性问题", torch_returncode)
+            except Exception:
+                pass
+            return f"⚠ {display_name} (PyTorch CUDA不兼容，运行ComfyUI可能闪退)"
+
+        # 解析 PyTorch 结果
+        if torch_result.startswith("OK:"):
+            cap = torch_result[3:].strip()
+            try:
+                self.app.logger.info("UI: 显卡检测成功 - %s (CUDA %s)", display_name, cap)
+            except Exception:
+                pass
+            return f"✓ {display_name}"
+
+        elif torch_result.startswith("WARN:"):
+            warn_msg = torch_result[5:].strip()
+            try:
+                self.app.logger.warning("UI: 显卡兼容性警告 - %s", warn_msg)
+            except Exception:
+                pass
+            return f"⚠ {display_name} ({warn_msg})"
+
+        elif torch_result.startswith("INFO:"):
+            info_msg = torch_result[5:].strip()
+            if "torch未安装" in info_msg or "无CUDA" in info_msg:
+                return f"ℹ {display_name} ({info_msg})"
+            return f"ℹ {display_name} - 仅支持CPU模式"
+
+        elif torch_result.startswith("ERROR:"):
+            error_msg = torch_result[6:].strip()
+            try:
+                self.app.logger.error("UI: PyTorch 检测错误 - %s", error_msg)
+            except Exception:
+                pass
+            return f"⚠ {display_name} (PyTorch错误: {error_msg})"
+
+        # 无法识别的结果
+        if gpu_name:
+            return f"✓ {display_name}"
+        return "检测失败"
 
 from ui_qt.widgets.custom import CircleAvatar, NoWheelComboBox
 

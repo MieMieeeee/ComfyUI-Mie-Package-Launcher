@@ -409,8 +409,6 @@ class ThemeStyles:
         }}
         QPushButton#CollapseButton:pressed {{
             background: {self.c.get('btn_primary_pressed')};
-            padding-top: 2px;
-            padding-left: 2px;
         }}
         """
 
@@ -429,8 +427,6 @@ class ThemeStyles:
         }}
         QPushButton#ExpandButton:pressed {{
             background: {self.c.get('btn_primary_pressed')};
-            padding-top: 2px;
-            padding-left: 2px;
         }}
         """
 
@@ -576,8 +572,6 @@ class ThemeStyles:
         }}
         QPushButton:pressed {{
             background: {self.c.get('btn_primary_pressed')};
-            padding-top: 2px;
-            padding-left: 2px;
         }}
         QPushButton:disabled {{
             background: qlineargradient(x1:0, y1:0, x2:1, y2:1, stop:0 rgba(127, 86, 217, 90), stop:1 rgba(158, 119, 237, 90));
