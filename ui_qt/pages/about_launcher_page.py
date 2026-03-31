@@ -14,6 +14,7 @@ class AboutLauncherPage(BasePage):
     def __init__(self, app, theme_manager, parent=None):
         super().__init__(theme_manager, parent)
         self.app = app
+        self._checking_update = False
         self._setup_ui()
 
     def _setup_ui(self):
@@ -39,7 +40,7 @@ class AboutLauncherPage(BasePage):
         # 英雄卡片
         hero_card = self._create_hero_card()
         inner_layout.addWidget(hero_card)
-        inner_layout.addSpacing(15)
+        inner_layout.addSpacing(10)
 
         # 资源卡片（同关于我页面样式）
 
@@ -74,6 +75,12 @@ class AboutLauncherPage(BasePage):
 
         resources_card = self._create_card("相关链接", launcher_links)
         inner_layout.addWidget(resources_card)
+        inner_layout.addSpacing(15)
+
+        # 更新检查卡片
+        update_card = self._create_update_card()
+        inner_layout.addWidget(update_card)
+
         inner_layout.addStretch(1)
 
         outer.addWidget(container)
@@ -89,28 +96,27 @@ class AboutLauncherPage(BasePage):
         card = HeroCard("ComfyUI 启动器", self.theme_manager.styles)
 
         layout = card.layout()
-        layout.setContentsMargins(0, 40, 0, 30)
-        layout.setSpacing(25)
-        layout.setAlignment(QtCore.Qt.AlignCenter)
+        layout.setContentsMargins(0, 20, 0, 12)
+        layout.setSpacing(12)
+        layout.setAlignment(QtCore.Qt.AlignTop | QtCore.Qt.AlignHCenter)
 
         # Logo (Rabbit Image)
         logo_label = QtWidgets.QLabel()
-        logo_label.setMinimumHeight(140)
         logo_label.setAlignment(QtCore.Qt.AlignCenter)
-        logo_label.setSizePolicy(QtWidgets.QSizePolicy.Expanding, QtWidgets.QSizePolicy.Fixed)
+        logo_label.setSizePolicy(QtWidgets.QSizePolicy.Fixed, QtWidgets.QSizePolicy.Fixed)
+        logo_label.setStyleSheet("background: transparent;")
 
         # 尝试加载 Logo 图片
         rabbit_path = ASSETS.resolve_asset('rabbit.png')
         if rabbit_path and rabbit_path.exists():
-            r_str = str(rabbit_path).replace("\\", "/")
-            logo_label.setStyleSheet(f"""
-                QLabel {{
-                    background-color: transparent;
-                    image: url("{r_str}");
-                    image-position: center;
-                    background-repeat: no-repeat;
-                }}
-            """)
+            pix = QtGui.QPixmap(str(rabbit_path))
+            if not pix.isNull():
+                scaled = pix.scaled(180, 180, QtCore.Qt.KeepAspectRatio, QtCore.Qt.SmoothTransformation)
+                logo_label.setPixmap(scaled)
+                logo_label.setFixedSize(scaled.size())
+            else:
+                logo_label.setText("ComfyUI")
+                logo_label.setStyleSheet(f"font: bold 40px 'Microsoft YaHei UI'; color: {self.theme_manager.colors.get('text')}; background: transparent;")
         else:
             logo_label.setStyleSheet(f"""
                 QLabel {{
@@ -120,22 +126,17 @@ class AboutLauncherPage(BasePage):
                 }}
             """)
 
-        layout.addWidget(logo_label)
+        layout.addWidget(logo_label, 0, QtCore.Qt.AlignHCenter)
 
         # 描述文本和版本信息
-        version_str = self._get_build_badge_str()
-        title_color = self.theme_manager.colors.get('text')
+
         muted_color = self.theme_manager.colors.get('label_muted')
-        badge_bg = self.theme_manager.colors.get('badge_bg')
-        badge_text = self.theme_manager.colors.get('badge_text')
-        badge_color = badge_text
 
         desc = QtWidgets.QLabel(
             "<div style='text-align: center;'>"
             f"<p style='font-size: 14px; color: {muted_color}; line-height: 160%;'>"
             "专为 ComfyUI 设计的轻巧、友好的桌面管理工具。<br>"
-            "让环境配置、版本管理与日常使用变得简单而优雅。<br><br>"
-            f"<span style='background-color: {badge_bg}; border-radius: 4px; padding: 2px 8px; font-size: 12px; color: {badge_color};'>{version_str}</span>"
+            "让环境配置、版本管理与日常使用变得简单而优雅。"
             "</p>"
             "</div>"
         )
@@ -177,6 +178,217 @@ class AboutLauncherPage(BasePage):
             except Exception:
                 pass
         return card
+
+    def _create_update_card(self):
+        """创建更新检查卡片"""
+        from ui_qt.widgets.cards import InfoCard
+        from ui_qt.widgets.buttons import PrimaryButton
+
+        card = InfoCard(title="启动器更新", theme_styles=self.theme_manager.styles)
+
+        # 内容容器
+        content = QtWidgets.QWidget()
+        content.setStyleSheet("background: transparent;")
+        layout = QtWidgets.QHBoxLayout(content)
+        layout.setContentsMargins(0, 8, 0, 8)
+        layout.setSpacing(12)
+
+        # 版本信息
+        version_str = self._get_version_only()
+        version_label = QtWidgets.QLabel(f"当前版本: {version_str}")
+        version_label.setStyleSheet(f"""
+            color: {self.theme_manager.colors.get('text', '#E5E7EB')};
+            font: 10pt "Microsoft YaHei UI";
+            background: transparent;
+        """)
+        layout.addWidget(version_label)
+        layout.addStretch()
+
+        # 检查更新按钮
+        self.btn_check_update = QtWidgets.QPushButton("检查更新")
+        self.btn_check_update.setCursor(QtCore.Qt.PointingHandCursor)
+        btn_bg = self.theme_manager.colors.get('btn_primary_bg', '#6366F1')
+        btn_hover = self.theme_manager.colors.get('btn_primary_hover', '#818CF8')
+        btn_text = '#FFFFFF'
+        self.btn_check_update.setStyleSheet(f"""
+            QPushButton {{
+                background-color: {btn_bg};
+                color: {btn_text};
+                border: none;
+                border-radius: 6px;
+                padding: 8px 16px;
+                font: bold 10pt "Microsoft YaHei UI";
+            }}
+            QPushButton:hover {{
+                background-color: {btn_hover};
+            }}
+            QPushButton:disabled {{
+                background-color: {self.theme_manager.colors.get('btn_secondary_bg', '#374151')};
+                color: {self.theme_manager.colors.get('label_muted', '#9CA3AF')};
+            }}
+        """)
+        self.btn_check_update.clicked.connect(self._check_for_update)
+        layout.addWidget(self.btn_check_update)
+
+        try:
+            if card.layout():
+                card.layout().addWidget(content)
+        except Exception:
+            pass
+
+        return card
+
+    def _get_version_only(self) -> str:
+        """只获取版本号"""
+        try:
+            from pathlib import Path
+            import json, sys
+            p_base = Path(getattr(self, "base_root", Path.cwd()))
+            candidates = []
+            try:
+                candidates.append(Path(getattr(sys, "_MEIPASS", "")) / "build_parameters.json")
+            except Exception:
+                pass
+            try:
+                candidates.append(Path(sys.executable).resolve().parent / "build_parameters.json")
+            except Exception:
+                pass
+            try:
+                candidates.append(p_base / "build_parameters.json")
+            except Exception:
+                pass
+            for p in candidates:
+                try:
+                    if p and p.exists():
+                        with open(p, "r", encoding="utf-8") as f:
+                            params = json.load(f) or {}
+                        ver = str(params.get("version") or "").strip()
+                        if ver:
+                            return ver
+                except Exception:
+                    pass
+        except Exception:
+            pass
+        return "Dev Build"
+
+    def _check_for_update(self):
+        """检查更新"""
+        if self._checking_update:
+            return
+
+        self._checking_update = True
+        self.btn_check_update.setEnabled(False)
+        self.btn_check_update.setText("检查中...")
+
+        import threading
+
+        def worker():
+            try:
+                if hasattr(self.app, 'services') and hasattr(self.app.services, 'launcher_update'):
+                    info = self.app.services.launcher_update.check_update()
+                else:
+                    info = None
+
+                def on_result():
+                    self._checking_update = False
+                    self.btn_check_update.setEnabled(True)
+                    self.btn_check_update.setText("检查更新")
+
+                    if info and info.get("has_update"):
+                        self._show_update_dialog(info)
+                    elif info and info.get("reason") == "not_configured":
+                        # 更新服务尚未配置（404）
+                        from ui_qt.widgets.dialog_helper import DialogHelper
+                        DialogHelper.show_info(
+                            self.window(),
+                            "检查更新",
+                            f"当前版本: {info.get('current', '?')}\n\n暂无更新信息，请关注官方公告获取最新版本。"
+                        )
+                    elif info:
+                        # 已是最新版本
+                        from ui_qt.widgets.dialog_helper import DialogHelper
+                        DialogHelper.show_info(
+                            self.window(),
+                            "检查更新",
+                            f"当前已是最新版本 ({info.get('current', '?')})"
+                        )
+                    else:
+                        from ui_qt.widgets.dialog_helper import DialogHelper
+                        DialogHelper.show_warning(
+                            self.window(),
+                            "检查更新",
+                            "检查更新失败，请检查网络连接后重试"
+                        )
+
+                self.app.ui_post(on_result)
+
+            except Exception as e:
+                def on_error():
+                    self._checking_update = False
+                    self.btn_check_update.setEnabled(True)
+                    self.btn_check_update.setText("检查更新")
+                    from ui_qt.widgets.dialog_helper import DialogHelper
+                    DialogHelper.show_warning(self.window(), "检查更新", f"检查更新失败: {e}")
+                self.app.ui_post(on_error)
+
+        threading.Thread(target=worker, daemon=True).start()
+
+    def _show_update_dialog(self, info: dict):
+        """显示更新对话框"""
+        from ui_qt.widgets.update_dialog import UpdateDialog
+
+        dialog = UpdateDialog(
+            parent=self.window(),
+            update_info=info,
+            theme_manager=self.theme_manager
+        )
+
+        # 连接信号
+        dialog.downloadRequested.connect(lambda: self._start_download(dialog, info))
+
+        dialog.exec_()
+
+    def _start_download(self, dialog, info: dict):
+        """开始下载更新"""
+        import threading
+
+        def worker():
+            try:
+                service = self.app.services.launcher_update
+
+                # 获取下载 URL
+                url = info.get("download_url", "")
+                backup_urls = info.get("backup_urls", [])
+
+                # 定义进度回调
+                def on_progress(current, total):
+                    self.app.ui_post(lambda: dialog.set_progress(current, total))
+
+                # 尝试主 URL
+                downloaded_file = None
+                if url:
+                    downloaded_file = service.download_update(url, on_progress)
+
+                # 尝试备用 URL
+                if not downloaded_file:
+                    for backup_url in backup_urls:
+                        downloaded_file = service.download_update(backup_url, on_progress)
+                        if downloaded_file:
+                            break
+
+                if downloaded_file:
+                    # 准备更新
+                    if service.prepare_update(downloaded_file):
+                        self.app.ui_post(lambda: dialog.show_complete())
+                    else:
+                        self.app.ui_post(lambda: dialog.show_error("准备更新失败"))
+                else:
+                    self.app.ui_post(lambda: dialog.show_error("下载失败"))
+
+            except Exception as e:
+                self.app.ui_post(lambda: dialog.show_error(str(e)))
+
+        threading.Thread(target=worker, daemon=True).start()
 
     def _handle_link_click(self, url: str):
         """处理链接点击"""

@@ -9,6 +9,13 @@ import json
 import time
 import shutil
 import subprocess
+import argparse
+
+
+def parse_args():
+    parser = argparse.ArgumentParser(description='ComfyUI启动器打包脚本')
+    parser.add_argument('--test', action='store_true', help='打包为测试版本')
+    return parser.parse_args()
 
 
 def get_project_dir():
@@ -25,7 +32,7 @@ def find_python_exe():
     return sys.executable
 
 
-def update_build_parameters():
+def update_build_parameters(is_test=False):
     """更新构建参数"""
     project_dir = get_project_dir()
     bp_path = os.path.join(project_dir, 'build_parameters.json')
@@ -46,6 +53,7 @@ def update_build_parameters():
     params['mode'] = 'nuitka_release'
     params['built_at'] = now
     params['builder'] = '黎黎原上咩'
+    params['channel'] = 'test' if is_test else 'stable'
 
     try:
         with open(bp_path, 'w', encoding='utf-8') as f:
@@ -60,7 +68,7 @@ def update_build_parameters():
     return params
 
 
-def build_nuitka():
+def build_nuitka(is_test=False):
     """使用 Nuitka 构建 standalone 版本"""
     print("=" * 60)
     print("ComfyUI启动器 Nuitka 构建脚本 V2")
@@ -72,14 +80,19 @@ def build_nuitka():
     print(f"[环境] Python: {python_exe}")
     print(f"[环境] 项目目录: {project_dir}")
 
-    # 更新版本参数
-    params = update_build_parameters()
+    if is_test:
+        print("[通道] 测试版本")
+    else:
+        print("[通道] 正式版本")
+
+    params = update_build_parameters(is_test=is_test)
     print(f"[版本] {params.get('version', 'unknown')}")
 
-    # 输出配置
-    # 内部 exe 使用英文名，避免 Enigma Virtual Box 打包后与外层 exe 同名冲突
     internal_name = "ComfyUI_Launcher_Internal"
-    output_name = "ComfyUI启动器"  # 最终输出目录名
+    if is_test:
+        output_name = "ComfyUI启动器_test"
+    else:
+        output_name = "ComfyUI启动器"
     dist_base = os.path.join(project_dir, "dist")
     dist_dir = os.path.join(dist_base, f"{output_name}.dist")
     exe_path = os.path.join(dist_dir, f"{internal_name}.exe")
@@ -149,6 +162,7 @@ def build_nuitka():
         '--follow-import-to=ui_qt',
         '--follow-import-to=launcher',
         '--follow-import-to=services',
+        '--follow-import-to=headless_app',
 
         # 图标
         '--windows-icon-from-ico=assets/rabbit.ico',
@@ -161,7 +175,7 @@ def build_nuitka():
         f'--product-version={params.get("version", "1.0.0").replace("v", "")}',
 
         # 主脚本
-        'comfyui_launcher_pyqt.py',
+        '__main__.py',
     ]
 
     print("\n[构建] 开始 Nuitka 编译...")
@@ -178,7 +192,7 @@ def build_nuitka():
             sys.exit(1)
 
         # 检查输出（Nuitka 实际输出目录基于脚本名）
-        actual_dist_dir = os.path.join(dist_base, "comfyui_launcher_pyqt.dist")
+        actual_dist_dir = os.path.join(dist_base, "__main__.dist")
         actual_exe = os.path.join(actual_dist_dir, f"{internal_name}.exe")
 
         if os.path.exists(actual_exe):
@@ -222,4 +236,5 @@ def build_nuitka():
 
 
 if __name__ == "__main__":
-    build_nuitka()
+    args = parse_args()
+    build_nuitka(is_test=args.test)

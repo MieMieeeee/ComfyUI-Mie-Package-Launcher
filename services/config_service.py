@@ -12,9 +12,8 @@ class ConfigService(IConfigService):
     def load(self) -> dict:
         return self.cm.load_config()
 
-    def save(self, data: dict | None = None) -> None:
-        result = self.cm.save_config(data)
-        # 返回保存后的配置，以便调用者可以同步更新自己的引用
+    def save(self, data: dict | None = None) -> dict:
+        self.cm.save_config(data)
         return self.cm.get_config()
 
     def get(self, key_path: str, default: Any = None) -> Any:

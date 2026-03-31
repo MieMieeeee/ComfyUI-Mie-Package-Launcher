@@ -2,11 +2,11 @@
 
 
 a = Analysis(
-    ['comfyui_launcher_pyqt.py'],
+    ['__main__.py'],
     pathex=[],
     binaries=[],
     datas=[('assets/about_me.png', 'assets'), ('assets/comfyui.png', 'assets'), ('assets/rabbit.png', 'assets'), ('assets/rabbit.ico', 'assets'), ('build_parameters.json', '.')],
-    hiddenimports=['threading', 'json', 'pathlib', 'subprocess', 'webbrowser', 'tempfile', 'atexit', 'PyQt5', 'PyQt5.QtWidgets', 'PyQt5.QtCore', 'PyQt5.QtGui', 'core.process_manager', 'config.manager', 'utils.logging', 'utils.paths', 'utils.net', 'utils.pip', 'utils.common', 'ui.assets_helper', 'ui_qt.qt_app'],
+    hiddenimports=['threading', 'json', 'pathlib', 'subprocess', 'webbrowser', 'tempfile', 'atexit', 'PyQt5', 'PyQt5.QtWidgets', 'PyQt5.QtCore', 'PyQt5.QtGui', 'core.process_manager', 'config.manager', 'utils.logging', 'utils.paths', 'utils.net', 'utils.pip', 'utils.common', 'ui.assets_helper', 'ui_qt.qt_app', 'headless_app', 'core.cli_start', 'core.probe'],
     hookspath=[],
     hooksconfig={},
     runtime_hooks=[],
@@ -29,7 +29,7 @@ exe = EXE(
     upx=True,
     upx_exclude=[],
     runtime_tmpdir=None,
-    console=False,
+    console=True,
     disable_windowed_traceback=False,
     argv_emulation=False,
     target_arch=None,

@@ -4,6 +4,12 @@ import os
 
 
 def get_comfy_root(paths_cfg: dict) -> Path:
+    """Resolve the ComfyUI root from a simple paths config dict.
+
+    This helper is used in non-app contexts (e.g. headless tools) where only
+    a plain mapping is available. It preserves the existing behaviour of
+    resolving the base directory first and then appending ``ComfyUI``.
+    """
     try:
         base = Path((paths_cfg or {}).get("comfyui_root") or ".").resolve()
     except Exception:
@@ -29,6 +35,34 @@ def plugins_dir(comfy_root: Path) -> Path:
 
 def workflows_dir(comfy_root: Path) -> Path:
     return comfy_root / "user" / "default" / "workflows"
+
+
+def comfy_root_from_config(app_config: dict | None) -> Path:
+    """Resolve the ComfyUI root from a full application config.
+
+    This deduplicates the common pattern used in workers/services that need
+    to honour ``config["paths"]["comfyui_root"]`` while keeping existing
+    fallbacks intact:
+
+    - When ``paths.comfyui_root`` is present, resolve it and append
+      ``ComfyUI``.
+    - On any error, fall back to ``Path(".").resolve() / "ComfyUI"``.
+
+    The behaviour matches the previous inline implementations in
+    ``core.version_workers.BaseVersionWorker._get_paths`` so that callers
+    can adopt this helper without changing observable behaviour.
+    """
+    try:
+        paths = app_config.get("paths", {}) if isinstance(app_config, dict) else {}
+    except Exception:
+        paths = {}
+    try:
+        base = Path(paths.get("comfyui_root") or ".").resolve()
+        root = (base / "ComfyUI").resolve()
+    except Exception:
+        base = Path(".").resolve()
+        root = base / "ComfyUI"
+    return root
 
 
 def resolve_base_root() -> Path:
@@ -98,7 +132,7 @@ def resolve_python_exec(comfy_root: Path, configured_path: str) -> Path:
         base = comfy_root.resolve().parent
     except Exception:
         base = Path(".").resolve()
-    py = base / "python_embeded" / ("python.exe" if os.name == 'nt' else "python")
+    py = base / "python_embeded" / ("python.exe" if os.name == "nt" else "python")
     try:
         return py.resolve()
     except Exception:

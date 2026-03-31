@@ -1,0 +1,35 @@
+[build-system]
+requires = ["setuptools>=61.0", "wheel"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "comfyui-mie-package-launcher"
+version = "0.1.0"
+description = "ComfyUI Package Launcher"
+requires-python = ">=3.8"
+dependencies = [
+    "pyinstaller>=5.0.0",
+    "PyQt5>=5.15.0",
+    "PyYAML>=6.0",
+]
+
+[project.optional-dependencies]
+test = [
+    "pytest>=7.0.0",
+    "pytest-qt>=4.0.0",
+    "pytest-cov>=4.0.0",
+    "pytest-mock>=3.0.0",
+    "pytest-xdist>=3.0.0",
+]
+
+[tool.pytest.ini_options]
+minversion = "7.0"
+testpaths = ["tests"]
+addopts = "-ra -q --strict-markers"
+
+markers = [
+    "ui: marks tests as UI tests (require Qt display)",
+    "integration: marks tests as integration tests",
+    "slow: marks tests as slow (deselect with '-m \"not slow\"')",
+    "serial: marks tests that must run serially",
+]

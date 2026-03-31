@@ -38,7 +38,7 @@ class AboutComfyUIPage(BasePage):
         # 英雄卡片
         hero_card = self._create_hero_card()
         inner_layout.addWidget(hero_card)
-        inner_layout.addSpacing(15)
+        inner_layout.addSpacing(10)
 
         # ComfyUI 相关链接（按关于我页面的样式，聚合为单卡片）
         comfy_links = [
@@ -87,13 +87,13 @@ class AboutComfyUIPage(BasePage):
         card = HeroCard("ComfyUI", self.theme_manager.styles)
 
         layout = card.layout()
-        layout.setContentsMargins(0, 40, 0, 30)
-        layout.setSpacing(25)
-        layout.setAlignment(QtCore.Qt.AlignCenter)
+        layout.setContentsMargins(0, 20, 0, 12)
+        layout.setSpacing(12)
+        layout.setAlignment(QtCore.Qt.AlignTop | QtCore.Qt.AlignHCenter)
 
         # Logo (Banner Image)
         banner_label = QtWidgets.QLabel()
-        banner_label.setMinimumHeight(140)
+        banner_label.setFixedHeight(120)
         banner_label.setAlignment(QtCore.Qt.AlignCenter)
         banner_label.setSizePolicy(QtWidgets.QSizePolicy.Expanding, QtWidgets.QSizePolicy.Fixed)
 

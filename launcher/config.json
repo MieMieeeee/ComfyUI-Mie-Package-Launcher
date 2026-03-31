@@ -25,12 +25,12 @@
     "ui_scale": 0.8
   },
   "paths": {
-    "comfyui_root": "F:/ComfyUI_Mie_2026_V8.0",
+    "comfyui_root": "E:/FF/ComfyUI_Mie_2026_V8.0",
     "python_embeded": "python_embeded",
     "custom_nodes": "ComfyUI/custom_nodes",
     "bat_files_directory": ".",
     "comfyui_path": "F:\\ComfyUI_Mie_V7.0\\ComfyUI",
-    "python_path": "F:\\ComfyUI_Mie_2026_V8.0\\python_embeded\\python.exe"
+    "python_path": "E:\\FF\\ComfyUI_Mie_2026_V8.0\\python_embeded\\python.exe"
   },
   "advanced": {
     "check_environment_changes": true,
@@ -53,7 +53,7 @@
   },
   "integrations": {
     "comfyui_manager_git_set": true,
-    "comfyui_manager_git_path": "F:\\ComfyUI_Mie_2026_V8.0\\tools\\PortableGit\\bin\\git.exe"
+    "comfyui_manager_git_path": "E:\\FF\\ComfyUI_Mie_2026_V8.0\\tools\\PortableGit\\bin\\git.exe"
   },
   "version_preferences": {
     "stable_only": false,

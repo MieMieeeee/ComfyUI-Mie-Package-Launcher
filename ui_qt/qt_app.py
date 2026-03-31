@@ -1,3 +1,4 @@
+# pyright: reportArgumentType=false, reportAttributeAccessIssue=false, reportUndefinedVariable=false, reportOptionalMemberAccess=false, reportIncompatibleMethodOverride=false
 import os
 import sys
 import subprocess
@@ -10,12 +11,25 @@ from config.manager import ConfigManager
 from services.di import ServiceContainer
 from core.version_service import refresh_version_info
 from core.process_manager import ProcessManager
+from core import process_events
+from core.version_workers import (
+    PythonVersionWorker,
+    TorchVersionWorker,
+    ComfyUIVersionWorker,
+    FrontendVersionWorker,
+    TemplateVersionWorker,
+    GitStatusWorker,
+    GpuCheckWorker,
+    BaseVersionWorker,
+)
+from core.app_state import AppState
 from services.git_service import GitService
 from utils import common as COMMON
 from ui import assets_helper as ASSETS
 from utils import pip as PIPUTILS
 from utils.common import run_hidden
 from ui_qt.theme_manager import ThemeManager
+from ui_qt.widgets.dialog_helper import DialogHelper
 from ui_qt.theme_styles import ThemeStyles, ThemeColors
 from ui_qt.pages.launch_page import LaunchPage
 from ui_qt.pages.version_page import VersionPage
@@ -29,8 +43,10 @@ class Var:
     def __init__(self, value=""):
         self._v = value
         self._watchers = []
+
     def get(self):
         return self._v
+
     def set(self, v):
         self._v = v
         for w in self._watchers:
@@ -38,22 +54,28 @@ class Var:
                 w(v)
             except Exception:
                 pass
+
     def bind(self, fn):
         self._watchers.append(fn)
+
 
 class BoolVar:
     def __init__(self, value=False):
         self._v = bool(value)
+
     def get(self):
         return self._v
+
     def set(self, v):
         self._v = bool(v)
+
 
 class BigBtnProxy:
     def __init__(self):
         self._btn = None
         self._state = "idle"
         self._text = None
+
     def attach(self, qbtn):
         self._btn = qbtn
         if self._text is not None:
@@ -61,8 +83,10 @@ class BigBtnProxy:
                 qbtn.setText(self._text)
             except Exception:
                 pass
+
     def set_state(self, s):
         self._state = s
+
     def set_text(self, t):
         self._text = t
         if self._btn is not None:
@@ -71,21 +95,47 @@ class BigBtnProxy:
             except Exception:
                 pass
 
+
 class QtRootAdapter:
     def after(self, ms, fn):
-        QtCore.QTimer.singleShot(int(ms), fn)
+        single_shot = getattr(QtCore.QTimer, "singleShot")
+        delay = max(0, int(ms))
+        app = QtWidgets.QApplication.instance()
+        if app is not None:
+            try:
+                single_shot(delay, app, fn)
+                return
+            except TypeError:
+                pass
+        single_shot(delay, fn)
+
     def after_idle(self, fn):
-        QtCore.QTimer.singleShot(0, fn)
+        self.after(0, fn)
+
+
 class UiInvoker(QtCore.QObject):
-    invoke_signal = QtCore.pyqtSignal(object)
+    _invoke_signal = QtCore.pyqtSignal(object)
+
     def __init__(self, parent=None):
         super().__init__(parent)
-        self.invoke_signal.connect(self._on_invoke)
+        self._qt_invoke_signal = type(self)._invoke_signal.__get__(self, type(self))
+        self._qt_invoke_signal.connect(self._on_invoke)
+
+    @property
+    def invoke_signal(self):
+        return type(self)._invoke_signal
+
+    def emit_invoke(self, fn):
+        self._qt_invoke_signal.emit(fn)
+
     def _on_invoke(self, fn):
         try:
             fn()
         except Exception:
             pass
+
+
+# 保留旧的 VersionWorker 类作为备用（向后兼容）
 class VersionWorker(QtCore.QThread):
     pythonVersion = QtCore.pyqtSignal(str)
     torchVersion = QtCore.pyqtSignal(str)
@@ -94,13 +144,19 @@ class VersionWorker(QtCore.QThread):
     coreVersion = QtCore.pyqtSignal(str)
     gitStatus = QtCore.pyqtSignal(str)
     gpuDriverStatus = QtCore.pyqtSignal(str)
+
     def __init__(self, app, scope="all"):
         super().__init__()
         self.app = app
         self.scope = scope
+
     def run(self):
         try:
-            paths = self.app.config.get("paths", {}) if isinstance(self.app.config, dict) else {}
+            paths = (
+                self.app.config.get("paths", {})
+                if isinstance(self.app.config, dict)
+                else {}
+            )
             base = Path(paths.get("comfyui_root") or ".").resolve()
             root = (base / "ComfyUI").resolve()
         except Exception:
@@ -120,32 +176,64 @@ class VersionWorker(QtCore.QThread):
             return
 
         try:
-            self.app.logger.info("UI: 版本线程启动 scope=%s root=%s py=%s", str(self.scope), str(root), str(self.app.python_exec))
+            self.app.logger.info(
+                "UI: 版本线程启动 scope=%s root=%s py=%s",
+                str(self.scope),
+                str(root),
+                str(self.app.python_exec),
+            )
         except Exception:
             pass
         try:
             if self.scope in ("all", "python_related"):
                 try:
-                    r = run_hidden([self.app.python_exec, "--version"], capture_output=True, text=True, timeout=10)
-                    val = r.stdout.strip().replace("Python ", "") if r.returncode == 0 else "获取失败"
+                    r = run_hidden(
+                        [self.app.python_exec, "--version"],
+                        capture_output=True,
+                        text=True,
+                        timeout=10,
+                    )
+                    val = (
+                        r.stdout.strip().replace("Python ", "")
+                        if r.returncode == 0
+                        else "获取失败"
+                    )
                     self.pythonVersion.emit(val)
                     self.app.logger.info("UI: Python 版本=%s", val)
                 except Exception:
                     self.pythonVersion.emit("获取失败")
                 try:
-                    v = PIPUTILS.get_package_version("torch", self.app.python_exec, logger=self.app.logger)
+                    v = PIPUTILS.get_package_version(
+                        "torch", self.app.python_exec, logger=self.app.logger
+                    )
                     self.torchVersion.emit(v or "未安装")
                     self.app.logger.info("UI: Torch 版本=%s", v or "未安装")
                 except Exception:
                     self.torchVersion.emit("获取失败")
                 try:
-                    vf = PIPUTILS.get_package_version("comfyui-frontend-package", self.app.python_exec, logger=self.app.logger) or PIPUTILS.get_package_version("comfyui_frontend_package", self.app.python_exec, logger=self.app.logger)
+                    vf = PIPUTILS.get_package_version(
+                        "comfyui-frontend-package",
+                        self.app.python_exec,
+                        logger=self.app.logger,
+                    ) or PIPUTILS.get_package_version(
+                        "comfyui_frontend_package",
+                        self.app.python_exec,
+                        logger=self.app.logger,
+                    )
                     self.frontendVersion.emit(vf or "未安装")
                     self.app.logger.info("UI: 前端包版本=%s", vf or "未安装")
                 except Exception:
                     self.frontendVersion.emit("获取失败")
                 try:
-                    vt = PIPUTILS.get_package_version("comfyui-workflow-templates", self.app.python_exec, logger=self.app.logger) or PIPUTILS.get_package_version("comfyui_workflow_templates", self.app.python_exec, logger=self.app.logger)
+                    vt = PIPUTILS.get_package_version(
+                        "comfyui-workflow-templates",
+                        self.app.python_exec,
+                        logger=self.app.logger,
+                    ) or PIPUTILS.get_package_version(
+                        "comfyui_workflow_templates",
+                        self.app.python_exec,
+                        logger=self.app.logger,
+                    )
                     self.templateVersion.emit(vt or "未安装")
                     self.app.logger.info("UI: 模板库版本=%s", vt or "未安装")
                 except Exception:
@@ -168,9 +256,21 @@ class VersionWorker(QtCore.QThread):
                     else:
                         self.gitStatus.emit(git_text or "")
                     if git_cmd and root.exists():
-                        r = run_hidden([git_cmd, "describe", "--tags", "--abbrev=0"], cwd=str(root), capture_output=True, text=True, timeout=8)
+                        r = run_hidden(
+                            [git_cmd, "describe", "--tags", "--abbrev=0"],
+                            cwd=str(root),
+                            capture_output=True,
+                            text=True,
+                            timeout=8,
+                        )
                         if r.returncode != 0:
-                            r2 = run_hidden([git_cmd, "rev-parse", "--short", "HEAD"], cwd=str(root), capture_output=True, text=True, timeout=6)
+                            r2 = run_hidden(
+                                [git_cmd, "rev-parse", "--short", "HEAD"],
+                                cwd=str(root),
+                                capture_output=True,
+                                text=True,
+                                timeout=6,
+                            )
                             c = r2.stdout.strip() if r2.returncode == 0 else ""
                             try:
                                 if hasattr(self.app, "comfyui_commit"):
@@ -180,7 +280,13 @@ class VersionWorker(QtCore.QThread):
                             self.coreVersion.emit(f"（{c}）" if c else "未找到")
                         else:
                             tag = r.stdout.strip()
-                            r2 = run_hidden([git_cmd, "rev-parse", "--short", "HEAD"], cwd=str(root), capture_output=True, text=True, timeout=8)
+                            r2 = run_hidden(
+                                [git_cmd, "rev-parse", "--short", "HEAD"],
+                                cwd=str(root),
+                                capture_output=True,
+                                text=True,
+                                timeout=8,
+                            )
                             c = r2.stdout.strip() if r2.returncode == 0 else ""
                             try:
                                 if hasattr(self.app, "comfyui_commit"):
@@ -205,6 +311,7 @@ class VersionWorker(QtCore.QThread):
         2. PyTorch 兼容性检测（torch）- 如果崩溃说明兼容性问题
         """
         import subprocess
+
         try:
             self.app.logger.info("UI: 开始检测显卡驱动状态...")
             self.app.logger.info("UI: python_exec=%s", self.app.python_exec)
@@ -216,7 +323,7 @@ class VersionWorker(QtCore.QThread):
         driver_version = None
 
         # 方法1: 使用 pynvml（最稳定）
-        pynvml_script = '''
+        pynvml_script = """
 import sys
 import os
 import warnings
@@ -243,11 +350,15 @@ except ImportError:
     print("INFO:pynvml未安装", flush=True)
 except Exception as e:
     print(f"ERROR:{e}", flush=True)
-'''
+"""
 
         try:
-            r = run_hidden([self.app.python_exec, "-c", pynvml_script],
-                          capture_output=True, text=True, timeout=15)
+            r = run_hidden(
+                [self.app.python_exec, "-c", pynvml_script],
+                capture_output=True,
+                text=True,
+                timeout=15,
+            )
             if r.returncode == 0 and r.stdout.strip().startswith("OK:"):
                 parts = r.stdout.strip()[3:].split("|")
                 if len(parts) >= 1:
@@ -255,7 +366,11 @@ except Exception as e:
                 if len(parts) >= 2:
                     driver_version = parts[1].strip()
                 try:
-                    self.app.logger.info("UI: pynvml 检测成功 - GPU=%s Driver=%s", gpu_name, driver_version)
+                    self.app.logger.info(
+                        "UI: pynvml 检测成功 - GPU=%s Driver=%s",
+                        gpu_name,
+                        driver_version,
+                    )
                 except Exception:
                     pass
         except Exception as e:
@@ -268,10 +383,19 @@ except Exception as e:
         if not gpu_name:
             try:
                 import shutil
+
                 nvidia_smi_path = shutil.which("nvidia-smi")
                 if nvidia_smi_path:
-                    r = run_hidden([nvidia_smi_path, "--query-gpu=name,driver_version", "--format=csv,noheader,nounits"],
-                                  capture_output=True, text=True, timeout=10)
+                    r = run_hidden(
+                        [
+                            nvidia_smi_path,
+                            "--query-gpu=name,driver_version",
+                            "--format=csv,noheader,nounits",
+                        ],
+                        capture_output=True,
+                        text=True,
+                        timeout=10,
+                    )
                     if r.returncode == 0 and r.stdout.strip():
                         lines = r.stdout.strip().splitlines()
                         if lines:
@@ -281,7 +405,11 @@ except Exception as e:
                             if len(parts) >= 2:
                                 driver_version = parts[1].strip()
                             try:
-                                self.app.logger.info("UI: nvidia-smi 检测成功 - GPU=%s Driver=%s", gpu_name, driver_version)
+                                self.app.logger.info(
+                                    "UI: nvidia-smi 检测成功 - GPU=%s Driver=%s",
+                                    gpu_name,
+                                    driver_version,
+                                )
                             except Exception:
                                 pass
             except Exception as e:
@@ -292,7 +420,7 @@ except Exception as e:
 
         # ========== 第二步：检测 PyTorch 兼容性 ==========
         # 使用简单的检测脚本，如果崩溃说明兼容性问题
-        torch_script = '''
+        torch_script = """
 import sys
 import os
 import warnings
@@ -332,7 +460,7 @@ except RuntimeError as e:
         print(f"ERROR:{err[:60]}", flush=True)
 except Exception as e:
     print(f"ERROR:{str(e)[:60]}", flush=True)
-'''
+"""
 
         # 准备环境变量
         env = os.environ.copy()
@@ -346,14 +474,22 @@ except Exception as e:
         torch_result = ""
         torch_returncode = -1
         try:
-            r = run_hidden([self.app.python_exec, "-c", torch_script],
-                          capture_output=True, text=True, timeout=15, env=env)
+            r = run_hidden(
+                [self.app.python_exec, "-c", torch_script],
+                capture_output=True,
+                text=True,
+                timeout=15,
+                env=env,
+            )
             torch_result = r.stdout.strip()
             torch_returncode = r.returncode
 
             try:
-                self.app.logger.info("UI: PyTorch 检测 returncode=%d stdout='%s'",
-                                    torch_returncode, torch_result[:100] if torch_result else "(empty)")
+                self.app.logger.info(
+                    "UI: PyTorch 检测 returncode=%d stdout='%s'",
+                    torch_returncode,
+                    torch_result[:100] if torch_result else "(empty)",
+                )
             except Exception:
                 pass
         except subprocess.TimeoutExpired:
@@ -374,7 +510,10 @@ except Exception as e:
         # PyTorch 崩溃（ACCESS_VIOLATION 等致命错误）
         if torch_returncode != 0 and not torch_result:
             try:
-                self.app.logger.error("UI: PyTorch CUDA 运行时崩溃 (returncode=%d)，可能是显卡架构兼容性问题", torch_returncode)
+                self.app.logger.error(
+                    "UI: PyTorch CUDA 运行时崩溃 (returncode=%d)，可能是显卡架构兼容性问题",
+                    torch_returncode,
+                )
             except Exception:
                 pass
             return f"⚠ {display_name} (PyTorch CUDA不兼容，运行ComfyUI可能闪退)"
@@ -383,7 +522,9 @@ except Exception as e:
         if torch_result.startswith("OK:"):
             cap = torch_result[3:].strip()
             try:
-                self.app.logger.info("UI: 显卡检测成功 - %s (CUDA %s)", display_name, cap)
+                self.app.logger.info(
+                    "UI: 显卡检测成功 - %s (CUDA %s)", display_name, cap
+                )
             except Exception:
                 pass
             return f"✓ {display_name}"
@@ -415,14 +556,19 @@ except Exception as e:
             return f"✓ {display_name}"
         return "检测失败"
 
+
 from ui_qt.widgets.custom import CircleAvatar, NoWheelComboBox
 
-class PyQtLauncher(QtWidgets.QMainWindow):
+
+class PyQtLauncher(QtWidgets.QMainWindow, process_events.ProcessCallback):
     def __init__(self):
         # 高分屏适配已在 comfyui_launcher_pyqt.py 中完成（必须在 QApplication 创建之前）
-        self.qt_app = QtWidgets.QApplication.instance() or QtWidgets.QApplication(sys.argv)
+        self.qt_app = QtWidgets.QApplication.instance() or QtWidgets.QApplication(
+            sys.argv
+        )
         super().__init__()
         self._invoker = UiInvoker(self)
+
         def _qt_msg_handler(msg_type, context, message):
             try:
                 if "libpng warning: bKGD: invalid" in (message or ""):
@@ -438,6 +584,7 @@ class PyQtLauncher(QtWidgets.QMainWindow):
                 sys.stderr.write(str(message) + "\n")
             except Exception:
                 pass
+
         try:
             self._prev_qt_handler = QtCore.qInstallMessageHandler(_qt_msg_handler)
         except Exception:
@@ -449,9 +596,16 @@ class PyQtLauncher(QtWidgets.QMainWindow):
         cfg_file = (Path.cwd() / "launcher" / "config.json").resolve()
         self.config_manager = ConfigManager(cfg_file, self.logger)
         self.config = self.config_manager.load_config()
-        comfy_base = Path(self.config.get("paths", {}).get("comfyui_root") or ".").resolve()
+        comfy_base = Path(
+            self.config.get("paths", {}).get("comfyui_root") or "."
+        ).resolve()
         comfy_path = (comfy_base / "ComfyUI").resolve()
-        py_exec = PATHS.resolve_python_exec(comfy_path, self.config.get("paths", {}).get("python_path", "python_embeded/python.exe"))
+        py_exec = PATHS.resolve_python_exec(
+            comfy_path,
+            self.config.get("paths", {}).get(
+                "python_path", "python_embeded/python.exe"
+            ),
+        )
         self.python_exec = str(py_exec)
         self.config.setdefault("paths", {})
         self.config["paths"]["python_path"] = self.python_exec
@@ -471,7 +625,11 @@ class PyQtLauncher(QtWidgets.QMainWindow):
         self.attention_mode = Var("")
         self.browser_open_mode = Var("default")
         self.custom_browser_path = Var("")
-        launch_cfg = self.config.get("launch_options", {}) if isinstance(self.config, dict) else {}
+        launch_cfg = (
+            self.config.get("launch_options", {})
+            if isinstance(self.config, dict)
+            else {}
+        )
         try:
             cm = launch_cfg.get("default_compute_mode", self.compute_mode.get())
             if cm == "directml":
@@ -479,25 +637,75 @@ class PyQtLauncher(QtWidgets.QMainWindow):
             self.compute_mode.set(cm)
             self.vram_mode.set(launch_cfg.get("vram_mode", self.vram_mode.get()))
             self.custom_port.set(launch_cfg.get("default_port", self.custom_port.get()))
-            self.disable_all_custom_nodes.set(bool(launch_cfg.get("disable_all_custom_nodes", self.disable_all_custom_nodes.get())))
-            self.use_fast_mode.set(bool(launch_cfg.get("enable_fast_mode", self.use_fast_mode.get())))
-            self.disable_api_nodes.set(bool(launch_cfg.get("disable_api_nodes", self.disable_api_nodes.get())))
-            self.use_new_manager.set(bool(launch_cfg.get("use_new_manager", self.use_new_manager.get())))
-            self.enable_cors.set(bool(launch_cfg.get("enable_cors", self.enable_cors.get())))
-            self.listen_all.set(bool(launch_cfg.get("listen_all", self.listen_all.get())))
-            self.extra_launch_args.set(launch_cfg.get("extra_args", self.extra_launch_args.get()))
-            self.attention_mode.set(launch_cfg.get("attention_mode", self.attention_mode.get()))
-            self.browser_open_mode.set(launch_cfg.get("browser_open_mode", self.browser_open_mode.get()))
-            self.custom_browser_path.set(launch_cfg.get("custom_browser_path", self.custom_browser_path.get()))
+            self.disable_all_custom_nodes.set(
+                bool(
+                    launch_cfg.get(
+                        "disable_all_custom_nodes", self.disable_all_custom_nodes.get()
+                    )
+                )
+            )
+            self.use_fast_mode.set(
+                bool(launch_cfg.get("enable_fast_mode", self.use_fast_mode.get()))
+            )
+            self.disable_api_nodes.set(
+                bool(launch_cfg.get("disable_api_nodes", self.disable_api_nodes.get()))
+            )
+            self.use_new_manager.set(
+                bool(launch_cfg.get("use_new_manager", self.use_new_manager.get()))
+            )
+            self.enable_cors.set(
+                bool(launch_cfg.get("enable_cors", self.enable_cors.get()))
+            )
+            self.listen_all.set(
+                bool(launch_cfg.get("listen_all", self.listen_all.get()))
+            )
+            self.extra_launch_args.set(
+                launch_cfg.get("extra_args", self.extra_launch_args.get())
+            )
+            self.attention_mode.set(
+                launch_cfg.get("attention_mode", self.attention_mode.get())
+            )
+            self.browser_open_mode.set(
+                launch_cfg.get("browser_open_mode", self.browser_open_mode.get())
+            )
+            self.custom_browser_path.set(
+                launch_cfg.get("custom_browser_path", self.custom_browser_path.get())
+            )
         except Exception:
             pass
-        proxy_cfg = self.config.get("proxy_settings", {}) if isinstance(self.config, dict) else {}
+        self.state = AppState(
+            compute_mode=self.compute_mode.get(),
+            vram_mode=self.vram_mode.get(),
+            python_path=Path(self.python_exec),
+            comfyui_path=comfy_path,
+            enable_fast_mode=self.use_fast_mode.get(),
+            disable_all_custom_nodes=self.disable_all_custom_nodes.get(),
+            extra_args=self.extra_launch_args.get(),
+            attention_mode=self.attention_mode.get(),
+            listen_all=self.listen_all.get(),
+            default_port=self.custom_port.get(),
+        )
+        proxy_cfg = (
+            self.config.get("proxy_settings", {})
+            if isinstance(self.config, dict)
+            else {}
+        )
         self.pypi_proxy_mode = Var(proxy_cfg.get("pypi_proxy_mode", "aliyun"))
-        self.pypi_proxy_url = Var(proxy_cfg.get("pypi_proxy_url", "https://mirrors.aliyun.com/pypi/simple/"))
+        self.pypi_proxy_url = Var(
+            proxy_cfg.get("pypi_proxy_url", "https://mirrors.aliyun.com/pypi/simple/")
+        )
+
         def _pypi_mode_ui_text(mode: str):
-            return "阿里云" if mode == "aliyun" else ("自定义" if mode == "custom" else "不使用")
+            return (
+                "阿里云"
+                if mode == "aliyun"
+                else ("自定义" if mode == "custom" else "不使用")
+            )
+
         self.pypi_proxy_mode_ui = Var(_pypi_mode_ui_text(self.pypi_proxy_mode.get()))
-        self.hf_mirror_url = Var(proxy_cfg.get("hf_mirror_url", "https://hf-mirror.com"))
+        self.hf_mirror_url = Var(
+            proxy_cfg.get("hf_mirror_url", "https://hf-mirror.com")
+        )
         self.selected_hf_mirror = Var(proxy_cfg.get("hf_mirror_mode", "hf-mirror"))
         self.comfyui_version = Var("获取中…")
         self.comfyui_commit = Var("获取中…")
@@ -511,7 +719,11 @@ class PyQtLauncher(QtWidgets.QMainWindow):
         self.update_frontend_var = BoolVar(True)
         self.update_template_var = BoolVar(True)
         self.git_path = None
-        vp = self.config.get("version_preferences", {}) if isinstance(self.config, dict) else {}
+        vp = (
+            self.config.get("version_preferences", {})
+            if isinstance(self.config, dict)
+            else {}
+        )
         try:
             self.stable_only_var = BoolVar(bool(vp.get("stable_only", True)))
         except Exception:
@@ -524,21 +736,42 @@ class PyQtLauncher(QtWidgets.QMainWindow):
             self.update_timeout_var = Var(int(vp.get("update_timeout", 120)))
         except Exception:
             self.update_timeout_var = Var(120)
+
         class _VMStub:
             def __init__(self, app_):
                 self.app = app_
-                self.proxy_mode_var = Var((proxy_cfg.get("git_proxy_mode", "none") or "none"))
-                ui = "不使用" if self.proxy_mode_var.get() == "none" else ("gh-proxy" if self.proxy_mode_var.get() == "gh-proxy" else "自定义")
+                self.proxy_mode_var = Var(
+                    (proxy_cfg.get("git_proxy_mode", "none") or "none")
+                )
+                ui = (
+                    "不使用"
+                    if self.proxy_mode_var.get() == "none"
+                    else (
+                        "gh-proxy"
+                        if self.proxy_mode_var.get() == "gh-proxy"
+                        else "自定义"
+                    )
+                )
                 self.proxy_mode_ui_var = Var(ui)
                 self.proxy_url_var = Var(proxy_cfg.get("git_proxy_url", ""))
+
             def get_remote_url(self):
                 try:
-                    base = Path(self.app.config.get("paths", {}).get("comfyui_root") or ".").resolve()
+                    base = Path(
+                        self.app.config.get("paths", {}).get("comfyui_root") or "."
+                    ).resolve()
                     root = (base / "ComfyUI").resolve()
                 except Exception:
                     root = Path.cwd()
-                r = COMMON.run_hidden([self.app.git_path or "git", "remote", "get-url", "origin"], capture_output=True, text=True, timeout=6, cwd=str(root))
+                r = COMMON.run_hidden(
+                    [self.app.git_path or "git", "remote", "get-url", "origin"],
+                    capture_output=True,
+                    text=True,
+                    timeout=6,
+                    cwd=str(root),
+                )
                 return r.stdout.strip() if r.returncode == 0 else ""
+
             def compute_proxied_url(self, origin_url: str):
                 mode = self.proxy_mode_var.get()
                 url = self.proxy_url_var.get().strip()
@@ -546,28 +779,39 @@ class PyQtLauncher(QtWidgets.QMainWindow):
                     return None
                 if mode == "gh-proxy":
                     if "github.com" in origin_url:
-                        return "https://gh-proxy.com/" + origin_url.replace("https://", "").replace("http://", "")
+                        return "https://gh-proxy.com/" + origin_url.replace(
+                            "https://", ""
+                        ).replace("http://", "")
                     return None
                 if mode == "custom" and url:
                     if not url.endswith("/"):
                         url2 = url + "/"
                     else:
                         url2 = url
-                    return url2 + origin_url.replace("https://", "").replace("http://", "")
+                    return url2 + origin_url.replace("https://", "").replace(
+                        "http://", ""
+                    )
                 return None
+
             def save_proxy_settings(self):
                 try:
-                    self.app.services.config.set("proxy_settings.git_proxy_mode", self.proxy_mode_var.get())
-                    self.app.services.config.set("proxy_settings.git_proxy_url", self.proxy_url_var.get())
+                    self.app.services.config.set(
+                        "proxy_settings.git_proxy_mode", self.proxy_mode_var.get()
+                    )
+                    self.app.services.config.set(
+                        "proxy_settings.git_proxy_url", self.proxy_url_var.get()
+                    )
                     self.app.services.config.save(None)
                 except Exception:
                     pass
+
         self.version_manager = _VMStub(self)
         self.big_btn = BigBtnProxy()
         self.process_manager = ProcessManager(self)
+        process_events.register_callback(self)
         self.services = ServiceContainer.from_app(self)
         self._setup_ui()
-    
+
     def ui_post(self, fn):
         try:
             if not hasattr(self, "_invoker") or (self._invoker is None):
@@ -575,12 +819,10 @@ class PyQtLauncher(QtWidgets.QMainWindow):
             self._invoker.invoke_signal.emit(fn)
         except Exception:
             try:
-                QtCore.QTimer.singleShot(0, fn)
+                self.root.after(0, fn)
             except Exception:
-                try:
-                    fn()
-                except Exception:
-                    pass
+                pass
+
     @QtCore.pyqtSlot(str)
     def _on_python_version(self, v):
         try:
@@ -589,35 +831,66 @@ class PyQtLauncher(QtWidgets.QMainWindow):
         except Exception:
             pass
         self.python_version.set(v)
+
     @QtCore.pyqtSlot(str)
     def _on_torch_version(self, v):
         self.torch_version.set(v)
+
     @QtCore.pyqtSlot(str)
     def _on_gpu_driver_status(self, v):
         self.gpu_driver_status.set(v)
+
     @QtCore.pyqtSlot(str)
     def _on_frontend_version(self, v):
         self.frontend_version.set(v)
+
     @QtCore.pyqtSlot(str)
     def _on_template_version(self, v):
         self.template_version.set(v)
+
     @QtCore.pyqtSlot(str)
     def _on_core_version(self, v):
         self.comfyui_version.set(v)
+
     @QtCore.pyqtSlot(str)
     def _on_git_status(self, v):
         self.git_status.set(v)
+
+    def on_starting(self) -> None:
+        pass
+
+    def on_started(self, data=None) -> None:
+        pass
+
+    def on_start_failed(self, error=None) -> None:
+        pass
+
+    def on_stopping(self) -> None:
+        pass
+
+    def on_stopped(self) -> None:
+        pass
+
+    def on_error(self, error=None) -> None:
+        pass
+
+    def on_port_conflict(self, port=None, pids=None) -> None:
+        pass
 
     def _setup_ui(self):
         self.setWindowTitle("ComfyUI 启动器")
 
         # Theme setup
-        theme_value = (self.config.get("ui_settings", {}).get("theme") or "dark").lower()
+        theme_value = (
+            self.config.get("ui_settings", {}).get("theme") or "dark"
+        ).lower()
         if theme_value not in ("dark", "light"):
             theme_value = "dark"
 
         # Sidebar collapse setup
-        self._sidebar_collapsed = self.config.get("ui_settings", {}).get("sidebar_collapsed", False)
+        self._sidebar_collapsed = self.config.get("ui_settings", {}).get(
+            "sidebar_collapsed", False
+        )
         self._sidebar_expanded_width = 240
         self._sidebar_collapsed_width = 60
 
@@ -653,7 +926,9 @@ class PyQtLauncher(QtWidgets.QMainWindow):
                     "root_bg": "#111827" if dark else "#F8FAFC",
                     "sidebar_grad_top": "#1F2937" if dark else "#F1F5F9",
                     "sidebar_grad_bottom": "#111827" if dark else "#E2E8F0",
-                    "sidebar_border": "rgba(255, 255, 255, 0.05)" if dark else "#E5E7EB",
+                    "sidebar_border": "rgba(255, 255, 255, 0.05)"
+                    if dark
+                    else "#E5E7EB",
                     "content_bg": "#1F2937" if dark else "#FFFFFF",
                     "content_border": "rgba(255, 255, 255, 0.1)" if dark else "#E5E7EB",
                     "label": "#E5E7EB" if dark else "#0F172A",
@@ -678,23 +953,27 @@ class PyQtLauncher(QtWidgets.QMainWindow):
                 QTabWidget::pane {{ border: 0; background: transparent; }}
                 QStackedWidget {{ background: transparent; }}
                 QWidget#MainContent {{
-                    background-color: {palette['content_bg']};
-                    border: 1px solid {palette['content_border']};
+                    background-color: {palette["content_bg"]};
+                    border: 1px solid {palette["content_border"]};
                     border-radius: 20px;
                 }}
             """)
 
             if hasattr(self, "_root_widget"):
-                self._root_widget.setStyleSheet(f"QWidget {{ background: {palette['root_bg']}; }}")
+                self._root_widget.setStyleSheet(
+                    f"QWidget {{ background: {palette['root_bg']}; }}"
+                )
             if hasattr(self, "_sidebar_widget"):
                 try:
                     if hasattr(self, "theme_manager") and self.theme_manager:
-                        self._sidebar_widget.setStyleSheet(self.theme_manager.styles.sidebar_style())
+                        self._sidebar_widget.setStyleSheet(
+                            self.theme_manager.styles.sidebar_style()
+                        )
                     else:
                         self._sidebar_widget.setStyleSheet(f"""
                             QWidget#SideBar {{
-                                background: qlineargradient(x1:0, y1:0, x2:0, y2:1, stop:0 {palette['sidebar_grad_top']}, stop:1 {palette['sidebar_grad_bottom']});
-                                border: 1px solid {palette['sidebar_border']};
+                                background: qlineargradient(x1:0, y1:0, x2:0, y2:1, stop:0 {palette["sidebar_grad_top"]}, stop:1 {palette["sidebar_grad_bottom"]});
+                                border: 1px solid {palette["sidebar_border"]};
                                 border-radius: 20px;
                             }}
                         """)
@@ -704,17 +983,17 @@ class PyQtLauncher(QtWidgets.QMainWindow):
                 if dark:
                     self._content_widget.setStyleSheet(f"""
                         QWidget#MainContent {{
-                            background-color: {palette['content_bg']};
+                            background-color: {palette["content_bg"]};
                             border-radius: 20px;
                         }}
                         QLabel {{
-                            color: {palette['label']};
+                            color: {palette["label"]};
                             background: transparent;
                             font: 10pt "Microsoft YaHei UI";
                         }}
                         QGroupBox {{
-                            background-color: {palette['group_bg']};
-                            border: 1px solid {palette['group_border']};
+                            background-color: {palette["group_bg"]};
+                            border: 1px solid {palette["group_border"]};
                             border-radius: 10px;
                             margin-top: 10px;
                             padding: 10px;
@@ -724,58 +1003,58 @@ class PyQtLauncher(QtWidgets.QMainWindow):
                             subcontrol-origin: margin;
                             subcontrol-position: top left;
                             padding: 0 4px;
-                            color: {palette['label']};
+                            color: {palette["label"]};
                             background: transparent;
                             font: bold 10pt "Microsoft YaHei UI";
                         }}
                         QPushButton {{
-                            background: {palette['button_bg']};
-                            color: {palette['text']};
-                            border: 1px solid {palette['input_border']};
+                            background: {palette["button_bg"]};
+                            color: {palette["text"]};
+                            border: 1px solid {palette["input_border"]};
                             border-radius: 8px;
                             padding: 5px 10px;
                             font: 10pt "Microsoft YaHei UI";
                         }}
                         QPushButton:hover {{
-                            background: {palette['button_hover']};
-                            color: {palette['text']};
+                            background: {palette["button_hover"]};
+                            color: {palette["text"]};
                         }}
                         QLineEdit {{
-                            background-color: {palette['input_bg']};
-                            color: {palette['text']};
-                            border: 1px solid {palette['input_border']};
+                            background-color: {palette["input_bg"]};
+                            color: {palette["text"]};
+                            border: 1px solid {palette["input_border"]};
                             border-radius: 6px;
                             padding: 5px 10px;
                             font: 10pt "Microsoft YaHei UI";
-                            selection-background-color: {c.get('accent', '#6366F1') if c else '#6366F1'};
+                            selection-background-color: {c.get("accent", "#6366F1") if c else "#6366F1"};
                         }}
                         QLineEdit:hover, QComboBox:hover {{
                             background-color: rgba(255, 255, 255, 0.05);
                             border: 1px solid #6B7280;
                         }}
                         QLineEdit:focus, QComboBox:focus {{
-                            background-color: {palette['input_bg']};
-                            border: 2px solid {c.get('accent', '#6366F1') if c else '#6366F1'};
+                            background-color: {palette["input_bg"]};
+                            border: 2px solid {c.get("accent", "#6366F1") if c else "#6366F1"};
                             padding: 4px 9px;
                         }}
                         QComboBox {{
-                            background-color: {palette['input_bg']};
-                            color: {palette['text']};
-                            border: 1px solid {palette['input_border']};
+                            background-color: {palette["input_bg"]};
+                            color: {palette["text"]};
+                            border: 1px solid {palette["input_border"]};
                             border-radius: 6px;
                             padding: 5px 10px;
                             font: 10pt "Microsoft YaHei UI";
                         }}
                         QComboBox QAbstractItemView {{
-                            background-color: {palette['content_bg']};
-                            selection-background-color: {c.get('accent', '#6366F1') if c else '#6366F1'};
+                            background-color: {palette["content_bg"]};
+                            selection-background-color: {c.get("accent", "#6366F1") if c else "#6366F1"};
                             selection-color: #FFFFFF;
                             font: 10pt "Microsoft YaHei UI";
-                            border: 1px solid {palette['group_border']};
+                            border: 1px solid {palette["group_border"]};
                             outline: none;
                         }}
                         QRadioButton, QCheckBox {{
-                            color: {palette['label']};
+                            color: {palette["label"]};
                             font: 10pt "Microsoft YaHei UI";
                             spacing: 6px;
                         }}
@@ -788,25 +1067,25 @@ class PyQtLauncher(QtWidgets.QMainWindow):
                         }}
                         QRadioButton::indicator {{ border-radius: 9px; }}
                         QCheckBox::indicator:checked, QRadioButton::indicator:checked {{
-                            background-color: {c.get('accent', '#6366F1') if c else '#6366F1'};
-                            border-color: {c.get('accent', '#6366F1') if c else '#6366F1'};
+                            background-color: {c.get("accent", "#6366F1") if c else "#6366F1"};
+                            border-color: {c.get("accent", "#6366F1") if c else "#6366F1"};
                             image: url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' width='12' height='12' viewBox='0 0 12 12'%3E%3Cpath d='M2 5.5L4.5 8L10 2.5' stroke='white' stroke-width='2.5' stroke-linecap='round' stroke-linejoin='round' fill='none'/%3E%3C/svg%3E");
                         }}
                     """)
                 else:
                     self._content_widget.setStyleSheet(f"""
                         QWidget#MainContent {{
-                            background-color: {palette['content_bg']};
+                            background-color: {palette["content_bg"]};
                             border-radius: 20px;
                         }}
                         QLabel {{
-                            color: {palette['label']};
+                            color: {palette["label"]};
                             background: transparent;
                             font: 10pt "Microsoft YaHei UI";
                         }}
                         QGroupBox {{
-                            background-color: {palette['group_bg']};
-                            border: 1px solid {palette['group_border']};
+                            background-color: {palette["group_bg"]};
+                            border: 1px solid {palette["group_border"]};
                             border-radius: 10px;
                             margin-top: 10px;
                             padding: 10px;
@@ -816,54 +1095,54 @@ class PyQtLauncher(QtWidgets.QMainWindow):
                             subcontrol-origin: margin;
                             subcontrol-position: top left;
                             padding: 0 4px;
-                            color: {palette['label']};
+                            color: {palette["label"]};
                             background: transparent;
                             font: bold 10pt "Microsoft YaHei UI";
                         }}
                         QPushButton {{
-                            background: {palette['button_bg']};
-                            color: {palette['text']};
-                            border: 1px solid {palette['input_border']};
+                            background: {palette["button_bg"]};
+                            color: {palette["text"]};
+                            border: 1px solid {palette["input_border"]};
                             border-radius: 8px;
                             padding: 5px 10px;
                             font: 10pt "Microsoft YaHei UI";
                         }}
                         QPushButton:hover {{
-                            background: {palette['button_hover']};
-                            color: {palette['text']};
+                            background: {palette["button_hover"]};
+                            color: {palette["text"]};
                         }}
                         QLineEdit {{
-                            background-color: {palette['input_bg']};
-                            color: {palette['text']};
-                            border: 1px solid {palette['input_border']};
+                            background-color: {palette["input_bg"]};
+                            color: {palette["text"]};
+                            border: 1px solid {palette["input_border"]};
                             border-radius: 6px;
                             padding: 5px 10px;
                             font: 10pt "Microsoft YaHei UI";
                         }}
                         QComboBox {{
-                            background-color: {palette['input_bg']};
-                            color: {palette['text']};
-                            border: 1px solid {palette['input_border']};
+                            background-color: {palette["input_bg"]};
+                            color: {palette["text"]};
+                            border: 1px solid {palette["input_border"]};
                             border-radius: 6px;
                             padding: 5px 10px;
                             font: 10pt "Microsoft YaHei UI";
                         }}
                         QRadioButton, QCheckBox {{
-                            color: {palette['text']};
+                            color: {palette["text"]};
                             font: 10pt "Microsoft YaHei UI";
                             spacing: 6px;
                         }}
                         QCheckBox::indicator, QRadioButton::indicator {{
                             width: 20px;
                             height: 20px;
-                            border: 2px solid {palette['input_border']};
+                            border: 2px solid {palette["input_border"]};
                             border-radius: 4px;
                             background: transparent;
                         }}
                         QRadioButton::indicator {{ border-radius: 9px; }}
                         QCheckBox::indicator:checked, QRadioButton::indicator:checked {{
-                            background-color: {c.get('accent', '#6366F1') if c else '#6366F1'};
-                            border-color: {c.get('accent', '#6366F1') if c else '#6366F1'};
+                            background-color: {c.get("accent", "#6366F1") if c else "#6366F1"};
+                            border-color: {c.get("accent", "#6366F1") if c else "#6366F1"};
                             image: url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' width='12' height='12' viewBox='0 0 12 12'%3E%3Cpath d='M2 5.5L4.5 8L10 2.5' stroke='white' stroke-width='2.5' stroke-linecap='round' stroke-linejoin='round' fill='none'/%3E%3C/svg%3E");
                         }}
                     """)
@@ -1021,17 +1300,29 @@ class PyQtLauncher(QtWidgets.QMainWindow):
                         # Use theme colors
                         title_color = c.get("text")
                         author_color = c.get("label_muted")
-                        self._header_labels[0].setStyleSheet(f"font: bold 18pt \"Microsoft YaHei\"; color: {title_color}; background: transparent;")
-                        self._header_labels[1].setStyleSheet(f"color: {author_color}; font: 9pt \"Microsoft YaHei\"; background: transparent;")
+                        self._header_labels[0].setStyleSheet(
+                            f'font: bold 18pt "Microsoft YaHei"; color: {title_color}; background: transparent;'
+                        )
+                        self._header_labels[1].setStyleSheet(
+                            f'color: {author_color}; font: 9pt "Microsoft YaHei"; background: transparent;'
+                        )
                     else:
                         if dark:
                             # Dark theme: white title and gray author
-                            self._header_labels[0].setStyleSheet("font: bold 18pt \"Microsoft YaHei\"; color: #FFFFFF; background: transparent;")
-                            self._header_labels[1].setStyleSheet("color: #9CA3AF; font: 9pt \"Microsoft YaHei\"; background: transparent;")
+                            self._header_labels[0].setStyleSheet(
+                                'font: bold 18pt "Microsoft YaHei"; color: #FFFFFF; background: transparent;'
+                            )
+                            self._header_labels[1].setStyleSheet(
+                                'color: #9CA3AF; font: 9pt "Microsoft YaHei"; background: transparent;'
+                            )
                         else:
                             # Light theme: dark title and author
-                            self._header_labels[0].setStyleSheet("font: bold 18pt \"Microsoft YaHei\"; color: #1F2937; background: transparent;")
-                            self._header_labels[1].setStyleSheet("color: #4B5563; font: 9pt \"Microsoft YaHei\"; background: transparent;")
+                            self._header_labels[0].setStyleSheet(
+                                'font: bold 18pt "Microsoft YaHei"; color: #1F2937; background: transparent;'
+                            )
+                            self._header_labels[1].setStyleSheet(
+                                'color: #4B5563; font: 9pt "Microsoft YaHei"; background: transparent;'
+                            )
 
             # Update version label colors (value labels are even indices, title labels are odd indices)
             if hasattr(self, "_version_label_refs"):
@@ -1045,15 +1336,27 @@ class PyQtLauncher(QtWidgets.QMainWindow):
                     # Even indices (0, 2, 4, ...) are value labels
                     # Odd indices (1, 3, 5, ...) are title labels
                     if i % 2 == 0:
-                        label.setStyleSheet(f"font: bold 10pt \"Segoe UI\", \"Microsoft YaHei UI\"; color: {value_color}; background: transparent;")
+                        label.setStyleSheet(
+                            f'font: bold 10pt "Segoe UI", "Microsoft YaHei UI"; color: {value_color}; background: transparent;'
+                        )
                     else:
-                        label.setStyleSheet(f"color: {title_color}; font: bold 9pt \"Microsoft YaHei UI\"; background: transparent;")
+                        label.setStyleSheet(
+                            f'color: {title_color}; font: bold 9pt "Microsoft YaHei UI"; background: transparent;'
+                        )
 
             # Update version management page labels (当前分支, 当前提交)
             if hasattr(self, "lbl_ver_branch") and hasattr(self, "lbl_ver_commit"):
-                val_color_pv = c.get("text") if c is not None else ("#E5E7EB" if dark else "#0F172A")
-                self.lbl_ver_branch.setStyleSheet(f"color: {val_color_pv}; font: bold 10pt 'Microsoft YaHei UI';")
-                self.lbl_ver_commit.setStyleSheet(f"color: {val_color_pv}; font: bold 10pt 'Microsoft YaHei UI';")
+                val_color_pv = (
+                    c.get("text")
+                    if c is not None
+                    else ("#E5E7EB" if dark else "#0F172A")
+                )
+                self.lbl_ver_branch.setStyleSheet(
+                    f"color: {val_color_pv}; font: bold 10pt 'Microsoft YaHei UI';"
+                )
+                self.lbl_ver_commit.setStyleSheet(
+                    f"color: {val_color_pv}; font: bold 10pt 'Microsoft YaHei UI';"
+                )
 
             # Update version settings panel labels (当前分支, 当前提交, GitHub代理, 升级策略)
             if hasattr(self, "_version_settings_labels"):
@@ -1063,18 +1366,31 @@ class PyQtLauncher(QtWidgets.QMainWindow):
                 else:
                     label_color_pv = "#D1D5DB" if dark else "#374151"
                 for label in self._version_settings_labels:
-                    label.setStyleSheet(f"color: {label_color_pv}; font: 10pt 'Microsoft YaHei UI';")
+                    label.setStyleSheet(
+                        f"color: {label_color_pv}; font: 10pt 'Microsoft YaHei UI';"
+                    )
 
             # Update page title colors
             if hasattr(self, "_page_title_refs"):
-                title_color = self.theme_manager.colors.get("text") if hasattr(self, 'theme_manager') and self.theme_manager else "#1F2937"
+                title_color = (
+                    self.theme_manager.colors.get("text")
+                    if hasattr(self, "theme_manager") and self.theme_manager
+                    else "#1F2937"
+                )
                 for label in self._page_title_refs:
                     # 只替换 color 属性，保留其他样式
                     import re
+
                     current_sheet = label.styleSheet()
-                    new_sheet = re.sub(r'color:\s*#[0-9A-Fa-f]{6}\s*;', f'color: {title_color};', current_sheet)
+                    new_sheet = re.sub(
+                        r"color:\s*#[0-9A-Fa-f]{6}\s*;",
+                        f"color: {title_color};",
+                        current_sheet,
+                    )
                     label.setStyleSheet(new_sheet)
-                    new_sheet = new_sheet.replace("color: #1F2937;", f"color: {title_color};")
+                    new_sheet = new_sheet.replace(
+                        "color: #1F2937;", f"color: {title_color};"
+                    )
                     label.setStyleSheet(new_sheet)
 
             # Update label colors (t1, t2 labels in About Me page)
@@ -1093,20 +1409,45 @@ class PyQtLauncher(QtWidgets.QMainWindow):
                     style_sheet = widget.styleSheet()
                     if style_sheet:
                         if "color: #FFFFFF;" in style_sheet:
-                            widget.setStyleSheet(style_sheet.replace("color: #FFFFFF;", f"color: {name_color};"))
+                            widget.setStyleSheet(
+                                style_sheet.replace(
+                                    "color: #FFFFFF;", f"color: {name_color};"
+                                )
+                            )
                         elif "color: #9CA3AF;" in style_sheet:
-                            widget.setStyleSheet(style_sheet.replace("color: #9CA3AF;", f"color: {quote_color};"))
+                            widget.setStyleSheet(
+                                style_sheet.replace(
+                                    "color: #9CA3AF;", f"color: {quote_color};"
+                                )
+                            )
                     # Handle HTML content labels (lh_desc in About Launcher page)
                     if isinstance(widget, QtWidgets.QLabel) and widget.text():
                         html_content = widget.text()
                         if "color: #FFFFFF" in html_content:
-                            widget.setText(html_content.replace("color: #FFFFFF", f"color: {name_color}"))
+                            widget.setText(
+                                html_content.replace(
+                                    "color: #FFFFFF", f"color: {name_color}"
+                                )
+                            )
                         if "color: #9CA3AF" in html_content:
-                            widget.setText(html_content.replace("color: #9CA3AF", f"color: {quote_color}"))
+                            widget.setText(
+                                html_content.replace(
+                                    "color: #9CA3AF", f"color: {quote_color}"
+                                )
+                            )
                         if "background-color: rgba(255,255,255,0.1)" in html_content:
-                            widget.setText(html_content.replace("background-color: rgba(255,255,255,0.1)", f"background-color: {badge_bg}"))
+                            widget.setText(
+                                html_content.replace(
+                                    "background-color: rgba(255,255,255,0.1)",
+                                    f"background-color: {badge_bg}",
+                                )
+                            )
                         if "color: #A5B4FC" in html_content:
-                            widget.setText(html_content.replace("color: #A5B4FC", f"color: {badge_color}"))
+                            widget.setText(
+                                html_content.replace(
+                                    "color: #A5B4FC", f"color: {badge_color}"
+                                )
+                            )
 
             # Update table styles (history_table, model_mappings_table, etc.)
             if hasattr(self, "_styled_widgets"):
@@ -1144,8 +1485,12 @@ class PyQtLauncher(QtWidgets.QMainWindow):
                     card_border = "#374151" if dark else "#E5E7EB"
 
                     # Link button colors
-                    link_bg = "rgba(255, 255, 255, 0.05)" if dark else "rgba(0, 0, 0, 0.03)"
-                    link_border = "rgba(255, 255, 255, 0.1)" if dark else "rgba(0, 0, 0, 0.1)"
+                    link_bg = (
+                        "rgba(255, 255, 255, 0.05)" if dark else "rgba(0, 0, 0, 0.03)"
+                    )
+                    link_border = (
+                        "rgba(255, 255, 255, 0.1)" if dark else "rgba(0, 0, 0, 0.1)"
+                    )
                     link_text = "#A5B4FC" if dark else "#0284C7"
                     link_hover_text = "#FFFFFF"
                     link_hover_border = "#6366F1"
@@ -1154,29 +1499,71 @@ class PyQtLauncher(QtWidgets.QMainWindow):
                     style_sheet = widget.styleSheet()
                     # Handle table widget styles
                     if "background-color: #1F2937;" in style_sheet:
-                        widget.setStyleSheet(style_sheet
-                            .replace("background-color: #1F2937;", f"background-color: {bg_color};")
-                            .replace("alternate-background-color: #27303f;", f"alternate-background-color: {alt_bg_color};")
+                        widget.setStyleSheet(
+                            style_sheet.replace(
+                                "background-color: #1F2937;",
+                                f"background-color: {bg_color};",
+                            )
+                            .replace(
+                                "alternate-background-color: #27303f;",
+                                f"alternate-background-color: {alt_bg_color};",
+                            )
                             .replace("color: #E5E7EB;", f"color: {text_color};")
-                            .replace("gridline-color: #374151;", f"gridline-color: {grid_color};")
-                            .replace("background-color: rgba(0,0,0,0.3);", f"background-color: {header_bg};")
-                            .replace("background-color: rgba(0,0,0,0.05);", f"background-color: {header_bg};")
-                            .replace("border-bottom: 2px solid #6B7280;", f"border-bottom: 2px solid {header_border};")
-                            .replace("background: #4B5563;", f"background: {scroll_bg};")
-                            .replace("background: #6B7280;", f"background: {header_border};"))
+                            .replace(
+                                "gridline-color: #374151;",
+                                f"gridline-color: {grid_color};",
+                            )
+                            .replace(
+                                "background-color: rgba(0,0,0,0.3);",
+                                f"background-color: {header_bg};",
+                            )
+                            .replace(
+                                "background-color: rgba(0,0,0,0.05);",
+                                f"background-color: {header_bg};",
+                            )
+                            .replace(
+                                "border-bottom: 2px solid #6B7280;",
+                                f"border-bottom: 2px solid {header_border};",
+                            )
+                            .replace(
+                                "background: #4B5563;", f"background: {scroll_bg};"
+                            )
+                            .replace(
+                                "background: #6B7280;", f"background: {header_border};"
+                            )
+                        )
                     # Handle card styles (ProfileCard, HeroCard)
                     elif "background-color: #1F2937;" in style_sheet:
-                        widget.setStyleSheet(style_sheet
-                            .replace("background-color: #1F2937;", f"background-color: {card_bg};")
-                            .replace("border: 1px solid #374151;", f"border: 1px solid {card_border};"))
+                        widget.setStyleSheet(
+                            style_sheet.replace(
+                                "background-color: #1F2937;",
+                                f"background-color: {card_bg};",
+                            ).replace(
+                                "border: 1px solid #374151;",
+                                f"border: 1px solid {card_border};",
+                            )
+                        )
                     # Handle link button styles
                     elif "background-color: rgba(255, 255, 255, 0.05);" in style_sheet:
-                        widget.setStyleSheet(style_sheet
-                            .replace("background-color: rgba(255, 255, 255, 0.05);", f"background-color: {link_bg};")
-                            .replace("border: 1px solid rgba(255, 255, 255, 0.1);", f"border: 1px solid {link_border};")
+                        widget.setStyleSheet(
+                            style_sheet.replace(
+                                "background-color: rgba(255, 255, 255, 0.05);",
+                                f"background-color: {link_bg};",
+                            )
+                            .replace(
+                                "border: 1px solid rgba(255, 255, 255, 0.1);",
+                                f"border: 1px solid {link_border};",
+                            )
                             .replace("color: #A5B4FC;", f"color: {link_text};")
-                            .replace("background-color: rgba(255, 255, 255, 0.1);", f"background-color: {link_bg};")
-                            .replace("border: 1px solid #6366F1;", f"border: 1px solid {link_hover_border};"))
+                            .replace(
+                                "background-color: rgba(255, 255, 255, 0.1);",
+                                f"background-color: {link_bg};",
+                            )
+                            .replace(
+                                "border: 1px solid #6366F1;",
+                                f"border: 1px solid {link_hover_border};",
+                            )
+                        )
 
             # Update input style groups (env_group, form_group) - for kernel version and model management pages
             if hasattr(self, "_input_style_groups"):
@@ -1194,7 +1581,11 @@ class PyQtLauncher(QtWidgets.QMainWindow):
             # Update new refactored pages
             if hasattr(self, "_new_pages"):
                 # Call update_theme on each new page using current ThemeManager styles
-                theme_styles = self.theme_manager.styles if hasattr(self, "theme_manager") else ThemeStyles(ThemeColors(dark=dark))
+                theme_styles = (
+                    self.theme_manager.styles
+                    if hasattr(self, "theme_manager")
+                    else ThemeStyles(ThemeColors(dark=dark))
+                )
                 for page in self._new_pages.values():
                     if hasattr(page, "update_theme"):
                         page.update_theme(theme_styles)
@@ -1204,9 +1595,21 @@ class PyQtLauncher(QtWidgets.QMainWindow):
 
         # 使用主题颜色而不是硬编码颜色
         is_dark = self._theme_value != "light"
-        primary_bg = self.theme_manager.colors.get('btn_primary_bg') if hasattr(self, 'theme_manager') and self.theme_manager else '#7F56D9'
-        primary_hover = self.theme_manager.colors.get('btn_primary_hover') if hasattr(self, 'theme_manager') and self.theme_manager else '#9E77ED'
-        primary_pressed = self.theme_manager.colors.get('btn_primary_pressed') if hasattr(self, 'theme_manager') and self.theme_manager else '#53389E'
+        primary_bg = (
+            self.theme_manager.colors.get("btn_primary_bg")
+            if hasattr(self, "theme_manager") and self.theme_manager
+            else "#7F56D9"
+        )
+        primary_hover = (
+            self.theme_manager.colors.get("btn_primary_hover")
+            if hasattr(self, "theme_manager") and self.theme_manager
+            else "#9E77ED"
+        )
+        primary_pressed = (
+            self.theme_manager.colors.get("btn_primary_pressed")
+            if hasattr(self, "theme_manager") and self.theme_manager
+            else "#53389E"
+        )
 
         common_btn_style = f"""
         QPushButton {{
@@ -1230,7 +1633,10 @@ class PyQtLauncher(QtWidgets.QMainWindow):
 
         try:
             from PyQt5.QtGui import QIcon
-            icon_path = ASSETS.resolve_asset('rabbit.ico') or ASSETS.resolve_asset('rabbit.png')
+
+            icon_path = ASSETS.resolve_asset("rabbit.ico") or ASSETS.resolve_asset(
+                "rabbit.png"
+            )
             if icon_path and icon_path.exists():
                 ic = QIcon(str(icon_path))
                 # 同时设置窗口与应用图标，以确保任务栏/Alt-Tab 使用头像
@@ -1250,9 +1656,23 @@ class PyQtLauncher(QtWidgets.QMainWindow):
         self._root_widget = root
 
         # Color constants definition (Moved out of sidebar block)
-        c = {"SIDEBAR_BG": "#1a1c1e", "TEXT": "#1F2937", "TEXT_MUTED": "#4B5563", "ACCENT": "#6366F1", "ACCENT_HOVER": "#5258CF", "ACCENT_ACTIVE": "#3F46B8", "BG": "#F8FAFC", "BORDER": "#E5E7EB", "BTN_BG": "#F1F5F9", "BTN_HOVER_BG": "#E2E8F0", "SIDEBAR_ACTIVE": "#22262C", "SIDEBAR_DIVIDER_COLOR": "#E5E7EB"}
+        c = {
+            "SIDEBAR_BG": "#1a1c1e",
+            "TEXT": "#1F2937",
+            "TEXT_MUTED": "#4B5563",
+            "ACCENT": "#6366F1",
+            "ACCENT_HOVER": "#5258CF",
+            "ACCENT_ACTIVE": "#3F46B8",
+            "BG": "#F8FAFC",
+            "BORDER": "#E5E7EB",
+            "BTN_BG": "#F1F5F9",
+            "BTN_HOVER_BG": "#E2E8F0",
+            "SIDEBAR_ACTIVE": "#22262C",
+            "SIDEBAR_DIVIDER_COLOR": "#E5E7EB",
+        }
         try:
             from ui.constants import COLORS as _C
+
             c.update(_C)
         except Exception:
             pass
@@ -1290,13 +1710,15 @@ class PyQtLauncher(QtWidgets.QMainWindow):
 
         title = QtWidgets.QLabel("ComfyUI\n启动器")
         title.setAlignment(Qt.AlignCenter)
-        title.setStyleSheet("font: bold 18pt \"Microsoft YaHei\"; color: #FFFFFF; background: transparent;")
+        title.setStyleSheet(
+            'font: bold 18pt "Microsoft YaHei"; color: #FFFFFF; background: transparent;'
+        )
 
         # Add glow effect to title
         try:
             glow = QtWidgets.QGraphicsDropShadowEffect(self)
             glow.setBlurRadius(15)
-            glow.setColor(QtGui.QColor(158, 119, 237, 150)) # Purple glow
+            glow.setColor(QtGui.QColor(158, 119, 237, 150))  # Purple glow
             glow.setOffset(0, 0)
             title.setGraphicsEffect(glow)
         except Exception:
@@ -1304,6 +1726,7 @@ class PyQtLauncher(QtWidgets.QMainWindow):
 
         try:
             from PyQt5.QtGui import QFont
+
             tf = title.font()
             tf.setLetterSpacing(QFont.PercentageSpacing, 102)
             title.setFont(tf)
@@ -1313,7 +1736,9 @@ class PyQtLauncher(QtWidgets.QMainWindow):
 
         author = QtWidgets.QLabel("by 黎黎原上咩")
         author.setAlignment(Qt.AlignCenter)
-        author.setStyleSheet(f"color: #6B7280; font: 9pt \"Microsoft YaHei\"; background: transparent;")
+        author.setStyleSheet(
+            f'color: #6B7280; font: 9pt "Microsoft YaHei"; background: transparent;'
+        )
         header_layout.addWidget(author)
 
         # Store header labels reference for collapse/expand
@@ -1386,7 +1811,9 @@ class PyQtLauncher(QtWidgets.QMainWindow):
             btn.setObjectName("ThemeBtn")
             btn.setCheckable(True)
             btn.setFixedHeight(36)
-            btn.setSizePolicy(QtWidgets.QSizePolicy.Expanding, QtWidgets.QSizePolicy.Fixed)
+            btn.setSizePolicy(
+                QtWidgets.QSizePolicy.Expanding, QtWidgets.QSizePolicy.Fixed
+            )
             btn.setCursor(Qt.PointingHandCursor)
             btn.setProperty("theme_value", value)
             btn.setToolTip(f"切换到{label}主题")
@@ -1420,7 +1847,9 @@ class PyQtLauncher(QtWidgets.QMainWindow):
             if not proceed:
                 # 恢复按钮选中状态
                 for b in self._theme_buttons:
-                    b.setChecked(b is btn and False or (b.property("theme_value") == prev))
+                    b.setChecked(
+                        b is btn and False or (b.property("theme_value") == prev)
+                    )
                 return
             self._theme_value = theme
             try:
@@ -1433,6 +1862,7 @@ class PyQtLauncher(QtWidgets.QMainWindow):
                 if logger:
                     logger.info("准备调用 _restart_app (通过 QTimer)")
                 from PyQt5.QtCore import QTimer
+
                 QTimer.singleShot(200, self._restart_app)
             except Exception as e:
                 if logger:
@@ -1460,7 +1890,11 @@ class PyQtLauncher(QtWidgets.QMainWindow):
         sidebar.setWidgetResizable(True)
         sidebar.setHorizontalScrollBarPolicy(Qt.ScrollBarAlwaysOff)
         sidebar.setFrameShape(QtWidgets.QFrame.NoFrame)
-        sidebar.setFixedWidth(self._sidebar_collapsed_width if self._sidebar_collapsed else self._sidebar_expanded_width)
+        sidebar.setFixedWidth(
+            self._sidebar_collapsed_width
+            if self._sidebar_collapsed
+            else self._sidebar_expanded_width
+        )
         # 滚动区域用于控制宽度，内部的 sidebar_inner 负责实际的深色卡片样式
         self._sidebar_scroll = sidebar
         self._sidebar_widget = sidebar_inner
@@ -1480,7 +1914,9 @@ class PyQtLauncher(QtWidgets.QMainWindow):
         collapse_btn.setStyleSheet(
             self.theme_manager.styles.collapse_button_style()
             if hasattr(self, "theme_manager") and self.theme_manager
-            else ThemeStyles(ThemeColors(dark=(getattr(self, "_theme_value", "dark") != "light"))).collapse_button_style()
+            else ThemeStyles(
+                ThemeColors(dark=(getattr(self, "_theme_value", "dark") != "light"))
+            ).collapse_button_style()
         )
         collapse_btn.clicked.connect(self._toggle_sidebar)
         collapse_btn.setToolTip("收起侧边栏")
@@ -1493,7 +1929,9 @@ class PyQtLauncher(QtWidgets.QMainWindow):
         expand_btn.setStyleSheet(
             self.theme_manager.styles.expand_button_style()
             if hasattr(self, "theme_manager") and self.theme_manager
-            else ThemeStyles(ThemeColors(dark=(getattr(self, "_theme_value", "dark") != "light"))).expand_button_style()
+            else ThemeStyles(
+                ThemeColors(dark=(getattr(self, "_theme_value", "dark") != "light"))
+            ).expand_button_style()
         )
         expand_btn.clicked.connect(self._toggle_sidebar)
         expand_btn.setToolTip("展开侧边栏")
@@ -1519,7 +1957,9 @@ class PyQtLauncher(QtWidgets.QMainWindow):
         content.setAttribute(Qt.WA_StyledBackground, True)
         self._content_widget = content
 
-        content.setSizePolicy(QtWidgets.QSizePolicy.Expanding, QtWidgets.QSizePolicy.Expanding)
+        content.setSizePolicy(
+            QtWidgets.QSizePolicy.Expanding, QtWidgets.QSizePolicy.Expanding
+        )
         # style is applied via theme
         main.addWidget(sidebar_container)
         # Divider removed for floating style
@@ -1545,7 +1985,9 @@ class PyQtLauncher(QtWidgets.QMainWindow):
         page_models = ModelsPage(app=self, theme_manager=self.theme_manager)
         page_about_me = AboutMePage(theme_manager=self.theme_manager)
         page_about_comfyui = AboutComfyUIPage(theme_manager=self.theme_manager)
-        page_about_launcher = AboutLauncherPage(app=self, theme_manager=self.theme_manager)
+        page_about_launcher = AboutLauncherPage(
+            app=self, theme_manager=self.theme_manager
+        )
 
         # Store references for theme updates
         self._new_pages = {
@@ -1556,7 +1998,6 @@ class PyQtLauncher(QtWidgets.QMainWindow):
             "comfyui": page_about_comfyui,
             "about_launcher": page_about_launcher,
         }
-
 
         def wrap_in_scroll(widget):
             # Ensure the widget inside scroll area is transparent
@@ -1583,12 +2024,12 @@ class PyQtLauncher(QtWidgets.QMainWindow):
                     border-radius: 0px;
                 }}
                 QScrollBar::handle:vertical {{
-                    background: {c.get('ACCENT', '#6366F1')};
+                    background: {c.get("ACCENT", "#6366F1")};
                     min-height: 20px;
                     border-radius: 4px;
                 }}
                 QScrollBar::handle:vertical:hover {{
-                    background: {c.get('ACCENT_HOVER', '#5258CF')};
+                    background: {c.get("ACCENT_HOVER", "#5258CF")};
                 }}
                 QScrollBar::add-line:vertical, QScrollBar::sub-line:vertical {{
                     height: 0px;
@@ -1605,12 +2046,12 @@ class PyQtLauncher(QtWidgets.QMainWindow):
                     border-radius: 0px;
                 }}
                 QScrollBar::handle:horizontal {{
-                    background: {c.get('ACCENT', '#6366F1')};
+                    background: {c.get("ACCENT", "#6366F1")};
                     min-width: 20px;
                     border-radius: 4px;
                 }}
                 QScrollBar::handle:horizontal:hover {{
-                    background: {c.get('ACCENT_HOVER', '#5258CF')};
+                    background: {c.get("ACCENT_HOVER", "#5258CF")};
                 }}
                 QScrollBar::add-line:horizontal, QScrollBar::sub-line:horizontal {{
                     width: 0px;
@@ -1637,11 +2078,13 @@ class PyQtLauncher(QtWidgets.QMainWindow):
             "comfyui": page_about_comfyui,
             "about_launcher": page_about_launcher,
         }
+
         def _select_tab(name):
             idx = list(pages.keys()).index(name)
             content.setCurrentIndex(idx)
             for k, b in btns.items():
                 b.setChecked(k == name)
+
         for key, b in btns.items():
             b.clicked.connect(lambda _, k=key: _select_tab(k))
         _select_tab("launch")
@@ -1652,39 +2095,24 @@ class PyQtLauncher(QtWidgets.QMainWindow):
         self._python_validation_failed = False
         try:
             from pathlib import Path as P
-            comfy_root = Path(self.config.get("paths", {}).get("comfyui_root") or ".").resolve()
+
+            comfy_root = Path(
+                self.config.get("paths", {}).get("comfyui_root") or "."
+            ).resolve()
             comfy_dir = comfy_root / "ComfyUI"
-            python_path = Path(self.python_exec) if hasattr(self, 'python_exec') else None
+            python_path = (
+                Path(self.python_exec) if hasattr(self, "python_exec") else None
+            )
 
             # 验证ComfyUI目录
             if not (comfy_dir.exists() and (comfy_dir / "main.py").exists()):
                 self._root_validation_failed = True
-                # 不在这里弹窗，而是在窗口显示后弹窗，这样窗口大小已经设置正确
             else:
                 # 验证Python路径（仅当根目录验证通过时才检查）
                 if python_path and not python_path.exists():
                     self._python_validation_failed = True
-                    # 不在这里弹窗，而是在窗口显示后弹窗
         except Exception:
             self._root_validation_failed = True
-
-        # 调试日志：确认验证状态
-        if getattr(self, "logger", None):
-            if self._root_validation_failed:
-                self.logger.info("根目录验证失败，等待用户配置...")
-            elif self._python_validation_failed:
-                self.logger.info("Python路径验证失败，等待用户配置...")
-            else:
-                self.logger.info("验证通过，准备获取版本信息...")
-
-        try:
-            self.get_version_info("all")
-        except Exception:
-            pass
-
-        # 调试日志：确认 get_version_info 之后
-        if getattr(self, "logger", None):
-            self.logger.info("get_version_info 之后，准备设置侧边栏...")
 
         # Initialize sidebar visibility based on config
         self._update_sidebar_visibility()
@@ -1713,8 +2141,20 @@ class PyQtLauncher(QtWidgets.QMainWindow):
             # 调试日志
             try:
                 if getattr(self, "logger", None):
-                    self.logger.info("窗口初始化: 屏幕=%dx%d, base=%dx%d, final=%dx%d", s_w, s_h, base_w, base_h, final_w, final_h)
-                    self.logger.info("页面大小: sizeHint=%dx%d", self.sizeHint().width(), self.sizeHint().height())
+                    self.logger.info(
+                        "窗口初始化: 屏幕=%dx%d, base=%dx%d, final=%dx%d",
+                        s_w,
+                        s_h,
+                        base_w,
+                        base_h,
+                        final_w,
+                        final_h,
+                    )
+                    self.logger.info(
+                        "页面大小: sizeHint=%dx%d",
+                        self.sizeHint().width(),
+                        self.sizeHint().height(),
+                    )
             except Exception as e:
                 if getattr(self, "logger", None):
                     self.logger.info("日志输出异常: %s", str(e))
@@ -1723,11 +2163,13 @@ class PyQtLauncher(QtWidgets.QMainWindow):
 
             # 调试日志：检查 resize 后的窗口大小
             if getattr(self, "logger", None):
-                self.logger.info("resize() 后窗口大小: %dx%d", self.width(), self.height())
+                self.logger.info(
+                    "resize() 后窗口大小: %dx%d", self.width(), self.height()
+                )
 
             self.move(
                 avail_geo.x() + (s_w - final_w) // 2,
-                avail_geo.y() + (s_h - final_h) // 2
+                avail_geo.y() + (s_h - final_h) // 2,
             )
         except Exception as e:
             if getattr(self, "logger", None):
@@ -1737,15 +2179,19 @@ class PyQtLauncher(QtWidgets.QMainWindow):
         """弹窗确认：切换主题将重启启动器，不影响已启动的 ComfyUI"""
         try:
             from ui_qt.widgets.dialog_helper import DialogHelper
+
             msg = (
                 "将切换到“{new}”主题。\n\n"
                 "为确保所有页面样式一致，启动器需要重启。\n"
                 "已启动的 ComfyUI 服务不会受到影响。\n\n"
                 "是否立即重启启动器？"
             ).format(new="浅色" if new_theme == "light" else "深色")
-            return DialogHelper.show_confirmation(self, "切换主题并重启", msg, yes_text="立即重启", no_text="稍后")
+            return DialogHelper.show_confirmation(
+                self, "切换主题并重启", msg, yes_text="立即重启", no_text="稍后"
+            )
         except Exception:
             return True
+
     def _restart_app(self):
         """重启应用以确保主题完整生效"""
         try:
@@ -1774,6 +2220,7 @@ class PyQtLauncher(QtWidgets.QMainWindow):
             import sys
             import subprocess
             from pathlib import Path
+
             cwd = Path.cwd()
 
             env = dict(os.environ)
@@ -1792,7 +2239,7 @@ class PyQtLauncher(QtWidgets.QMainWindow):
                 is_nuitka = __compiled__ is not None
             except NameError:
                 is_nuitka = False
-            is_pyinstaller = hasattr(sys, '_MEIPASS')
+            is_pyinstaller = hasattr(sys, "_MEIPASS")
 
             # 获取正确的可执行文件路径
             if is_nuitka:
@@ -1817,13 +2264,18 @@ class PyQtLauncher(QtWidgets.QMainWindow):
 
             # 在关闭日志之前记录关键信息
             if logger:
-                logger.info("重启检测: is_nuitka=%s, is_pyinstaller=%s, sys.executable=%s",
-                           is_nuitka, is_pyinstaller, sys.executable)
+                logger.info(
+                    "重启检测: is_nuitka=%s, is_pyinstaller=%s, sys.executable=%s",
+                    is_nuitka,
+                    is_pyinstaller,
+                    sys.executable,
+                )
                 logger.info("重启参数: exe=%s, args=%s, cwd=%s", exe, args, cwd)
 
             # 现在关闭日志
             try:
                 import logging as _L
+
                 _L.shutdown()
             except Exception:
                 pass
@@ -1834,11 +2286,11 @@ class PyQtLauncher(QtWidgets.QMainWindow):
                     creationflags = 0
                     creationflags |= subprocess.CREATE_NEW_PROCESS_GROUP
                     creationflags |= subprocess.DETACHED_PROCESS
-                    kwargs['creationflags'] = creationflags
+                    kwargs["creationflags"] = creationflags
                 except Exception:
                     pass
             else:
-                kwargs['start_new_session'] = True
+                kwargs["start_new_session"] = True
 
             proc = subprocess.Popen(
                 args,
@@ -1848,7 +2300,7 @@ class PyQtLauncher(QtWidgets.QMainWindow):
                 stdin=subprocess.DEVNULL,
                 stdout=subprocess.DEVNULL,
                 stderr=subprocess.DEVNULL,
-                **kwargs
+                **kwargs,
             )
 
             # 用 print 作为最后的日志（因为 logging 已关闭）
@@ -1857,32 +2309,41 @@ class PyQtLauncher(QtWidgets.QMainWindow):
         except Exception as e:
             try:
                 from utils.logging import get_logger
+
                 logger = get_logger("comfyui_launcher")
                 if logger:
                     logger.error("重启失败: %s", str(e))
             except Exception:
                 pass
-        
+
         try:
             QtWidgets.QApplication.quit()
         except Exception:
             pass
+
     def resolve_git(self):
         return GitService(self).resolve_git()
-
 
     def _toggle_sidebar(self):
         """Toggle sidebar collapse/expand state"""
         self._sidebar_collapsed = not self._sidebar_collapsed
-        width = self._sidebar_collapsed_width if self._sidebar_collapsed else self._sidebar_expanded_width
-        target = getattr(self, "_sidebar_scroll", None) or getattr(self, "_sidebar_widget", None)
+        width = (
+            self._sidebar_collapsed_width
+            if self._sidebar_collapsed
+            else self._sidebar_expanded_width
+        )
+        target = getattr(self, "_sidebar_scroll", None) or getattr(
+            self, "_sidebar_widget", None
+        )
         if target is not None:
             target.setFixedWidth(width)
         self._update_sidebar_visibility()
 
         # Save configuration
         try:
-            self.services.config.set("ui_settings.sidebar_collapsed", self._sidebar_collapsed)
+            self.services.config.set(
+                "ui_settings.sidebar_collapsed", self._sidebar_collapsed
+            )
             self.services.config.save(None)
         except Exception:
             pass
@@ -1922,63 +2383,175 @@ class PyQtLauncher(QtWidgets.QMainWindow):
                 emoji = full_text.split()[0]
                 btn.setText(emoji if is_collapsed else full_text)
 
-    def get_version_info(self, scope="all"):
-        # 调试日志：确认进入 get_version_info
+    def _stop_workers(self, worker_dict_key):
+        """停止指定类型的所有 worker"""
         try:
-            if getattr(self, "logger", None):
-                self.logger.info("get_version_info 方法开始执行...")
+            workers = getattr(self, worker_dict_key, None)
+            if workers:
+                for w in list(workers.values()):
+                    try:
+                        if w and w.isRunning():
+                            w.requestInterruption()
+                            w.quit()
+                            w.wait(500)
+                    except Exception:
+                        pass
+                workers.clear()
         except Exception:
             pass
 
+    def _cleanup_worker(self, worker_type, worker_id):
+        """清理已完成的 worker"""
+        try:
+            workers = getattr(self, "_version_workers", {})
+            key = f"{worker_type}_{worker_id}"
+            if key in workers:
+                del workers[key]
+        except Exception:
+            pass
+
+    def _start_version_worker(self, worker_class, worker_type, callback, attempt=1):
+        """启动版本检测 worker（通用方法）"""
+        try:
+            if not hasattr(self, "_version_workers"):
+                self._version_workers = {}
+
+            worker_id = f"{worker_type}_{attempt}"
+            worker = worker_class(self, attempt)
+            worker.versionReady.connect(callback)
+
+            # 连接重试信号
+            def on_retry(attempt_num):
+                QtCore.QTimer.singleShot(
+                    BaseVersionWorker.RETRY_DELAY_MS,
+                    lambda: self._start_version_worker(
+                        worker_class, worker_type, callback, attempt_num + 1
+                    ),
+                )
+
+            worker.retryNeeded.connect(on_retry)
+
+            # 清理
+            worker.finished.connect(lambda: self._cleanup_worker(worker_type, attempt))
+            worker.finished.connect(worker.deleteLater)
+
+            self._version_workers[worker_id] = worker
+            worker.start()
+        except Exception as e:
+            try:
+                if hasattr(self, "logger"):
+                    self.logger.warning("启动 %s worker 失败: %s", worker_type, e)
+            except Exception:
+                pass
+
+    def _start_version_detection(self):
         try:
             if getattr(self, "logger", None):
-                self.logger.info("UI: 触发版本刷新 scope=%s", scope)
+                if self._root_validation_failed:
+                    self.logger.info("根目录验证失败，等待用户配置...")
+                elif self._python_validation_failed:
+                    self.logger.info("Python路径验证失败，等待用户配置...")
+                else:
+                    self.logger.info("验证通过，准备获取版本信息...")
+                    self.get_version_info("all")
         except Exception:
             pass
+
+    def _start_gpu_check(self, attempt=1):
+        """启动 GPU 检测 worker"""
         try:
-            prev = getattr(self, "_ver_worker", None)
-            if prev and prev.isRunning():
-                try:
-                    prev.requestInterruption()
-                except Exception:
-                    pass
-                try:
-                    prev.quit()
-                except Exception:
-                    pass
-                try:
-                    prev.wait(1500)
-                except Exception:
-                    pass
+            if not hasattr(self, "_gpu_workers"):
+                self._gpu_workers = {}
+
+            worker_id = f"gpu_{attempt}"
+            worker = GpuCheckWorker(self, attempt)
+            worker.gpuStatusReady.connect(self._on_gpu_driver_status)
+
+            # 连接重试信号
+            def on_retry(attempt_num):
+                QtCore.QTimer.singleShot(
+                    BaseVersionWorker.RETRY_DELAY_MS,
+                    lambda: self._start_gpu_check(attempt_num + 1),
+                )
+
+            worker.retryNeeded.connect(on_retry)
+
+            # 清理
+            worker.finished.connect(lambda: self._cleanup_worker("gpu", attempt))
+            worker.finished.connect(worker.deleteLater)
+
+            self._gpu_workers[worker_id] = worker
+            worker.start()
+        except Exception as e:
+            try:
+                if hasattr(self, "logger"):
+                    self.logger.warning("启动 GPU worker 失败: %s", e)
+            except Exception:
+                pass
+
+    def get_version_info(self, scope="all"):
+        """获取版本信息 - 全异步实现，各检测项独立运行"""
+        try:
+            if getattr(self, "logger", None):
+                self.logger.info("get_version_info 方法开始执行 scope=%s", scope)
         except Exception:
             pass
+
+        # 停止旧的 workers
+        self._stop_workers("_version_workers")
+        self._stop_workers("_gpu_workers")
+
+        # 立即显示占位符
         try:
-            # 根据 scope 仅重置必要的标签，避免全部闪烁
             if scope in ("all", "python_related"):
-                for v in (self.python_version, self.torch_version, self.frontend_version, self.template_version):
-                    v.set("获取中…")
+                self.python_version.set("获取中…")
+                self.torch_version.set("获取中…")
+                self.frontend_version.set("获取中…")
+                self.template_version.set("获取中…")
+                self.gpu_driver_status.set("检测中…")
             if scope in ("all", "core_only", "selected"):
                 self.comfyui_version.set("获取中…")
                 self.git_status.set("检测中…")
         except Exception:
             pass
+
+        # 并行启动所有检测
         try:
-            w = VersionWorker(self, scope)
-            w.pythonVersion.connect(self._on_python_version)
-            w.torchVersion.connect(self._on_torch_version)
-            w.frontendVersion.connect(self._on_frontend_version)
-            w.templateVersion.connect(self._on_template_version)
-            w.coreVersion.connect(self._on_core_version)
-            w.gpuDriverStatus.connect(self._on_gpu_driver_status)
-            w.gitStatus.connect(self._on_git_status)
-            self._ver_worker = w
+            if scope in ("all", "python_related"):
+                # Python 版本
+                self._start_version_worker(
+                    PythonVersionWorker, "python", self._on_python_version
+                )
+                # Torch 版本
+                self._start_version_worker(
+                    TorchVersionWorker, "torch", self._on_torch_version
+                )
+                # 前端包版本
+                self._start_version_worker(
+                    FrontendVersionWorker, "frontend", self._on_frontend_version
+                )
+                # 模板库版本
+                self._start_version_worker(
+                    TemplateVersionWorker, "template", self._on_template_version
+                )
+                # GPU 检测
+                self._start_gpu_check()
+
+            if scope in ("all", "core_only", "selected"):
+                # 内核版本
+                self._start_version_worker(
+                    ComfyUIVersionWorker, "core", self._on_core_version
+                )
+                # Git 状态
+                self._start_version_worker(GitStatusWorker, "git", self._on_git_status)
+
+        except Exception as e:
             try:
-                w.finished.connect(w.deleteLater)
-                w.finished.connect(lambda: setattr(self, "_ver_worker", None))
+                if hasattr(self, "logger"):
+                    self.logger.warning("版本检测启动失败: %s", e)
             except Exception:
                 pass
-            w.start()
-        except Exception:
+            # 回退到旧方法
             try:
                 refresh_version_info(self, scope)
             except Exception:
@@ -2000,17 +2573,24 @@ class PyQtLauncher(QtWidgets.QMainWindow):
                 extra_args=self.extra_launch_args.get() or "",
                 attention_mode=self.attention_mode.get() or "",
                 browser_open_mode=self.browser_open_mode.get() or "default",
-                custom_browser_path=self.custom_browser_path.get() or ""
+                custom_browser_path=self.custom_browser_path.get() or "",
             )
             self.services.config.update_proxy_settings(
                 pypi_proxy_mode=self.pypi_proxy_mode.get(),
                 pypi_proxy_url=self.pypi_proxy_url.get(),
                 hf_mirror_url=self.hf_mirror_url.get(),
-                hf_mirror_mode=self.selected_hf_mirror.get()
+                hf_mirror_mode=self.selected_hf_mirror.get(),
             )
-            self.services.config.set("version_preferences.stable_only", bool(self.stable_only_var.get()))
-            self.services.config.set("version_preferences.auto_update_deps", bool(self.auto_update_deps_var.get()))
-            self.services.config.set("version_preferences.update_timeout", int(self.update_timeout_var.get()))
+            self.services.config.set(
+                "version_preferences.stable_only", bool(self.stable_only_var.get())
+            )
+            self.services.config.set(
+                "version_preferences.auto_update_deps",
+                bool(self.auto_update_deps_var.get()),
+            )
+            self.services.config.set(
+                "version_preferences.update_timeout", int(self.update_timeout_var.get())
+            )
             self.services.config.save(None)
             self.config = self.services.config.get_config()
         except Exception:
@@ -2018,7 +2598,7 @@ class PyQtLauncher(QtWidgets.QMainWindow):
 
     def apply_pip_proxy_settings(self):
         try:
-            if getattr(self, 'services', None):
+            if getattr(self, "services", None):
                 self.services.network.apply_pip_proxy_settings()
         except Exception:
             pass
@@ -2055,7 +2635,9 @@ class PyQtLauncher(QtWidgets.QMainWindow):
         except Exception:
             pass
 
-    def _format_update_summary(self, core_res: dict | None, req_res: dict | None) -> str:
+    def _format_update_summary(
+        self, core_res: dict | None, req_res: dict | None
+    ) -> str:
         lines = []
         if isinstance(core_res, dict):
             if core_res.get("error"):
@@ -2078,7 +2660,9 @@ class PyQtLauncher(QtWidgets.QMainWindow):
             if req_res.get("updated") is True:
                 installed = req_res.get("installed") or []
                 satisfied = req_res.get("satisfied") or []
-                lines.append(f"依赖：已同步（变更{len(installed)}项，已满足{len(satisfied)}项）")
+                lines.append(
+                    f"依赖：已同步（变更{len(installed)}项，已满足{len(satisfied)}项）"
+                )
             elif req_res.get("updated") is False:
                 pass
         return "\n".join(lines).strip() or "更新流程完成"
@@ -2098,7 +2682,13 @@ class PyQtLauncher(QtWidgets.QMainWindow):
         # 创建并显示进度弹窗
         try:
             from ui_qt.widgets.progress_dialog import ProgressDialog
-            pd = ProgressDialog(self, title="正在更新", theme_manager=getattr(self, "theme_manager", None), show_cancel=True)
+
+            pd = ProgressDialog(
+                self,
+                title="正在更新",
+                theme_manager=getattr(self, "theme_manager", None),
+                show_cancel=True,
+            )
             pd.set_status("正在检查更新...")
 
             # 设置取消回调：恢复按钮状态
@@ -2153,11 +2743,14 @@ class PyQtLauncher(QtWidgets.QMainWindow):
 
                 try:
                     import concurrent.futures
-                    with concurrent.futures.ThreadPoolExecutor(max_workers=1) as executor:
+
+                    with concurrent.futures.ThreadPoolExecutor(
+                        max_workers=1
+                    ) as executor:
                         future = executor.submit(
                             self.services.version.upgrade_latest,
                             stable_only,
-                            on_progress  # 传递进度回调
+                            on_progress,  # 传递进度回调
                         )
                         try:
                             core_res = future.result(timeout=timeout_seconds)
@@ -2166,7 +2759,10 @@ class PyQtLauncher(QtWidgets.QMainWindow):
                         except concurrent.futures.TimeoutError:
                             if logger:
                                 logger.warning("内核更新超时（%s秒）", timeout_seconds)
-                            core_res = {"component": "core", "error": f"更新超时（{timeout_seconds}秒）"}
+                            core_res = {
+                                "component": "core",
+                                "error": f"更新超时（{timeout_seconds}秒）",
+                            }
                             # 尝试取消线程
                             try:
                                 future.cancel()
@@ -2186,7 +2782,9 @@ class PyQtLauncher(QtWidgets.QMainWindow):
                 # 2. 更新依赖
                 on_progress("正在同步依赖库 (requirements)...")
                 try:
-                    if hasattr(self, "auto_update_deps_var") and bool(self.auto_update_deps_var.get()):
+                    if hasattr(self, "auto_update_deps_var") and bool(
+                        self.auto_update_deps_var.get()
+                    ):
                         req_res = self.services.update.sync_requirements_files()
                 except Exception as e:
                     req_res = {"component": "requirements", "error": str(e)}
@@ -2197,7 +2795,9 @@ class PyQtLauncher(QtWidgets.QMainWindow):
 
                 # 3. 更新前端和模板库（仅当没有同步依赖库时才需要单独更新）
                 # 如果同步了依赖库（upgrade=True），前端包和模板库已经随依赖一起更新了
-                deps_synced = hasattr(self, "auto_update_deps_var") and bool(self.auto_update_deps_var.get())
+                deps_synced = hasattr(self, "auto_update_deps_var") and bool(
+                    self.auto_update_deps_var.get()
+                )
                 if not deps_synced:
                     if self.update_frontend_var.get():
                         on_progress("正在更新前端包 (comfyui-frontend)...")
@@ -2217,9 +2817,15 @@ class PyQtLauncher(QtWidgets.QMainWindow):
 
                 try:
                     if getattr(self, "logger", None):
-                        self.logger.info("更新结果 core=%s requirements=%s", str(core_res), str(req_res))
+                        self.logger.info(
+                            "更新结果 core=%s requirements=%s",
+                            str(core_res),
+                            str(req_res),
+                        )
                         if isinstance(core_res, dict) and core_res.get("error"):
-                            self.logger.warning("内核更新失败: %s", str(core_res.get("error")))
+                            self.logger.warning(
+                                "内核更新失败: %s", str(core_res.get("error"))
+                            )
                 except Exception:
                     pass
             except Exception as e:
@@ -2237,7 +2843,7 @@ class PyQtLauncher(QtWidgets.QMainWindow):
                     # 关闭进度弹窗
                     if pd:
                         pd.close()
-                    
+
                     summary = self._format_update_summary(core_res, req_res)
                     try:
                         if getattr(self, "logger", None):
@@ -2246,6 +2852,7 @@ class PyQtLauncher(QtWidgets.QMainWindow):
                         pass
                     try:
                         from ui_qt.widgets.dialog_helper import DialogHelper
+
                         if isinstance(core_res, dict) and core_res.get("error"):
                             DialogHelper.show_warning(self, "更新失败", summary)
                         else:
@@ -2279,6 +2886,7 @@ class PyQtLauncher(QtWidgets.QMainWindow):
                 self._update_running = False
             except Exception:
                 pass
+
     def _do_batch_update(self):
         try:
             results, summary = self.services.update.perform_batch_update()
@@ -2288,6 +2896,7 @@ class PyQtLauncher(QtWidgets.QMainWindow):
                 pass
             try:
                 from ui_qt.widgets.dialog_helper import DialogHelper
+
                 DialogHelper.show_info(self, "更新完成", summary or "更新流程完成")
             except Exception:
                 pass
@@ -2295,40 +2904,59 @@ class PyQtLauncher(QtWidgets.QMainWindow):
         except Exception:
             try:
                 from ui_qt.widgets.dialog_helper import DialogHelper
+
                 DialogHelper.show_warning(self, "更新失败", "更新过程中发生错误")
             except Exception:
                 pass
 
     def open_root_dir(self):
         from utils.ui_actions import open_root_dir as _a
+
         _a(self)
+
     def open_logs_dir(self):
         from utils.ui_actions import open_logs_file as _a
+
         _a(self)
+
     def open_launcher_log(self):
         from utils.ui_actions import open_launcher_log as _a
+
         _a(self)
+
     def open_input_dir(self):
         from utils.ui_actions import open_input_dir as _a
+
         _a(self)
+
     def open_output_dir(self):
         from utils.ui_actions import open_output_dir as _a
+
         _a(self)
+
     def open_plugins_dir(self):
         from utils.ui_actions import open_plugins_dir as _a
+
         _a(self)
+
     def open_workflows_dir(self):
         from utils.ui_actions import open_workflows_dir as _a
+
         _a(self)
 
     def open_comfyui_web(self):
         from utils.ui_actions import open_web
+
         open_web(self)
 
     def _is_comfyui_running(self) -> bool:
         pm = getattr(self, "process_manager", None)
         try:
-            if pm and getattr(pm, "comfyui_process", None) and pm.comfyui_process.poll() is None:
+            if (
+                pm
+                and getattr(pm, "comfyui_process", None)
+                and pm.comfyui_process.poll() is None
+            ):
                 return True
         except Exception:
             pass
@@ -2339,6 +2967,7 @@ class PyQtLauncher(QtWidgets.QMainWindow):
             pass
         try:
             from core.probe import is_http_reachable
+
             return is_http_reachable(self)
         except Exception:
             return False
@@ -2365,7 +2994,7 @@ class PyQtLauncher(QtWidgets.QMainWindow):
         if running:
             try:
                 from ui_qt.widgets.custom_confirm_dialog import CustomConfirmDialog
-                
+
                 dialog = CustomConfirmDialog(
                     self,
                     title="退出确认",
@@ -2379,14 +3008,14 @@ class PyQtLauncher(QtWidgets.QMainWindow):
                         {"text": "停止服务并退出", "role": "destructive"},
                     ],
                     default_index=2,
-                    theme_manager=getattr(self, "theme_manager", None)
+                    theme_manager=getattr(self, "theme_manager", None),
                 )
                 if dialog.exec_() == QtWidgets.QDialog.Accepted:
                     idx = dialog.get_result()
                 else:
                     idx = 0  # Cancel
             except Exception:
-                idx = 0 # Default to cancel on error
+                idx = 0  # Default to cancel on error
 
             # 0: 取消
             if idx == 0:
@@ -2418,6 +3047,20 @@ class PyQtLauncher(QtWidgets.QMainWindow):
                 self._shutting_down = True
             except Exception:
                 pass
+
+        # 停止所有版本检测 workers
+        try:
+            self._stop_workers("_version_workers")
+            self._stop_workers("_gpu_workers")
+            if logger:
+                logger.info("所有版本检测 workers 已停止")
+        except Exception as e:
+            try:
+                if logger:
+                    logger.warning("停止 workers 时出错: %s", e)
+            except Exception:
+                pass
+
         try:
             super().closeEvent(event)
         except Exception:
@@ -2443,24 +3086,56 @@ class PyQtLauncher(QtWidgets.QMainWindow):
             pass
 
     def run(self):
+        # 首先检查是否有待处理的启动器更新
         try:
-            if getattr(self, "services", None) and getattr(self.services, "startup", None):
+            if getattr(self, "services", None) and hasattr(
+                self.services, "launcher_update"
+            ):
+                if self.services.launcher_update.has_pending_update():
+                    if self.services.launcher_update.apply_pending_update():
+                        # 启动了更新脚本，退出当前实例
+                        try:
+                            if getattr(self, "logger", None):
+                                self.logger.info("启动器更新准备完成，退出以应用更新")
+                        except Exception:
+                            pass
+                        try:
+                            QtWidgets.QApplication.quit()
+                        except Exception:
+                            pass
+                        return
+        except Exception:
+            pass
+
+        try:
+            if getattr(self, "services", None) and getattr(
+                self.services, "startup", None
+            ):
                 # 启动时只执行公告检查，不做任何 Git / 版本远程访问
                 self.services.startup.start_announcements_only()
         except Exception:
             pass
         try:
             import threading
+
             threading.Thread(target=self.services.process.monitor, daemon=True).start()
         except Exception:
             pass
         try:
+
             def _sync():
                 try:
                     # 强制用主线程重绘，避免早期跨线程 setText 失效
                     labs = list(self._version_label_refs or [])
                     # 必须与 items 列表顺序一致: 内核, 前端, 模板库, Python, Torch, Git
-                    vals = [self.comfyui_version.get(), self.frontend_version.get(), self.template_version.get(), self.python_version.get(), self.torch_version.get(), self.git_status.get()]
+                    vals = [
+                        self.comfyui_version.get(),
+                        self.frontend_version.get(),
+                        self.template_version.get(),
+                        self.python_version.get(),
+                        self.torch_version.get(),
+                        self.git_status.get(),
+                    ]
                     # 只更新值标签（偶数索引），不更新标题标签（奇数索引）
                     for i in range(0, len(vals) * 2, 2):
                         if i < len(labs):
@@ -2470,6 +3145,7 @@ class PyQtLauncher(QtWidgets.QMainWindow):
                                 pass
                 except Exception:
                     pass
+
             self._sync_timer = QtCore.QTimer(self)
             self._sync_timer.timeout.connect(_sync)
             self._sync_timer.start(1000)
@@ -2477,11 +3153,20 @@ class PyQtLauncher(QtWidgets.QMainWindow):
             pass
         self.show()
 
+        # 延迟启动版本检测，让窗口先显示出来
+        QtCore.QTimer.singleShot(0, lambda: self._start_version_detection())
+
         # 调试日志：检查 show() 后的窗口大小
         try:
             if getattr(self, "logger", None):
-                self.logger.info("show() 后窗口大小: %dx%d", self.width(), self.height())
-                self.logger.info("centralWidget 大小: %dx%d", self.centralWidget().width(), self.centralWidget().height() if self.centralWidget() else 0)
+                self.logger.info(
+                    "show() 后窗口大小: %dx%d", self.width(), self.height()
+                )
+                self.logger.info(
+                    "centralWidget 大小: %dx%d",
+                    self.centralWidget().width(),
+                    self.centralWidget().height() if self.centralWidget() else 0,
+                )
         except Exception:
             pass
 
@@ -2497,7 +3182,9 @@ class PyQtLauncher(QtWidgets.QMainWindow):
         # 调试日志：检查 updateGeometry 后的窗口大小
         try:
             if getattr(self, "logger", None):
-                self.logger.info("updateGeometry 后窗口大小: %dx%d", self.width(), self.height())
+                self.logger.info(
+                    "updateGeometry 后窗口大小: %dx%d", self.width(), self.height()
+                )
                 # 检查根目录配置
                 comfy_root = self.config.get("paths", {}).get("comfyui_root", "NOT_SET")
                 self.logger.info("当前根目录配置: %s", comfy_root)
@@ -2530,6 +3217,7 @@ class PyQtLauncher(QtWidgets.QMainWindow):
 
             if getattr(self, "_python_validation_failed", False):
                 from ui_qt.widgets.custom_confirm_dialog import CustomConfirmDialog
+
                 dlg = CustomConfirmDialog(
                     parent=self,
                     title="Python 路径验证失败",
@@ -2541,7 +3229,7 @@ class PyQtLauncher(QtWidgets.QMainWindow):
                     ),
                     buttons=[{"text": "我知道了", "role": "primary"}],
                     default_index=0,
-                    theme_manager=self.theme_manager
+                    theme_manager=self.theme_manager,
                 )
                 dlg.exec_()
         except Exception as e:
@@ -2554,7 +3242,9 @@ class PyQtLauncher(QtWidgets.QMainWindow):
         from ui_qt.widgets.custom_confirm_dialog import CustomConfirmDialog
 
         while True:
-            comfy_root = Path(self.config.get("paths", {}).get("comfyui_root") or ".").resolve()
+            comfy_root = Path(
+                self.config.get("paths", {}).get("comfyui_root") or "."
+            ).resolve()
             comfy_dir = comfy_root / "ComfyUI"
 
             # 显示提示对话框
@@ -2567,9 +3257,12 @@ class PyQtLauncher(QtWidgets.QMainWindow):
                     f"ComfyUI 目录：{comfy_dir}\n\n"
                     "请选择包含 ComfyUI 文件夹的父目录。"
                 ),
-                buttons=[{"text": "选择目录", "role": "primary"}, {"text": "退出程序", "role": "secondary"}],
+                buttons=[
+                    {"text": "选择目录", "role": "primary"},
+                    {"text": "退出程序", "role": "secondary"},
+                ],
                 default_index=0,
-                theme_manager=self.theme_manager
+                theme_manager=self.theme_manager,
             )
             dlg.exec_()
             result = dlg.get_result()  # 获取按钮索引：0=选择目录，1=退出程序
@@ -2584,17 +3277,18 @@ class PyQtLauncher(QtWidgets.QMainWindow):
 
             # 用户选择目录
             d = QtWidgets.QFileDialog.getExistingDirectory(
-                self,
-                "选择 ComfyUI 根目录",
-                str(Path.cwd())
+                self, "选择 ComfyUI 根目录", str(Path.cwd())
             )
 
             if d:
                 # 验证选择的目录
                 selected_comfy_dir = Path(d) / "ComfyUI"
-                if selected_comfy_dir.exists() and (selected_comfy_dir / "main.py").exists():
+                if (
+                    selected_comfy_dir.exists()
+                    and (selected_comfy_dir / "main.py").exists()
+                ):
                     # 验证通过，保存配置
-                    self.config.setdefault('paths', {})['comfyui_root'] = d
+                    self.config.setdefault("paths", {})["comfyui_root"] = d
                     try:
                         saved_config = self.services.config.save(self.config)
                         if saved_config is not None:
@@ -2611,10 +3305,17 @@ class PyQtLauncher(QtWidgets.QMainWindow):
                             self.python_exec = str(python_exe_path.resolve())
                         else:
                             from utils import paths as PATHS
-                            configured = self.config.get("paths", {}).get("python_path", "python_embeded/python.exe")
-                            py = PATHS.resolve_python_exec(selected_comfy_dir, configured)
+
+                            configured = self.config.get("paths", {}).get(
+                                "python_path", "python_embeded/python.exe"
+                            )
+                            py = PATHS.resolve_python_exec(
+                                selected_comfy_dir, configured
+                            )
                             self.python_exec = str(py)
-                        self.config.setdefault('paths', {})['python_path'] = self.python_exec
+                        self.config.setdefault("paths", {})["python_path"] = (
+                            self.python_exec
+                        )
                         try:
                             self.services.config.save(self.config)
                         except Exception:
@@ -2624,10 +3325,10 @@ class PyQtLauncher(QtWidgets.QMainWindow):
 
                     # 更新启动页面的显示
                     try:
-                        if hasattr(self, '_launch_page') and self._launch_page:
-                            if hasattr(self._launch_page, '_root_show'):
+                        if hasattr(self, "_launch_page") and self._launch_page:
+                            if hasattr(self._launch_page, "_root_show"):
                                 self._launch_page._root_show.setText(d)
-                            if hasattr(self._launch_page, '_py_show'):
+                            if hasattr(self._launch_page, "_py_show"):
                                 self._launch_page._py_show.setText(self.python_exec)
                     except Exception:
                         pass
@@ -2643,19 +3344,19 @@ class PyQtLauncher(QtWidgets.QMainWindow):
 
                     # 刷新版本页面的内核信息
                     try:
-                        if hasattr(self, '_new_pages') and 'version' in self._new_pages:
-                            version_page = self._new_pages['version']
-                            if hasattr(version_page, '_refresh_kernel_section'):
+                        if hasattr(self, "_new_pages") and "version" in self._new_pages:
+                            version_page = self._new_pages["version"]
+                            if hasattr(version_page, "_refresh_kernel_section"):
                                 version_page._refresh_kernel_section()
                     except Exception:
                         pass
 
                     # 刷新模型库页面的显示
                     try:
-                        if hasattr(self, '_new_pages') and 'models' in self._new_pages:
-                                models_page = self._new_pages['models']
-                                if hasattr(models_page, 'refresh_from_config'):
-                                    models_page.refresh_from_config()
+                        if hasattr(self, "_new_pages") and "models" in self._new_pages:
+                            models_page = self._new_pages["models"]
+                            if hasattr(models_page, "refresh_from_config"):
+                                models_page.refresh_from_config()
                     except Exception:
                         pass
 
@@ -2666,7 +3367,7 @@ class PyQtLauncher(QtWidgets.QMainWindow):
                         content=f"根目录已设置为：\n{d}\n\nComfyUI 目录：\n{selected_comfy_dir}",
                         buttons=[{"text": "确定", "role": "primary"}],
                         default_index=0,
-                        theme_manager=self.theme_manager
+                        theme_manager=self.theme_manager,
                     )
                     success_dlg.exec_()
                     return
@@ -2684,7 +3385,7 @@ class PyQtLauncher(QtWidgets.QMainWindow):
                         ),
                         buttons=[{"text": "重新选择", "role": "primary"}],
                         default_index=0,
-                        theme_manager=self.theme_manager
+                        theme_manager=self.theme_manager,
                     )
                     error_dlg.exec_()
             else:
@@ -2693,9 +3394,12 @@ class PyQtLauncher(QtWidgets.QMainWindow):
                     parent=self,
                     title="未选择目录",
                     content="必须选择一个有效的根目录才能使用启动器。\n\n是否继续选择？",
-                    buttons=[{"text": "继续选择", "role": "primary"}, {"text": "退出程序", "role": "secondary"}],
+                    buttons=[
+                        {"text": "继续选择", "role": "primary"},
+                        {"text": "退出程序", "role": "secondary"},
+                    ],
                     default_index=0,
-                    theme_manager=self.theme_manager
+                    theme_manager=self.theme_manager,
                 )
                 cancel_dlg.exec_()
                 if cancel_dlg.get_result() == 1:

@@ -1,0 +1,23 @@
+# Deleted Test Files - Hardcoded Path Cleanup
+# Date: 2026-03-24
+# Reason: Contains hardcoded Windows paths (F:\ComfyUI_Mie_V7.0 or F:/ComfyUI_Mie_V7.0)
+# Total files deleted: 13
+
+# Unit Tests (12 files)
+tests/unit/test_service_git.py - Contains hardcoded path F:\ComfyUI_Mie_V7.0
+tests/unit/test_service_network.py - Contains hardcoded path F:\ComfyUI_Mie_V7.0
+tests/unit/test_service_process_refresh.py - Contains hardcoded path F:\ComfyUI_Mie_V7.0
+tests/unit/test_service_runtime.py - Contains hardcoded path F:\ComfyUI_Mie_V7.0
+tests/unit/test_service_update.py - Contains hardcoded path F:\ComfyUI_Mie_V7.0
+tests/unit/test_service_update_modes.py - Contains hardcoded path F:\ComfyUI_Mie_V7.0
+tests/unit/test_service_update_proxies.py - Contains hardcoded path F:\ComfyUI_Mie_V7.0
+tests/unit/test_service_version.py - Contains hardcoded path F:\ComfyUI_Mie_V7.0
+tests/unit/test_service_version_more.py - Contains hardcoded path F:\ComfyUI_Mie_V7.0
+tests/unit/test_service_version_proxy.py - Contains hardcoded path F:\ComfyUI_Mie_V7.0
+tests/unit/test_service_process_runtime.py - Contains hardcoded path F:\ComfyUI_Mie_V7.0
+tests/unit/test_services_no_view.py - Contains hardcoded path F:\ComfyUI_Mie_V7.0
+
+# Integration Tests (1 file)
+tests/integration/test_runtime_start_stop.py - Contains hardcoded path F:\ComfyUI_Mie_V7.0
+
+# Verification: These files were identified by grep pattern "F:[/\\]ComfyUI_Mie_V7\.0"

@@ -200,7 +200,8 @@ class SplashScreen(QtWidgets.QWidget):
 from utils.common import SingletonLock
 from ui_qt.qt_app import PyQtLauncher
 
-if __name__ == "__main__":
+def launch_gui():
+    """Launch the GUI application."""
     lock = SingletonLock("comfyui_launcher_pyqt.lock")
     if not lock.acquire():
         _show_single_instance_dialog()
@@ -234,3 +235,7 @@ if __name__ == "__main__":
 
     finally:
         lock.release()
+
+
+if __name__ == "__main__":
+    launch_gui()

@@ -14,13 +14,29 @@ class AnnouncementService:
         self._last_data = None
 
     def _log(self, level: str, msg: str, *args):
-        logger = getattr(self.app, 'logger', None)
+        logger = getattr(self.app, "logger", None)
         if logger:
             try:
                 fn = getattr(logger, level, logger.info)
                 fn(msg, *args)
             except Exception:
                 pass
+
+    def _post_to_ui(self, fn):
+        try:
+            if hasattr(self.app, "ui_post"):
+                self.app.ui_post(fn)
+                return True
+        except Exception as e:
+            self._log("warning", "announcement: ui_post error=%s", e)
+        try:
+            root = getattr(self.app, "root", None)
+            if root is not None:
+                root.after(0, fn)
+                return True
+        except Exception as e:
+            self._log("warning", "announcement: root.after error=%s", e)
+        return False
 
     def _get_sources(self):
         cfg = self.app.config or {}
@@ -39,12 +55,22 @@ class AnnouncementService:
                 pass
         if not urls:
             try:
-                self._log('info', 'announcement: using built-in defaults count=%d', len(self._built_in_sources))
+                self._log(
+                    "info",
+                    "announcement: using built-in defaults count=%d",
+                    len(self._built_in_sources),
+                )
             except Exception:
                 pass
             urls = list(self._built_in_sources)
         try:
-            self._log('info', 'announcement: sources resolved primary=%s fallback_count=%d total=%d', src or '-', len(backups or []), len(urls))
+            self._log(
+                "info",
+                "announcement: sources resolved primary=%s fallback_count=%d total=%d",
+                src or "-",
+                len(backups or []),
+                len(urls),
+            )
         except Exception:
             pass
         return urls
@@ -91,196 +117,307 @@ class AnnouncementService:
                 seen = []
             if aid and aid not in seen:
                 seen.append(aid)
-                f.write_text(json.dumps(seen, ensure_ascii=False, indent=2), encoding="utf-8")
+                f.write_text(
+                    json.dumps(seen, ensure_ascii=False, indent=2), encoding="utf-8"
+                )
         except Exception:
             pass
 
     def _compute_id(self, data: dict) -> str:
         try:
             key = f"{data.get('title') or ''}\n{data.get('content') or ''}\n{data.get('source') or ''}"
-            return hashlib.sha256(key.encode('utf-8', errors='ignore')).hexdigest()
+            return hashlib.sha256(key.encode("utf-8", errors="ignore")).hexdigest()
         except Exception:
             return ""
 
     def fetch(self):
         urls = self._get_sources()
-        self._log('info', 'announcement: fetching from %d sources', len(urls))
-        headers = {"User-Agent": "ComfyUI-Launcher", "Accept": "application/json, text/plain"}
+        self._log("info", "announcement: fetching from %d sources", len(urls))
+        headers = {
+            "User-Agent": "ComfyUI-Launcher",
+            "Accept": "application/json, text/plain",
+        }
         for u in urls:
             try:
-                self._log('debug', 'announcement: request url=%s', u)
-                req = Request(u, headers=headers)
-                with urlopen(req, timeout=2.5) as resp:
-                    raw = resp.read()
-                    try:
-                        self._log('debug', 'announcement: response bytes=%d', len(raw))
-                    except Exception:
-                        pass
-                    txt = raw.decode("utf-8", errors="ignore").strip()
-                    if not txt:
-                        continue
-                    if txt.startswith("{"):
-                        try:
-                            obj = json.loads(txt)
-                        except Exception:
-                            obj = {"title": "公告", "content": txt}
-                        if isinstance(obj.get("items"), list):
-                            try:
-                                self._log('debug', 'announcement: index items=%d', len(obj.get('items') or []))
-                            except Exception:
-                                pass
-                            items_acc = []
-                            for it in obj.get("items"):
-                                t = (it.get("title") or "").strip() or "公告"
-                                c = (it.get("content") or "").strip()
-                                ru = it.get("rules") or {}
-                                mv = it.get("min_version")
-                                Mv = it.get("max_version")
-                                al = it.get("allow_versions")
-                                de = it.get("deny_versions")
-                                ve = it.get("version") or it.get("version_expr")
-                                sa = it.get("start_at")
-                                ea = it.get("end_at")
-                                if mv or Mv or al or de or ve or sa or ea:
-                                    ru = {"min_version": mv, "max_version": Mv, "allow_versions": al, "deny_versions": de, "version": ve, "start_at": sa, "end_at": ea}
-                                try:
-                                    self._log('debug', 'announcement: candidate title=%s rules=%s', t, ru)
-                                except Exception:
-                                    pass
-                                if ru and not self._is_allowed(ru):
-                                    continue
-                                if ru and not self._in_time_window(ru):
-                                    continue
-                                url2 = (it.get("url") or "").strip()
-                                if url2 and not c:
-                                    try:
-                                        r2 = Request(url2, headers=headers)
-                                        with urlopen(r2, timeout=2.5) as resp2:
-                                            raw2 = resp2.read()
-                                            tx2 = raw2.decode("utf-8", errors="ignore").strip()
-                                            if tx2.startswith("{"):
-                                                try:
-                                                    o2 = json.loads(tx2)
-                                                except Exception:
-                                                    o2 = {"title": t, "content": tx2}
-                                                t = (o2.get("title") or "").strip() or t
-                                                c = (o2.get("content") or "").strip() or tx2
-                                            else:
-                                                c = tx2
-                                    except Exception:
-                                        continue
-                                if c:
-                                    items_acc.append({"title": t, "content": c, "source": url2 or u, "rules": ru})
-                            # 聚合所有满足条件的条目
-                            if items_acc:
-                                agg = []
-                                for i, itz in enumerate(items_acc, 1):
-                                    agg.append(f"【{itz.get('title') or '公告'}】\n{itz.get('content') or ''}")
-                                sep = "\n\n" + ("-" * 64) + "\n\n"
-                                content_all = sep.join(agg)
-                                self._log('info', 'announcement: aggregated %d items from index', len(items_acc))
-                                return {"title": f"公告（{len(items_acc)} 条）", "content": content_all, "source": u, "rules": {}}
-                            continue
-                        redir = (obj.get("redirect") or "").strip()
-                        if redir:
-                            try:
-                                r2 = Request(redir, headers=headers)
-                                with urlopen(r2, timeout=2.5) as resp2:
-                                    raw2 = resp2.read()
-                                    tx2 = raw2.decode("utf-8", errors="ignore").strip()
-                                    if tx2.startswith("{"):
-                                        try:
-                                            o2 = json.loads(tx2)
-                                        except Exception:
-                                            o2 = {"title": "公告", "content": tx2}
-                                        tt = (o2.get("title") or "").strip() or "公告"
-                                        cc = (o2.get("content") or "").strip() or tx2
-                                        ru = o2.get("rules") or {}
-                                        mv = o2.get("min_version")
-                                        Mv = o2.get("max_version")
-                                        al = o2.get("allow_versions")
-                                        de = o2.get("deny_versions")
-                                        ch = o2.get("channels")
-                                        sa = o2.get("start_at")
-                                        ea = o2.get("end_at")
-                                        if mv or Mv or al or de or ch or sa or ea:
-                                            ru = {"min_version": mv, "max_version": Mv, "allow_versions": al, "deny_versions": de, "channels": ch, "start_at": sa, "end_at": ea}
-                                        self._log('info', 'announcement: redirect loaded url=%s title=%s', redir, tt)
-                                        return {"title": tt, "content": cc, "source": redir, "rules": ru}
-                                    else:
-                                        self._log('info', 'announcement: redirect loaded url=%s text', redir)
-                                        return {"title": "公告", "content": tx2, "source": redir, "rules": {}}
-                            except Exception:
-                                pass
-                        title = (obj.get("title") or "").strip() or "公告"
-                        content = (obj.get("content") or "").strip() or txt
-                        rules = obj.get("rules") or {}
-                        min_v = obj.get("min_version")
-                        max_v = obj.get("max_version")
-                        allow = obj.get("allow_versions")
-                        deny = obj.get("deny_versions")
-                        ve = obj.get("version") or obj.get("version_expr")
-                        sa = obj.get("start_at")
-                        ea = obj.get("end_at")
-                        if min_v or max_v or allow or deny or ve or sa or ea:
-                            rules = {"min_version": min_v, "max_version": max_v, "allow_versions": allow, "deny_versions": deny, "version": ve, "start_at": sa, "end_at": ea}
-                        self._log('info', 'announcement: single item loaded title=%s', title)
-                        return {"title": title, "content": content, "source": u, "rules": rules}
-                    else:
-                        self._log('info', 'announcement: plain text loaded from %s', u)
-                        return {"title": "公告", "content": txt, "source": u, "rules": {}}
+                data = self._fetch_single_url(u, headers)
+                if data is not None:
+                    return data
             except Exception:
                 continue
-        self._log('warning', 'announcement: all sources failed or empty')
+        self._log("warning", "announcement: all sources failed or empty")
         return None
+
+    def _fetch_single_url(self, u: str, headers: dict):
+        self._log("debug", "announcement: request url=%s", u)
+        req = Request(u, headers=headers)
+        with urlopen(req, timeout=2.5) as resp:
+            raw = resp.read()
+            try:
+                self._log("debug", "announcement: response bytes=%d", len(raw))
+            except Exception:
+                pass
+            txt = raw.decode("utf-8", errors="ignore").strip()
+            if not txt:
+                return None
+            if txt.startswith("{"):
+                return self._parse_json_payload(txt, u, headers)
+            self._log("info", "announcement: plain text loaded from %s", u)
+            return {
+                "title": "公告",
+                "content": txt,
+                "source": u,
+                "rules": {},
+            }
+
+    def _parse_json_payload(self, txt: str, u: str, headers: dict):
+        try:
+            obj = json.loads(txt)
+        except Exception:
+            self._log("warning", "announcement: malformed json from %s", u)
+            return None
+        if isinstance(obj.get("items"), list):
+            return self._parse_index_items(obj, u, headers)
+        redir = (obj.get("redirect") or "").strip()
+        if redir:
+            parsed = self._follow_redirect(redir, headers)
+            if parsed is not None:
+                return parsed
+        title = (obj.get("title") or "").strip() or "公告"
+        content = (obj.get("content") or "").strip() or txt
+        rules = obj.get("rules") or {}
+        min_v = obj.get("min_version")
+        max_v = obj.get("max_version")
+        allow = obj.get("allow_versions")
+        deny = obj.get("deny_versions")
+        ve = obj.get("version") or obj.get("version_expr")
+        sa = obj.get("start_at")
+        ea = obj.get("end_at")
+        if min_v or max_v or allow or deny or ve or sa or ea:
+            rules = {
+                "min_version": min_v,
+                "max_version": max_v,
+                "allow_versions": allow,
+                "deny_versions": deny,
+                "version": ve,
+                "start_at": sa,
+                "end_at": ea,
+            }
+        self._log("info", "announcement: single item loaded title=%s", title)
+        return {
+            "title": title,
+            "content": content,
+            "source": u,
+            "rules": rules,
+        }
+
+    def _parse_index_items(self, obj: dict, u: str, headers: dict):
+        try:
+            self._log(
+                "debug",
+                "announcement: index items=%d",
+                len(obj.get("items") or []),
+            )
+        except Exception:
+            pass
+        items_acc = []
+        for it in obj.get("items") or []:
+            t = (it.get("title") or "").strip() or "公告"
+            c = (it.get("content") or "").strip()
+            ru = it.get("rules") or {}
+            mv = it.get("min_version")
+            Mv = it.get("max_version")
+            al = it.get("allow_versions")
+            de = it.get("deny_versions")
+            ve = it.get("version") or it.get("version_expr")
+            sa = it.get("start_at")
+            ea = it.get("end_at")
+            if mv or Mv or al or de or ve or sa or ea:
+                ru = {
+                    "min_version": mv,
+                    "max_version": Mv,
+                    "allow_versions": al,
+                    "deny_versions": de,
+                    "version": ve,
+                    "start_at": sa,
+                    "end_at": ea,
+                }
+            try:
+                self._log(
+                    "debug",
+                    "announcement: candidate title=%s rules=%s",
+                    t,
+                    ru,
+                )
+            except Exception:
+                pass
+            if ru and not self._is_allowed(ru):
+                continue
+            if ru and not self._in_time_window(ru):
+                continue
+            url2 = (it.get("url") or "").strip()
+            if url2 and not c:
+                try:
+                    c, t = self._fetch_item_content(url2, headers, t)
+                except Exception:
+                    continue
+            if c:
+                items_acc.append(
+                    {
+                        "title": t,
+                        "content": c,
+                        "source": url2 or u,
+                        "rules": ru,
+                    }
+                )
+        if not items_acc:
+            return None
+        agg = []
+        for _, itz in enumerate(items_acc, 1):
+            agg.append(f"【{itz.get('title') or '公告'}】\n{itz.get('content') or ''}")
+        sep = "\n\n" + ("-" * 64) + "\n\n"
+        content_all = sep.join(agg)
+        self._log(
+            "info",
+            "announcement: aggregated %d items from index",
+            len(items_acc),
+        )
+        return {
+            "title": f"公告（{len(items_acc)} 条）",
+            "content": content_all,
+            "source": u,
+            "rules": {},
+        }
+
+    def _fetch_item_content(self, url2: str, headers: dict, fallback_title: str):
+        r2 = Request(url2, headers=headers)
+        with urlopen(r2, timeout=2.5) as resp2:
+            raw2 = resp2.read()
+            tx2 = raw2.decode("utf-8", errors="ignore").strip()
+            if tx2.startswith("{"):
+                try:
+                    o2 = json.loads(tx2)
+                except Exception:
+                    o2 = {"title": fallback_title, "content": tx2}
+                t = (o2.get("title") or "").strip() or fallback_title
+                c = (o2.get("content") or "").strip() or tx2
+            else:
+                t = fallback_title
+                c = tx2
+        return c, t
+
+    def _follow_redirect(self, redir: str, headers: dict):
+        try:
+            r2 = Request(redir, headers=headers)
+            with urlopen(r2, timeout=2.5) as resp2:
+                raw2 = resp2.read()
+                tx2 = raw2.decode("utf-8", errors="ignore").strip()
+                if tx2.startswith("{"):
+                    try:
+                        o2 = json.loads(tx2)
+                    except Exception:
+                        o2 = {"title": "公告", "content": tx2}
+                    tt = (o2.get("title") or "").strip() or "公告"
+                    cc = (o2.get("content") or "").strip() or tx2
+                    ru = o2.get("rules") or {}
+                    mv = o2.get("min_version")
+                    Mv = o2.get("max_version")
+                    al = o2.get("allow_versions")
+                    de = o2.get("deny_versions")
+                    ch = o2.get("channels")
+                    sa = o2.get("start_at")
+                    ea = o2.get("end_at")
+                    if mv or Mv or al or de or ch or sa or ea:
+                        ru = {
+                            "min_version": mv,
+                            "max_version": Mv,
+                            "allow_versions": al,
+                            "deny_versions": de,
+                            "channels": ch,
+                            "start_at": sa,
+                            "end_at": ea,
+                        }
+                    self._log(
+                        "info",
+                        "announcement: redirect loaded url=%s title=%s",
+                        redir,
+                        tt,
+                    )
+                    return {
+                        "title": tt,
+                        "content": cc,
+                        "source": redir,
+                        "rules": ru,
+                    }
+                self._log(
+                    "info",
+                    "announcement: redirect loaded url=%s text",
+                    redir,
+                )
+                return {
+                    "title": "公告",
+                    "content": tx2,
+                    "source": redir,
+                    "rules": {},
+                }
+        except Exception:
+            return None
 
     def _load_build_params(self):
         try:
             import sys, json as _json
             from pathlib import Path as _P
+
             candidates = []
             try:
-                candidates.append(_P(getattr(sys, '_MEIPASS', '')) / 'build_parameters.json')
+                candidates.append(
+                    _P(getattr(sys, "_MEIPASS", "")) / "build_parameters.json"
+                )
             except Exception:
                 pass
             try:
-                candidates.append(_P(sys.executable).resolve().parent / 'build_parameters.json')
+                candidates.append(
+                    _P(sys.executable).resolve().parent / "build_parameters.json"
+                )
             except Exception:
                 pass
             try:
-                candidates.append(_P(__file__).resolve().parents[1] / 'build_parameters.json')
+                candidates.append(
+                    _P(__file__).resolve().parents[1] / "build_parameters.json"
+                )
             except Exception:
                 pass
             try:
-                candidates.append(_P.cwd() / 'build_parameters.json')
+                candidates.append(_P.cwd() / "build_parameters.json")
             except Exception:
                 pass
             params = {}
             for p in candidates:
                 try:
                     if p.exists():
-                        with open(p, 'r', encoding='utf-8') as f:
+                        with open(p, "r", encoding="utf-8") as f:
                             params = _json.load(f) or {}
                         break
                 except Exception:
                     pass
-            ver = str(params.get('version') or '').strip()
-            mode = str(params.get('mode') or '').strip()
-            self._log('debug', 'announcement: build params version=%s mode=%s', ver, mode)
+            ver = str(params.get("version") or "").strip()
+            mode = str(params.get("mode") or "").strip()
+            self._log(
+                "debug", "announcement: build params version=%s mode=%s", ver, mode
+            )
             return {"version": ver, "mode": mode}
         except Exception:
             return {"version": "", "mode": ""}
 
     def _version_tuple(self, s: str):
         try:
-            v = (s or '').strip()
-            if v.startswith('v') or v.startswith('V'):
+            v = (s or "").strip()
+            if v.startswith("v") or v.startswith("V"):
                 v = v[1:]
-            parts = v.split('.')
+            parts = v.split(".")
             nums = []
             for p in parts:
                 try:
-                    nums.append(int(''.join(ch for ch in p if ch.isdigit())))
+                    nums.append(int("".join(ch for ch in p if ch.isdigit())))
                 except Exception:
                     nums.append(0)
             while len(nums) < 3:
@@ -292,27 +429,43 @@ class AnnouncementService:
     def _is_allowed(self, rules: dict) -> bool:
         try:
             bp = self._load_build_params()
-            cur_v = self._version_tuple(bp.get('version') or '')
+            cur_v = self._version_tuple(bp.get("version") or "")
             # 1) 解析 version 表达式，支持 > >= < <= == * 多条件（AND）
-            ve = (rules.get('version') or '').strip()
+            ve = (rules.get("version") or "").strip()
             if ve:
                 if not self._match_version_expr(ve, cur_v):
                     return False
             # 2) 兼容旧字段：min/max/allow/deny
-            min_v = self._version_tuple(rules.get('min_version') or '') if rules.get('min_version') else None
-            max_v = self._version_tuple(rules.get('max_version') or '') if rules.get('max_version') else None
-            allow = rules.get('allow_versions') or None
-            deny = rules.get('deny_versions') or None
+            min_v = (
+                self._version_tuple(rules.get("min_version") or "")
+                if rules.get("min_version")
+                else None
+            )
+            max_v = (
+                self._version_tuple(rules.get("max_version") or "")
+                if rules.get("max_version")
+                else None
+            )
+            allow = rules.get("allow_versions") or None
+            deny = rules.get("deny_versions") or None
             if deny:
-                ds = [str(x).strip() for x in (deny if isinstance(deny, list) else [deny]) if str(x).strip()]
+                ds = [
+                    str(x).strip()
+                    for x in (deny if isinstance(deny, list) else [deny])
+                    if str(x).strip()
+                ]
                 if ds:
-                    cur_vs = (bp.get('version') or '').strip()
+                    cur_vs = (bp.get("version") or "").strip()
                     if cur_vs in ds:
                         return False
             if allow:
-                as_ = [str(x).strip() for x in (allow if isinstance(allow, list) else [allow]) if str(x).strip()]
+                as_ = [
+                    str(x).strip()
+                    for x in (allow if isinstance(allow, list) else [allow])
+                    if str(x).strip()
+                ]
                 if as_:
-                    cur_vs = (bp.get('version') or '').strip()
+                    cur_vs = (bp.get("version") or "").strip()
                     if cur_vs not in as_:
                         return False
             if min_v and cur_v < min_v:
@@ -328,31 +481,31 @@ class AnnouncementService:
             e = expr.strip()
             if not e:
                 return True
-            if e == '*':
+            if e == "*":
                 return True
-            parts = [p for p in e.replace('&&', ' ').replace(',', ' ').split() if p]
+            parts = [p for p in e.replace("&&", " ").replace(",", " ").split() if p]
             for p in parts:
                 op = None
                 val = p
-                for candidate in ('>=', '<=', '==', '>', '<'):
+                for candidate in (">=", "<=", "==", ">", "<"):
                     if p.startswith(candidate):
                         op = candidate
-                        val = p[len(candidate):]
+                        val = p[len(candidate) :]
                         break
                 v_tup = self._version_tuple(val)
-                if op == '==':
+                if op == "==":
                     if not (cur_v == v_tup):
                         return False
-                elif op == '>=':
+                elif op == ">=":
                     if not (cur_v >= v_tup):
                         return False
-                elif op == '<=':
+                elif op == "<=":
                     if not (cur_v <= v_tup):
                         return False
-                elif op == '>':
+                elif op == ">":
                     if not (cur_v > v_tup):
                         return False
-                elif op == '<':
+                elif op == "<":
                     if not (cur_v < v_tup):
                         return False
                 else:
@@ -365,39 +518,56 @@ class AnnouncementService:
 
     def _in_time_window(self, rules: dict) -> bool:
         try:
-            sa = (rules.get('start_at') or '').strip()
-            ea = (rules.get('end_at') or '').strip()
+            sa = (rules.get("start_at") or "").strip()
+            ea = (rules.get("end_at") or "").strip()
             if not sa and not ea:
                 return True
             now = datetime.utcnow()
+
             def _parse(s):
-                for fmt in ('%Y-%m-%dT%H:%M:%S', '%Y-%m-%d %H:%M:%S', '%Y-%m-%d'):
+                for fmt in ("%Y-%m-%dT%H:%M:%S", "%Y-%m-%d %H:%M:%S", "%Y-%m-%d"):
                     try:
                         return datetime.strptime(s, fmt)
                     except Exception:
                         pass
                 return None
+
             if sa:
                 ps = _parse(sa)
                 if ps and now < ps:
-                    self._log('info', 'announcement: outside start window start_at=%s now_utc=%s', sa, now.isoformat())
+                    self._log(
+                        "info",
+                        "announcement: outside start window start_at=%s now_utc=%s",
+                        sa,
+                        now.isoformat(),
+                    )
                     return False
             if ea:
                 pe = _parse(ea)
                 if pe and now > pe:
-                    self._log('info', 'announcement: outside end window end_at=%s now_utc=%s', ea, now.isoformat())
+                    self._log(
+                        "info",
+                        "announcement: outside end window end_at=%s now_utc=%s",
+                        ea,
+                        now.isoformat(),
+                    )
                     return False
             return True
         except Exception:
             return True
 
     def show_if_available(self):
-        ann_cfg = self.app.config.get("announcement", {}) if isinstance(self.app.config, dict) else {}
+        ann_cfg = (
+            self.app.config.get("announcement", {})
+            if isinstance(self.app.config, dict)
+            else {}
+        )
         enabled = bool(ann_cfg.get("enabled", True))
-        self._log('info', 'announcement: start check enabled=%s', enabled)
+        self._log("info", "announcement: start check enabled=%s", enabled)
         if not enabled:
             return
         import threading
+
         def worker():
             data = self.fetch()
             if not data:
@@ -406,56 +576,77 @@ class AnnouncementService:
                     if cache.exists():
                         txt = cache.read_text(encoding="utf-8", errors="ignore").strip()
                         if txt:
-                            self._log('info', 'announcement: using cache for popup size=%d', len(txt))
+                            self._log(
+                                "info",
+                                "announcement: using cache for popup size=%d",
+                                len(txt),
+                            )
+
                             def _show_cache():
                                 try:
-                                    from ui_qt.widgets.announcement_dialog import AnnouncementDialog
+                                    from ui_qt.widgets.announcement_dialog import (
+                                        AnnouncementDialog,
+                                    )
+
                                     parent = self._get_main_window()
-                                    theme_manager = getattr(self.app, 'theme_manager', None)
-                                    dlg = AnnouncementDialog(parent, title="公告", content=txt, theme_manager=theme_manager)
+                                    theme_manager = getattr(
+                                        self.app, "theme_manager", None
+                                    )
+                                    dlg = AnnouncementDialog(
+                                        parent,
+                                        title="公告",
+                                        content=txt,
+                                        theme_manager=theme_manager,
+                                    )
                                     dlg.exec_()
                                 except Exception as e:
-                                    self._log('warning', 'announcement: _show_cache error=%s', e)
-                            # 使用 ui_post 确保在主线程中执行
-                            try:
-                                if hasattr(self.app, 'ui_post'):
-                                    self.app.ui_post(_show_cache)
-                                else:
-                                    self.app.root.after(0, _show_cache)
-                            except Exception as e:
-                                self._log('warning', 'announcement: ui_post error=%s', e)
+                                    self._log(
+                                        "warning",
+                                        "announcement: _show_cache error=%s",
+                                        e,
+                                    )
+
+                            self._post_to_ui(_show_cache)
                         else:
                             try:
-                                (Path.cwd() / 'launcher' / 'announcement_debug.log').write_text('no_data_and_empty_cache', encoding='utf-8')
+                                (
+                                    Path.cwd() / "launcher" / "announcement_debug.log"
+                                ).write_text(
+                                    "no_data_and_empty_cache", encoding="utf-8"
+                                )
                             except Exception:
                                 pass
-                            self._log('warning', 'announcement: no data and cache empty')
+                            self._log(
+                                "warning", "announcement: no data and cache empty"
+                            )
                 except Exception:
                     pass
                 return
             rules = data.get("rules") or {}
-            self._log('debug', 'announcement: rules=%s', rules)
+            self._log("debug", "announcement: rules=%s", rules)
             if rules and not self._is_allowed(rules):
                 try:
-                    (Path.cwd() / 'launcher' / 'announcement_debug.log').write_text('blocked_by_rules', encoding='utf-8')
+                    (Path.cwd() / "launcher" / "announcement_debug.log").write_text(
+                        "blocked_by_rules", encoding="utf-8"
+                    )
                 except Exception:
                     pass
-                self._log('info', 'announcement: blocked by rules')
+                self._log("info", "announcement: blocked by rules")
                 return
             aid = self._compute_id(data)
             try:
                 seen = self._load_seen()
                 if aid and aid in seen:
-                    self._log('info', 'announcement: already seen id=%s', aid[:8])
+                    self._log("info", "announcement: already seen id=%s", aid[:8])
                     return
             except Exception:
                 pass
             try:
-                mf = self._get_seen_file().parent / 'announcement_muted.json'
+                mf = self._get_seen_file().parent / "announcement_muted.json"
                 if mf.exists():
-                    lst = json.loads(mf.read_text(encoding='utf-8')) or []
+                    lst = json.loads(mf.read_text(encoding="utf-8")) or []
                     if aid and aid in lst:
-                        self._log('info', 'announcement: muted id=%s', aid[:8])
+                        self._log("info", "announcement: muted id=%s", aid[:8])
                         return
             except Exception:
                 pass
@@ -468,51 +659,78 @@ class AnnouncementService:
             try:
                 cache = self._get_cache_file()
                 cache.write_text(content or "", encoding="utf-8")
-                self._log('debug', 'announcement: cache updated size=%d', len(content))
+                self._log("debug", "announcement: cache updated size=%d", len(content))
             except Exception:
                 pass
+
             def _show_popup():
                 try:
                     from ui_qt.widgets.announcement_dialog import AnnouncementDialog
-                    self._log('info', 'announcement: show title=%s size=%d source=%s', title, len(content), data.get('source'))
+
+                    self._log(
+                        "info",
+                        "announcement: show title=%s size=%d source=%s",
+                        title,
+                        len(content),
+                        data.get("source"),
+                    )
 
                     # 获取主窗口作为父对象，以便正确应用主题
                     parent = self._get_main_window()
-                    theme_manager = getattr(self.app, 'theme_manager', None)
+                    theme_manager = getattr(self.app, "theme_manager", None)
 
-                    dlg = AnnouncementDialog(parent, title=title, content=content, theme_manager=theme_manager)
+                    dlg = AnnouncementDialog(
+                        parent,
+                        title=title,
+                        content=content,
+                        theme_manager=theme_manager,
+                    )
 
-                    if dlg.exec_() == 1: # Accepted
+                    if dlg.exec_() == 1:  # Accepted
                         action = dlg.get_action()
                         if action == "ack":
                             # 点击"知道了"不做任何记录，下次启动继续弹出
-                            self._log('debug', 'announcement: acknowledged (will show again) id=%s', aid[:8] if aid else '-')
+                            self._log(
+                                "debug",
+                                "announcement: acknowledged (will show again) id=%s",
+                                aid[:8] if aid else "-",
+                            )
                         elif action == "mute":
                             try:
                                 if aid:
-                                    mf2 = self._get_seen_file().parent / 'announcement_muted.json'
+                                    mf2 = (
+                                        self._get_seen_file().parent
+                                        / "announcement_muted.json"
+                                    )
                                     lst2 = []
                                     try:
                                         if mf2.exists():
-                                            lst2 = json.loads(mf2.read_text(encoding='utf-8')) or []
+                                            lst2 = (
+                                                json.loads(
+                                                    mf2.read_text(encoding="utf-8")
+                                                )
+                                                or []
+                                            )
                                     except Exception:
                                         lst2 = []
                                     if aid not in lst2:
                                         lst2.append(aid)
-                                        mf2.write_text(json.dumps(lst2, ensure_ascii=False, indent=2), encoding='utf-8')
-                                    self._log('info', 'announcement: muted id=%s', aid[:8])
+                                        mf2.write_text(
+                                            json.dumps(
+                                                lst2, ensure_ascii=False, indent=2
+                                            ),
+                                            encoding="utf-8",
+                                        )
+                                    self._log(
+                                        "info", "announcement: muted id=%s", aid[:8]
+                                    )
                             except Exception:
                                 pass
                 except Exception as e:
-                    self._log('warning', 'announcement: _show_popup error=%s', e)
-            # 使用 ui_post 确保在主线程中执行
-            try:
-                if hasattr(self.app, 'ui_post'):
-                    self.app.ui_post(_show_popup)
-                else:
-                    self.app.root.after_idle(_show_popup)
-            except Exception as e:
-                self._log('warning', 'announcement: ui_post error=%s', e)
+                    self._log("warning", "announcement: _show_popup error=%s", e)
+
+            self._post_to_ui(_show_popup)
+
         try:
             threading.Thread(target=worker, daemon=True).start()
         except Exception:
@@ -535,10 +753,13 @@ class AnnouncementService:
         if not data:
             try:
                 from ui_qt.widgets.dialog_helper import DialogHelper
+
                 parent = self._get_main_window()
                 DialogHelper.show_info(parent, "公告", "暂无公告")
             except Exception as e:
-                self._log('warning', 'announcement: show_cached_popup no data error=%s', e)
+                self._log(
+                    "warning", "announcement: show_cached_popup no data error=%s", e
+                )
             return
         title = data.get("title") or "公告"
         content = data.get("content") or ""
@@ -546,18 +767,22 @@ class AnnouncementService:
         # 直接显示对话框
         try:
             from ui_qt.widgets.announcement_dialog import AnnouncementDialog
+
             parent = self._get_main_window()
-            theme_manager = getattr(self.app, 'theme_manager', None)
-            dlg = AnnouncementDialog(parent, title=title, content=content, theme_manager=theme_manager)
+            theme_manager = getattr(self.app, "theme_manager", None)
+            dlg = AnnouncementDialog(
+                parent, title=title, content=content, theme_manager=theme_manager
+            )
             dlg.exec_()
         except Exception as e:
-            self._log('warning', 'announcement: show_cached_popup error=%s', e)
+            self._log("warning", "announcement: show_cached_popup error=%s", e)
 
     def _get_main_window(self):
         """获取主窗口，兼容不同的 app 结构"""
         # PyQtLauncher 本身就是 QMainWindow
         from PyQt5 import QtWidgets
+
         if isinstance(self.app, QtWidgets.QMainWindow):
             return self.app
         # 尝试获取 window 属性
-        return getattr(self.app, 'window', None)
+        return getattr(self.app, "window", None)

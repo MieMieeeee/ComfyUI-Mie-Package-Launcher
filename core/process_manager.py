@@ -6,21 +6,20 @@
 import os
 import subprocess
 import threading
-import shlex #
-import shutil #
-import locale #
-import re #
-import socket #
+import locale
 from pathlib import Path
-from utils.common import run_hidden #
+
 from core.probe import is_http_reachable, find_pids_by_port_safe, is_comfyui_pid
 from core.kill import kill_pids
+from core.process_events import emit_event, ProcessEvent
+from utils.common import run_hidden
 
 # 尝试导入 psutil，如果失败则在相关功能中回退
 try:
-    import psutil #
+    import psutil  #
 except ImportError:
     psutil = None
+
 
 class ProcessManager:
     def __init__(self, app):
@@ -30,19 +29,28 @@ class ProcessManager:
         """
         self.app = app
         self.comfyui_process = None
-        self._stopping = False  # 防止停止过程中重复点击
+        self._stopping = False
 
-    def toggle_comfyui(self): #
+    def _post_to_ui(self, fn):
+        try:
+            self.app.ui_post(fn)
+        except Exception:
+            try:
+                self.app.root.after(0, fn)
+            except Exception:
+                pass
+
+    def toggle_comfyui(self):  #
         # 防抖与状态保护：启动进行中时忽略重复点击
         try:
-            if getattr(self.app, '_launching', False):
+            if getattr(self.app, "_launching", False):
                 try:
                     self.app.logger.warning("忽略重复点击：正在启动中")
                 except Exception:
                     pass
                 return
             # 新增：停止过程中也忽略点击
-            if getattr(self, '_stopping', False):
+            if getattr(self, "_stopping", False):
                 try:
                     self.app.logger.warning("忽略重复点击：正在停止中")
                 except Exception:
@@ -67,6 +75,7 @@ class ProcessManager:
             self.stop_comfyui()
         else:
             # 启动前追加端口占用检测：若任何进程占用目标端口，则避免重复启动
+            port = "8188"
             try:
                 port = (self.app.custom_port.get() or "8188").strip()
                 pids = find_pids_by_port_safe(port)
@@ -78,6 +87,7 @@ class ProcessManager:
                     "端口被占用",
                     f"检测到端口 {port} 已被占用 (PID: {pid_text}).\n\n是否直接打开网页而不启动新的实例?",
                     default=True,
+                    event=ProcessEvent.STARTING,
                 )
                 if proceed_open:
                     try:
@@ -90,6 +100,7 @@ class ProcessManager:
                         "端口被占用",
                         "是否停止现有实例并用当前配置启动新的 ComfyUI?",
                         default=False,
+                        event=ProcessEvent.STARTING,
                     )
                     if restart:
                         try:
@@ -107,7 +118,7 @@ class ProcessManager:
             # 未占用则正常启动
             self.start_comfyui()
 
-    def start_comfyui(self): #
+    def start_comfyui(self):  #
         try:
             # 设置正在启动状态
             self.app._launching = True
@@ -116,14 +127,16 @@ class ProcessManager:
                 self.app.big_btn.set_text("正在启动…")
                 # 强制刷新 UI
                 from PyQt5 import QtWidgets
+
                 QtWidgets.QApplication.processEvents()
             except Exception:
                 pass
 
             from core.launcher_cmd import build_launch_params
+
             cmd, env, run_cwd, py, main = build_launch_params(self.app)
             try:
-                if getattr(self.app, 'services', None):
+                if getattr(self.app, "services", None):
                     self.app.services.runtime.pre_start_up()
             except Exception:
                 pass
@@ -135,7 +148,10 @@ class ProcessManager:
                 return
             try:
                 from pathlib import Path as _P
-                rver = run_hidden([str(py), "--version"], capture_output=True, text=True, timeout=0.8)
+
+                rver = run_hidden(
+                    [str(py), "--version"], capture_output=True, text=True, timeout=0.8
+                )
                 if rver.returncode != 0:
                     self._show_error("错误", f"Python无法执行: {py}")
                     return
@@ -147,14 +163,19 @@ class ProcessManager:
             except Exception:
                 pass
             try:
-                self.app.logger.info("环境变量(HF_ENDPOINT): %s", env.get("HF_ENDPOINT", ""))
+                self.app.logger.info(
+                    "环境变量(HF_ENDPOINT): %s", env.get("HF_ENDPOINT", "")
+                )
             except Exception:
                 pass
             try:
-                self.app.logger.info("环境变量(GITHUB_ENDPOINT): %s", env.get("GITHUB_ENDPOINT", ""))
+                self.app.logger.info(
+                    "环境变量(GITHUB_ENDPOINT): %s", env.get("GITHUB_ENDPOINT", "")
+                )
             except Exception:
                 pass
             from core.runner_start import start as run_start
+
             run_start(self.app, self, cmd, env, run_cwd)
         except Exception as e:
             msg = str(e)
@@ -165,7 +186,7 @@ class ProcessManager:
             # 同样使用默认参数绑定，避免在 after 回调中出现自由变量问题
             self.on_start_failed(msg)
 
-    def on_start_success(self): #
+    def on_start_success(self):  #
         self.app._launching = False
         try:
             self.app.logger.info("ComfyUI 启动成功")
@@ -177,7 +198,10 @@ class ProcessManager:
             mode = (self.app.browser_open_mode.get() or "default").strip()
         except Exception:
             try:
-                mode = (self.app.config.get("launch_options", {}).get("browser_open_mode") or "default").strip()
+                mode = (
+                    self.app.config.get("launch_options", {}).get("browser_open_mode")
+                    or "default"
+                ).strip()
             except Exception:
                 mode = "default"
         try:
@@ -191,9 +215,11 @@ class ProcessManager:
         else:
             mode = "default"
         if mode == "custom":
+
             def _open_when_ready():
                 try:
                     import time
+
                     deadline = time.time() + 120.0
                     while time.time() < deadline:
                         ready = False
@@ -210,12 +236,13 @@ class ProcessManager:
                         time.sleep(0.25)
                 except Exception:
                     pass
+
             try:
                 threading.Thread(target=_open_when_ready, daemon=True).start()
             except Exception:
                 pass
 
-    def on_start_failed(self, error): #
+    def on_start_failed(self, error):  #
         self.app._launching = False
         try:
             self.app.logger.error("ComfyUI 启动失败: %s", error)
@@ -225,9 +252,9 @@ class ProcessManager:
         self.app.big_btn.set_text("一键启动")
         self.comfyui_process = None
 
-    def stop_comfyui(self): #
+    def stop_comfyui(self):  #
         # 防止重复触发停止
-        if getattr(self, '_stopping', False):
+        if getattr(self, "_stopping", False):
             return True
         self._stopping = True
 
@@ -236,15 +263,19 @@ class ProcessManager:
             self.app.big_btn.set_text("正在停止…")
         except Exception:
             pass
+
         def _bg():
             try:
                 try:
                     from core.runner_stop import stop as run_stop
                     import time
+
                     killed = False
                     try:
                         # 若未跟踪到子进程，先尝试全局关闭（适配外部启动实例）
-                        if not (self.comfyui_process and self.comfyui_process.poll() is None):
+                        if not (
+                            self.comfyui_process and self.comfyui_process.poll() is None
+                        ):
                             try:
                                 self.app.stop_all_comfyui_instances()
                             except Exception:
@@ -257,10 +288,14 @@ class ProcessManager:
                     for _ in range(50):
                         still_running = False
                         try:
-                            if self.comfyui_process and self.comfyui_process.poll() is None:
+                            if (
+                                self.comfyui_process
+                                and self.comfyui_process.poll() is None
+                            ):
                                 still_running = True
                             else:
                                 from core.probe import is_http_reachable
+
                                 still_running = is_http_reachable(self.app)
                         except Exception:
                             pass
@@ -272,30 +307,29 @@ class ProcessManager:
                         # 再次确认最终状态
                         final_running = False
                         try:
-                            if self.comfyui_process and self.comfyui_process.poll() is None:
+                            if (
+                                self.comfyui_process
+                                and self.comfyui_process.poll() is None
+                            ):
                                 final_running = True
                             else:
                                 from core.probe import is_http_reachable
+
                                 final_running = is_http_reachable(self.app)
                         except Exception:
                             pass
 
                         if not final_running:
-                            try:
-                                self.app.ui_post(self.on_process_ended)
-                            except Exception:
-                                pass
+                            self._post_to_ui(self.on_process_ended)
                         else:
-                            try:
-                                self.app.ui_post(self._refresh_running_status)
-                            except Exception:
-                                pass
+                            self._post_to_ui(self._refresh_running_status)
                     except Exception:
                         pass
                 except Exception:
                     pass
             finally:
                 self._stopping = False
+
         try:
             threading.Thread(target=_bg, daemon=True).start()
         except Exception:
@@ -323,6 +357,7 @@ class ProcessManager:
         killed = run_stop(self.app, self)
         try:
             import time
+
             for _ in range(20):
                 still = False
                 try:
@@ -330,6 +365,7 @@ class ProcessManager:
                         still = True
                     else:
                         from core.probe import is_http_reachable
+
                         still = is_http_reachable(self.app)
                 except Exception:
                     still = False
@@ -338,12 +374,13 @@ class ProcessManager:
                 time.sleep(0.25)
         except Exception:
             pass
+        running = False
         try:
-            running = False
             if self.comfyui_process and self.comfyui_process.poll() is None:
                 running = True
             else:
                 from core.probe import is_http_reachable
+
                 running = is_http_reachable(self.app)
             if not running:
                 self.on_process_ended()
@@ -354,57 +391,56 @@ class ProcessManager:
         return not running
 
     def _show_error(self, title, msg):
+        # Emit error event instead of showing dialog
+        emit_event(ProcessEvent.ERROR, {"error": msg})
         try:
-            if getattr(self.app, 'headless', False):
+            if getattr(self.app, "headless", False):
                 try:
                     self.app.logger.error(f"{title}: {msg}")
                 except Exception:
                     pass
                 return
             try:
-                from ui_qt.widgets.dialog_helper import DialogHelper
-                DialogHelper.show_error(self.app, title, msg)
+                # Fallback to PyQt5 dialog if not headless
+                from PyQt5 import QtWidgets
+
+                QtWidgets.QMessageBox.critical(None, title, msg)
             except Exception:
                 try:
-                    # Fallback to older method if DialogHelper fails
-                    from PyQt5 import QtWidgets
-                    QtWidgets.QMessageBox.critical(None, title, msg)
+                    self.app.logger.error(f"{title}: {msg}")
                 except Exception:
-                    try:
-                        self.app.logger.error(f"{title}: {msg}")
-                    except Exception:
-                        pass
+                    pass
         except Exception:
             try:
                 self.app.logger.error(f"{title}: {msg}")
             except Exception:
                 pass
 
-    def _ask_yes_no(self, title: str, msg: str, default: bool = True) -> bool:
+    def _ask_yes_no(
+        self,
+        title: str,
+        msg: str,
+        default: bool = True,
+        event: ProcessEvent | None = None,
+    ) -> bool:
+        # Emit event for the action
+        if event:
+            emit_event(event)
         try:
-            from ui_qt.widgets.dialog_helper import DialogHelper
-            return DialogHelper.show_confirmation(
-                self.app, 
-                title, 
-                msg, 
-                yes_text="是", 
-                no_text="否"
-            )
-        except Exception:
-            try:
-                from PyQt5 import QtWidgets
-                btn = QtWidgets.QMessageBox.question(
-                    None,
-                    title,
-                    msg,
-                    QtWidgets.QMessageBox.Yes | QtWidgets.QMessageBox.No,
-                    QtWidgets.QMessageBox.Yes if default else QtWidgets.QMessageBox.No,
-                )
-                return btn == QtWidgets.QMessageBox.Yes
-            except Exception:
-                return default
+            from PyQt5 import QtWidgets
 
-    def _find_pids_by_port_safe(self, port_str): #
+            btn = QtWidgets.QMessageBox.question(
+                None,
+                title,
+                msg,
+                QtWidgets.QMessageBox.Yes | QtWidgets.QMessageBox.No,
+                QtWidgets.QMessageBox.Yes if default else QtWidgets.QMessageBox.No,
+            )
+            return btn == QtWidgets.QMessageBox.Yes
+        except Exception:
+            return default
+
+    def _find_pids_by_port_safe(self, port_str):  #
         # 解析端口并通过 psutil 或 netstat 查找 PID 列表
         try:
             port = int(port_str)
@@ -415,10 +451,13 @@ class ProcessManager:
             try:
                 pids = set()
                 try:
-                    for conn in psutil.net_connections(kind='inet'): #
+                    for conn in psutil.net_connections(kind="inet"):  #
                         try:
                             if conn.laddr and conn.laddr.port == port:
-                                if conn.status in ('LISTEN', 'ESTABLISHED'):  # 监听或连接中
+                                if conn.status in (
+                                    "LISTEN",
+                                    "ESTABLISHED",
+                                ):  # 监听或连接中
                                     if conn.pid:
                                         pids.add(conn.pid)
                         except Exception:
@@ -433,9 +472,10 @@ class ProcessManager:
         try:
             import subprocess
             import re
+
             cmd = ["netstat", "-ano"]
             # 使用系统首选编码并忽略解码错误，且隐藏子进程窗口
-            preferred_enc = locale.getpreferredencoding(False) or "utf-8" #
+            preferred_enc = locale.getpreferredencoding(False) or "utf-8"  #
             r = run_hidden(
                 cmd,
                 capture_output=True,
@@ -446,7 +486,7 @@ class ProcessManager:
             if r.returncode == 0 and r.stdout:
                 pids = set()
                 # 只认 TCP 的 LISTENING 或 ESTABLISHED，避免 TIME_WAIT/Close 等状态误判
-                pattern_tcp = re.compile( #
+                pattern_tcp = re.compile(  #
                     rf"^\s*TCP\s+\S+:{port}\s+\S+:\S+\s+(LISTENING|ESTABLISHED)\s+(\d+)\s*$",
                     re.IGNORECASE,
                 )
@@ -465,11 +505,11 @@ class ProcessManager:
             pass
         return []
 
-    def _is_comfyui_pid(self, pid: int) -> bool: # **修正后的代码块**
+    def _is_comfyui_pid(self, pid: int) -> bool:  # **修正后的代码块**
         # 通过 cmdline/exe/cwd 多重特征判断是否为 ComfyUI 相关进程
         if psutil:
             try:
-                p = psutil.Process(pid) #
+                p = psutil.Process(pid)  #
                 # 成功获取进程对象 p，在其内部安全获取属性
                 try:
                     cmdline = " ".join(p.cmdline()).lower()
@@ -485,22 +525,24 @@ class ProcessManager:
                     cwd = ""
 
                 # 关键特征：main.py、comfyui 字样。
-                if ("main.py" in cmdline and ("comfyui" in cmdline or "windows-standalone-build" in cmdline)):
+                if "main.py" in cmdline and (
+                    "comfyui" in cmdline or "windows-standalone-build" in cmdline
+                ):
                     return True
-                if ("comfyui" in cmdline or "comfyui" in exe or "comfyui" in cwd):
+                if "comfyui" in cmdline or "comfyui" in exe or "comfyui" in cwd:
                     return True
             except (psutil.NoSuchProcess, Exception):
                 # 进程不存在或获取信息失败，跳过 psutil 检查
                 pass
 
         # 回退：使用 wmic 获取命令行（在部分 Windows 环境可用）
-        if os.name == 'nt':
+        if os.name == "nt":
             try:
                 # 首次检测 wmic 是否存在并缓存结果；不存在则不再尝试，避免日志噪音
                 try:
                     if getattr(self.app, "_wmic_available", None) is None:
                         # 确保 app 对象上有 _wmic_available 属性
-                        self.app._wmic_available = bool(shutil.which("wmic")) #
+                        self.app._wmic_available = bool(shutil.which("wmic"))  #
                 except Exception:
                     self.app._wmic_available = False
 
@@ -512,15 +554,31 @@ class ProcessManager:
                         comfy_root = str((base / "ComfyUI").resolve()).lower()
                     except Exception:
                         comfy_root = None
-                        
-                    preferred_enc = locale.getpreferredencoding(False) or "utf-8" #
+
+                    preferred_enc = locale.getpreferredencoding(False) or "utf-8"  #
                     try:
-                        r = run_hidden([ #
-                            "wmic", "process", "where", f"ProcessId={pid}", "get", "CommandLine", "/format:list"
-                        ], capture_output=True, text=True, encoding=preferred_enc, errors="ignore")
+                        r = run_hidden(
+                            [  #
+                                "wmic",
+                                "process",
+                                "where",
+                                f"ProcessId={pid}",
+                                "get",
+                                "CommandLine",
+                                "/format:list",
+                            ],
+                            capture_output=True,
+                            text=True,
+                            encoding=preferred_enc,
+                            errors="ignore",
+                        )
                         if r.returncode == 0 and r.stdout:
                             out = r.stdout.lower()
-                            if ("comfyui" in out) or ("main.py" in out) or (comfy_root and comfy_root in out):
+                            if (
+                                ("comfyui" in out)
+                                or ("main.py" in out)
+                                or (comfy_root and comfy_root in out)
+                            ):
                                 return True
                     except FileNotFoundError:
                         # 运行期确认 wmic 不存在，则标记为不可用，后续不再尝试
@@ -532,7 +590,7 @@ class ProcessManager:
 
         return False
 
-    def _kill_pids(self, pids): #
+    def _kill_pids(self, pids):  #
         # 优先使用 psutil 优雅终止，失败则回退到 taskkill
         try:
             self.app.logger.info("准备终止进程列表: %s", ", ".join(map(str, pids)))
@@ -544,7 +602,7 @@ class ProcessManager:
                 procs_to_wait = []
                 for pid in pids:
                     try:
-                        p = psutil.Process(pid) #
+                        p = psutil.Process(pid)  #
                         p.terminate()
                         procs_to_wait.append(p)
                         try:
@@ -555,11 +613,13 @@ class ProcessManager:
                         pass
                 if procs_to_wait:
                     # 批量等待
-                    gone, alive = psutil.wait_procs(procs_to_wait, timeout=3) #
+                    gone, alive = psutil.wait_procs(procs_to_wait, timeout=3)  #
                     if gone:
                         killed_any = True
                         try:
-                            self.app.logger.info("psutil 等待结束：已终止 %d 个进程", len(gone))
+                            self.app.logger.info(
+                                "psutil 等待结束：已终止 %d 个进程", len(gone)
+                            )
                         except Exception:
                             pass
                     # 对未结束的进程发送 SIGKILL (kill)
@@ -572,14 +632,20 @@ class ProcessManager:
             except Exception:
                 pass
         # 对未结束的进程使用 taskkill 强制终止（Windows）
-        if os.name == 'nt':
+        if os.name == "nt":
             try:
                 for pid in pids:
                     # 不使用 /T 参数，避免误杀子进程（如浏览器）
-                    run_hidden(["taskkill", "/PID", str(pid), "/F"], capture_output=True, text=True)
+                    run_hidden(
+                        ["taskkill", "/PID", str(pid), "/F"],
+                        capture_output=True,
+                        text=True,
+                    )
                 killed_any = True
                 try:
-                    self.app.logger.info("taskkill 强制终止：%s", ", ".join(map(str, pids)))
+                    self.app.logger.info(
+                        "taskkill 强制终止：%s", ", ".join(map(str, pids))
+                    )
                 except Exception:
                     pass
             except Exception:
@@ -591,14 +657,15 @@ class ProcessManager:
                 pass
             raise RuntimeError("无法终止目标进程")
 
-    def _is_http_reachable(self) -> bool: #
+    def _is_http_reachable(self) -> bool:  #
         try:
             from core.probe import is_http_reachable
+
             return is_http_reachable(self.app)
         except Exception:
             return False
 
-    def _refresh_running_status(self): #
+    def _refresh_running_status(self):  #
         # 根据进程与端口探测结果统一刷新按钮状态
         try:
             running = False
@@ -615,7 +682,7 @@ class ProcessManager:
         except Exception:
             pass
 
-    def refresh_running_status_async(self): #
+    def refresh_running_status_async(self):  #
         def _bg():
             try:
                 running = False
@@ -626,6 +693,7 @@ class ProcessManager:
                         running = is_http_reachable(self.app)
                 except Exception:
                     running = False
+
                 def _ui():
                     try:
                         if running:
@@ -636,23 +704,27 @@ class ProcessManager:
                             self.app.big_btn.set_text("一键启动")
                     except Exception:
                         pass
+
                 try:
-                    self.app.ui_post(_ui)
+                    self._post_to_ui(_ui)
                 except Exception:
                     pass
             except Exception:
                 pass
+
         try:
             import threading
+
             threading.Thread(target=_bg, daemon=True).start()
         except Exception:
             pass
 
-    def monitor_process(self): #
+    def monitor_process(self):  #
         from core.runner import monitor
+
         monitor(self.app, self)
 
-    def on_process_ended(self): #
+    def on_process_ended(self):  #
         try:
             self.app.logger.info("ComfyUI 进程结束")
         except Exception:
@@ -669,8 +741,8 @@ class ProcessManager:
         except Exception:
             self.app.big_btn.set_state("idle")
             self.app.big_btn.set_text("一键启动")
-            
-    def stop_all_comfyui_instances(self) -> bool: #
+
+    def stop_all_comfyui_instances(self) -> bool:  #
         """尝试关闭所有检测到的 ComfyUI 实例（包括非本启动器启动的）。
 
         返回 True 表示至少成功终止一个进程。
@@ -691,7 +763,7 @@ class ProcessManager:
         # 2) 通过进程枚举查找（可能是不同端口或手动启动）
         if psutil:
             try:
-                for p in psutil.process_iter(attrs=["pid"]): #
+                for p in psutil.process_iter(attrs=["pid"]):  #
                     pid = p.info.get("pid")
                     if not pid:
                         continue
@@ -729,7 +801,9 @@ class ProcessManager:
                 killed = True
             except Exception:
                 try:
-                    self.app.logger.error("在 stop_all_comfyui_instances 中统一终止进程失败")
+                    self.app.logger.error(
+                        "在 stop_all_comfyui_instances 中统一终止进程失败"
+                    )
                 except Exception:
                     pass
 
