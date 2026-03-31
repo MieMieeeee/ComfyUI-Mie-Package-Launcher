@@ -50,7 +50,8 @@ class TestStartFunction:
         start(mock_app, mock_pm, ["cmd"], {"ENV": "val"}, "/cwd")
 
         assert mock_app.big_btn.set_state.call_args[0][0] == "starting"
-        assert mock_app.big_btn.set_text.call_args[0][0] == "启动中…"
+        assert mock_app.big_btn.set_display.call_args[0][0] == "启动中…"
+        assert mock_app.big_btn.set_display.call_args[0][1] == "点击停止"
         assert mock_app._launching is True
 
     def test_start_creates_daemon_thread(self, mock_app, mock_pm, mock_thread):

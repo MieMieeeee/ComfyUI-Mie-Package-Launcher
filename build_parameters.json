@@ -1,7 +1,8 @@
 {
-  "version": "v1.0.8",
-  "suffix": " · 构建于 2026-03-24 22:38:18",
+  "version": "v1.0.9",
+  "suffix": " · 构建于 2026-03-31 14:11:41",
   "mode": "nuitka_release",
-  "built_at": "2026-03-24 22:38:18",
-  "builder": "黎黎原上咩"
+  "built_at": "2026-03-31 14:11:41",
+  "builder": "黎黎原上咩",
+  "channel": "stable"
 }

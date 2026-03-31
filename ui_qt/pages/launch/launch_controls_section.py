@@ -243,6 +243,7 @@ class LaunchControlsSection(QtWidgets.QWidget):
         row2_layout.setSpacing(15)
         row2_layout.addWidget(open_combo)
         row2_layout.addWidget(cpath_btn)
+
         row2_layout.addStretch(1)
         try:
             h = max(open_combo.sizeHint().height(), cpath_btn.sizeHint().height())
@@ -292,9 +293,16 @@ class LaunchControlsSection(QtWidgets.QWidget):
             cb_nodes.toggled.connect(lambda v: (self.app.disable_all_custom_nodes.set(v), self._save_config()))
         cb_nodes.setToolTip("禁用所有自定义节点，用于调试目的")
 
+        cb_console = QtWidgets.QCheckBox("显示ComfyUI命令行窗口")
+        if hasattr(self.app, 'show_console'):
+            cb_console.setChecked(self.app.show_console.get())
+            cb_console.toggled.connect(lambda v: (self.app.show_console.set(v), self._save_config()))
+        cb_console.setToolTip("启动时是否显示ComfyUI的命令行窗口（关闭后ComfyUI在后台运行）")
+
         hbox_opts.addWidget(cb_fast)
         hbox_opts.addWidget(cb_api)
         hbox_opts.addWidget(cb_nodes)
+        hbox_opts.addWidget(cb_console)
         hbox_opts.addStretch(1)
         form_layout.addLayout(hbox_opts, 3, 0, 1, 4)
 

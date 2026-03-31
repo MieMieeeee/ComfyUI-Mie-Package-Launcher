@@ -19,21 +19,11 @@ class LaunchPage(BasePage):
         self.app = app
         self.theme_manager = theme_manager
         self._setup_ui()
-        try:
-            if hasattr(self.app, "services") and hasattr(self.app.services, "process"):
-                self.app.services.process.refresh_status()
-        except Exception:
-            pass
+        # 注意：refresh_status 不在这里调用，而是在 attach 之后由 QtApp 延迟调用
 
     def _update_button_state(self):
-        """与旧版兼容的占位方法：实际状态由 ProcessManager 控制 big_btn"""
-        try:
-            if hasattr(self.app, "big_btn"):
-                text = getattr(self.app.big_btn, "_text", None)
-                if text and hasattr(self, "btn_toggle"):
-                    self.btn_toggle.setText(text)
-        except Exception:
-            pass
+        """与旧版兼容的占位方法：实际状态由 ProcessManager 通过 BigBtnProxy 控制"""
+        pass
 
     def _setup_ui(self):
         """设置 UI"""
@@ -56,19 +46,42 @@ class LaunchPage(BasePage):
 
         # 右侧按钮容器
         right_container = QtWidgets.QWidget()
-        right_container.setFixedWidth(120)
+        right_container.setFixedWidth(150)
         right_layout = QtWidgets.QVBoxLayout(right_container)
         right_layout.setContentsMargins(0, 0, 0, 0)
         right_layout.setSpacing(8)
 
-        # 启动大按钮
-        btn_toggle = QtWidgets.QPushButton("🚀 一键启动")
+        # 启动大按钮（使用 QPushButton + 内部 QLabel 实现双行不同字号）
+        btn_toggle = QtWidgets.QPushButton()
         btn_toggle.setCursor(Qt.PointingHandCursor)
         btn_toggle.setSizePolicy(QtWidgets.QSizePolicy.Expanding, QtWidgets.QSizePolicy.Expanding)
         btn_toggle.setStyleSheet(self._get_primary_button_style())
         btn_toggle.clicked.connect(self._on_toggle_launch)
         btn_toggle.setToolTip("启动或停止ComfyUI服务")
         self.btn_toggle = btn_toggle
+
+        # 按钮内部布局：两个标签覆盖在按钮上，实现不同字号的双行显示
+        btn_inner = QtWidgets.QVBoxLayout(btn_toggle)
+        btn_inner.setContentsMargins(4, 4, 4, 4)
+        btn_inner.setSpacing(2)
+
+        self._btn_status_label = QtWidgets.QLabel("🚀 一键启动")
+        self._btn_status_label.setAlignment(Qt.AlignCenter)
+        self._btn_status_label.setStyleSheet(
+            'font: bold 12pt "Microsoft YaHei UI"; color: #FFFFFF; background: transparent;'
+        )
+
+        self._btn_action_label = QtWidgets.QLabel()
+        self._btn_action_label.setAlignment(Qt.AlignCenter)
+        self._btn_action_label.setStyleSheet(
+            'font: 8pt "Microsoft YaHei UI"; color: rgba(255,255,255,170); background: transparent;'
+        )
+        self._btn_action_label.hide()
+
+        btn_inner.addStretch(1)
+        btn_inner.addWidget(self._btn_status_label)
+        btn_inner.addWidget(self._btn_action_label)
+        btn_inner.addStretch(1)
         # 初始化按钮状态
         self._update_button_state()
 

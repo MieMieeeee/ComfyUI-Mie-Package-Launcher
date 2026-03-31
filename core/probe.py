@@ -113,10 +113,16 @@ def is_comfyui_pid(app, pid: int) -> bool:
                 pass
     return False
 
-def is_http_reachable(app) -> bool:
+def is_http_reachable(app, _log=False) -> bool:
+    """检查 ComfyUI HTTP 服务是否可达"""
     try:
         port = int((app.custom_port.get() or "8188").strip())
     except Exception:
+        if _log:
+            try:
+                app.logger.warning("[probe] is_http_reachable: 端口解析失败")
+            except Exception:
+                pass
         return False
     try:
         url = f"http://127.0.0.1:{port}/system_stats"
@@ -128,6 +134,17 @@ def is_http_reachable(app) -> bool:
                     code = resp.getcode()
                 except Exception:
                     code = None
-            return code == 200
-    except Exception:
+            result = code == 200
+            if _log:
+                try:
+                    app.logger.info("[probe] is_http_reachable: port=%s, code=%s, result=%s", port, code, result)
+                except Exception:
+                    pass
+            return result
+    except Exception as e:
+        if _log:
+            try:
+                app.logger.info("[probe] is_http_reachable: port=%s, 失败: %s", port, type(e).__name__)
+            except Exception:
+                pass
         return False

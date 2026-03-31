@@ -65,6 +65,7 @@ class ConfigManager:
                 "attention_mode": "",
                 "browser_open_mode": "default",
                 "custom_browser_path": "",
+                "show_console": True,
             },
             "ui_settings": {
                 "window_width": 800,

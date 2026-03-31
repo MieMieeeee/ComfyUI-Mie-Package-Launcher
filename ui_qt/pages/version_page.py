@@ -266,6 +266,8 @@ class VersionPage(BasePage):
         # 延迟刷新版本信息与提交历史（避免阻塞 UI 显示）
         try:
             QtCore.QTimer.singleShot(100, self._refresh_kernel_section)
+            # 后台静默 fetch，不阻塞界面
+            QtCore.QTimer.singleShot(500, self._background_fetch)
         except Exception:
             pass
 
@@ -386,7 +388,7 @@ class VersionPage(BasePage):
 
             # Refresh info
             progress.set_status("正在刷新表格...")
-            self._refresh_kernel_section(force_remote=True)
+            self._refresh_kernel_section()
 
             # Trigger version check
             if hasattr(self.app, 'get_version_info'):
@@ -397,6 +399,26 @@ class VersionPage(BasePage):
         except Exception as e:
             progress.close()
             DialogHelper.show_warning(self, "失败", str(e))
+
+    def _background_fetch(self):
+        """后台静默 fetch，不阻塞界面"""
+        import threading
+
+        def _bg():
+            try:
+                base = Path(self.app.config.get("paths", {}).get("comfyui_root") or ".").resolve()
+                root = (base / "ComfyUI").resolve()
+                if not root.exists():
+                    return
+                # 在后台线程执行 git fetch
+                run_hidden([getattr(self.app, 'git_path', 'git') or "git", "fetch"],
+                          capture_output=True, text=True, timeout=30, cwd=str(root))
+                # fetch 完成后回到 UI 线程刷新表格
+                QtCore.QTimer.singleShot(0, self._load_commit_history)
+            except Exception:
+                pass  # 静默失败，不影响界面
+
+        threading.Thread(target=_bg, daemon=True).start()
 
     def _prev_page(self):
         """上一页"""
@@ -441,11 +463,11 @@ class VersionPage(BasePage):
         except Exception:
             pass
 
-        # 加载提交历史
-        self._load_commit_history(show_remote=force_remote)
+        # 加载提交历史（始终优先使用远端）
+        self._load_commit_history()
 
-    def _load_commit_history(self, show_remote=False):
-        """加载提交历史"""
+    def _load_commit_history(self):
+        """加载提交历史，始终优先使用远端分支"""
         try:
             base = Path(self.app.config.get("paths", {}).get("comfyui_root") or ".").resolve()
             root = (base / "ComfyUI").resolve()
@@ -453,38 +475,30 @@ class VersionPage(BasePage):
             root = Path.cwd()
 
         git = getattr(self.app, 'git_path', 'git') or "git"
-        target = "HEAD"
+        target = None
 
-        # 智能判断：检查 HEAD 是否落后于远程分支
-        # 如果落后（如 checkout 到旧版本），使用远程分支显示完整历史
+        # 优先使用远端分支（最全的数据）
         try:
-            # 获取上游分支名称
             r_up = run_hidden([git, "rev-parse", "--abbrev-ref", "--symbolic-full-name", "@{u}"],
                             capture_output=True, text=True, timeout=3, cwd=str(root))
             if r_up.returncode == 0 and r_up.stdout.strip():
-                upstream = r_up.stdout.strip()
-                # 检查 HEAD 是否包含上游的最新提交（HEAD..upstream 是否为空）
-                r_behind = run_hidden([git, "rev-list", "--count", f"HEAD..{upstream}"],
-                                     capture_output=True, text=True, timeout=3, cwd=str(root))
-                if r_behind.returncode == 0 and r_behind.stdout.strip():
-                    behind_count = int(r_behind.stdout.strip())
-                    if behind_count > 0:
-                        # HEAD 落后于上游，使用上游分支显示完整历史
-                        target = upstream
+                target = r_up.stdout.strip()
         except Exception:
             pass
 
-        # 如果明确要求显示远程，强制使用远程分支
-        if show_remote and target == "HEAD":
+        # Fallback: 尝试 origin/HEAD
+        if not target:
             try:
-                r_up = run_hidden([git, "rev-parse", "--abbrev-ref", "--symbolic-full-name", "@{u}"],
-                                capture_output=True, text=True, timeout=3, cwd=str(root))
-                if r_up.returncode == 0 and r_up.stdout.strip():
-                    target = r_up.stdout.strip()
-                else:
+                r_oh = run_hidden([git, "rev-parse", "--verify", "origin/HEAD"],
+                                 capture_output=True, text=True, timeout=3, cwd=str(root))
+                if r_oh.returncode == 0:
                     target = "origin/HEAD"
             except Exception:
-                target = "origin/HEAD"
+                pass
+
+        # 最终 fallback: 本地 HEAD
+        if not target:
+            target = "HEAD"
 
         # 获取总提交数（用于分页）
         try:
@@ -512,13 +526,14 @@ class VersionPage(BasePage):
                 if len(parts) == 4:
                     rows.append(parts)
 
-        # Fallback to local HEAD if remote failed
-        if (r.returncode != 0 or not rows) and show_remote:
+        # Fallback to local HEAD if target failed
+        if r.returncode != 0 or not rows:
             r = run_hidden([git, "log", "--date=short",
                           "--pretty=format:%h|%ad|%an|%s", "-n", str(self._commits_per_page),
                           "--skip", str(skip), "HEAD"],
                          capture_output=True, text=True, timeout=8, cwd=str(root))
             if r.returncode == 0 and r.stdout:
+                rows = []
                 for line in r.stdout.splitlines():
                     parts = line.split("|", 3)
                     if len(parts) == 4:

@@ -62,61 +62,91 @@ class ProcessManager:
             self.app.logger.info("点击一键启动/停止")
         except Exception:
             pass
-        # 判断是否已有运行中的 ComfyUI（包括外部启动的同端口实例）
+
+        # 优先基于按钮状态判断（状态机模式），避免重新检测导致状态不同步
+        # 状态: "idle" = 未运行, "running" = 运行中, "starting" = 操作中
+        btn_state = getattr(self.app.big_btn, "_state", "idle")
+        if btn_state == "running":
+            # 按钮显示"停止"，用户点击 → 执行停止
+            self.stop_comfyui()
+            return
+        elif btn_state == "starting":
+            # 正在操作中，忽略点击
+            return
+
+        # 按钮状态是 "idle"，执行启动前的端口检测
         running = False
         try:
             if self.comfyui_process and self.comfyui_process.poll() is None:
                 running = True
+                try:
+                    self.app.logger.info("[toggle] comfyui_process 运行中 (pid=%s)", self.comfyui_process.pid)
+                except Exception:
+                    pass
             else:
-                running = is_http_reachable(self.app)
+                running = is_http_reachable(self.app, _log=True)
+                try:
+                    self.app.logger.info("[toggle] 检测结果: running=%s, btn_state=%s", running, btn_state)
+                except Exception:
+                    pass
         except Exception:
             running = False
+
+        # 如果检测到运行但按钮状态是 idle，说明状态不同步，先修正状态
         if running:
-            self.stop_comfyui()
-        else:
-            # 启动前追加端口占用检测：若任何进程占用目标端口，则避免重复启动
-            port = "8188"
             try:
-                port = (self.app.custom_port.get() or "8188").strip()
-                pids = find_pids_by_port_safe(port)
+                self.app.big_btn.set_state("running")
+                self.app.big_btn.set_display("正常运行", "点击停止")
             except Exception:
-                pids = []
-            if pids:
-                pid_text = ", ".join(map(str, pids)) if pids else "未知"
-                proceed_open = self._ask_yes_no(
+                pass
+            # 然后执行停止
+            self.stop_comfyui()
+            return
+
+        # 未运行，执行启动逻辑
+        # 启动前追加端口占用检测：若任何进程占用目标端口，则避免重复启动
+        port = "8188"
+        try:
+            port = (self.app.custom_port.get() or "8188").strip()
+            pids = find_pids_by_port_safe(port)
+        except Exception:
+            pids = []
+        if pids:
+            pid_text = ", ".join(map(str, pids)) if pids else "未知"
+            proceed_open = self._ask_yes_no(
+                "端口被占用",
+                f"检测到端口 {port} 已被占用 (PID: {pid_text}).\n\n是否直接打开网页而不启动新的实例?",
+                default=True,
+                event=ProcessEvent.STARTING,
+            )
+            if proceed_open:
+                try:
+                    self.app.open_comfyui_web()
+                except Exception:
+                    pass
+                return
+            else:
+                restart = self._ask_yes_no(
                     "端口被占用",
-                    f"检测到端口 {port} 已被占用 (PID: {pid_text}).\n\n是否直接打开网页而不启动新的实例?",
-                    default=True,
+                    "是否停止现有实例并用当前配置启动新的 ComfyUI?",
+                    default=False,
                     event=ProcessEvent.STARTING,
                 )
-                if proceed_open:
+                if restart:
                     try:
-                        self.app.open_comfyui_web()
+                        self.stop_all_comfyui_instances()
+                    except Exception:
+                        pass
+                    self.start_comfyui()
+                    return
+                else:
+                    try:
+                        self.app.logger.warning("端口占用，用户取消重启: %s", port)
                     except Exception:
                         pass
                     return
-                else:
-                    restart = self._ask_yes_no(
-                        "端口被占用",
-                        "是否停止现有实例并用当前配置启动新的 ComfyUI?",
-                        default=False,
-                        event=ProcessEvent.STARTING,
-                    )
-                    if restart:
-                        try:
-                            self.stop_all_comfyui_instances()
-                        except Exception:
-                            pass
-                        self.start_comfyui()
-                        return
-                    else:
-                        try:
-                            self.app.logger.warning("端口占用，用户取消重启: %s", port)
-                        except Exception:
-                            pass
-                        return
-            # 未占用则正常启动
-            self.start_comfyui()
+        # 未占用则正常启动
+        self.start_comfyui()
 
     def start_comfyui(self):  #
         try:
@@ -124,7 +154,7 @@ class ProcessManager:
             self.app._launching = True
             try:
                 self.app.big_btn.set_state("starting")
-                self.app.big_btn.set_text("正在启动…")
+                self.app.big_btn.set_display("启动中…", "点击停止")
                 # 强制刷新 UI
                 from PyQt5 import QtWidgets
 
@@ -142,9 +172,11 @@ class ProcessManager:
                 pass
             if not py.exists():
                 self._show_error("错误", f"Python不存在: {py}")
+                self.on_start_failed(f"Python不存在: {py}")
                 return
             if not main.exists():
                 self._show_error("错误", f"主文件不存在: {main}")
+                self.on_start_failed(f"主文件不存在: {main}")
                 return
             try:
                 from pathlib import Path as _P
@@ -154,9 +186,11 @@ class ProcessManager:
                 )
                 if rver.returncode != 0:
                     self._show_error("错误", f"Python无法执行: {py}")
+                    self.on_start_failed(f"Python无法执行: {py}")
                     return
             except Exception as _e:
                 self._show_error("错误", str(_e))
+                self.on_start_failed(str(_e))
                 return
             try:
                 self.app.logger.info("启动命令: %s", " ".join(cmd))
@@ -193,7 +227,7 @@ class ProcessManager:
         except Exception:
             pass
         self.app.big_btn.set_state("running")
-        self.app.big_btn.set_text("停止")
+        self.app.big_btn.set_display("正常运行", "点击停止")
         try:
             mode = (self.app.browser_open_mode.get() or "default").strip()
         except Exception:
@@ -215,30 +249,9 @@ class ProcessManager:
         else:
             mode = "default"
         if mode == "custom":
-
-            def _open_when_ready():
-                try:
-                    import time
-
-                    deadline = time.time() + 120.0
-                    while time.time() < deadline:
-                        ready = False
-                        try:
-                            ready = self._is_http_reachable()
-                        except Exception:
-                            ready = False
-                        if ready:
-                            try:
-                                self.app.ui_post(self.app.open_comfyui_web)
-                            except Exception:
-                                pass
-                            return
-                        time.sleep(0.25)
-                except Exception:
-                    pass
-
+            # runner_start 已通过 /system_stats 确认就绪，直接打开浏览器
             try:
-                threading.Thread(target=_open_when_ready, daemon=True).start()
+                self.app.open_comfyui_web()
             except Exception:
                 pass
 
@@ -249,7 +262,7 @@ class ProcessManager:
         except Exception:
             pass
         self.app.big_btn.set_state("idle")
-        self.app.big_btn.set_text("一键启动")
+        self.app.big_btn.set_display("🚀 一键启动")
         self.comfyui_process = None
 
     def stop_comfyui(self):  #
@@ -260,7 +273,7 @@ class ProcessManager:
 
         try:
             self.app.big_btn.set_state("starting")
-            self.app.big_btn.set_text("正在停止…")
+            self.app.big_btn.set_display("停止中…")
         except Exception:
             pass
 
@@ -339,7 +352,7 @@ class ProcessManager:
     def stop_comfyui_sync(self):
         try:
             self.app.big_btn.set_state("starting")
-            self.app.big_btn.set_text("正在停止…")
+            self.app.big_btn.set_display("停止中…")
         except Exception:
             pass
         try:
@@ -666,6 +679,9 @@ class ProcessManager:
             return False
 
     def _refresh_running_status(self):  #
+        # 启动中或停止中时，不刷新按钮状态，避免覆盖中间态
+        if getattr(self.app, '_launching', False) or getattr(self, '_stopping', False):
+            return
         # 根据进程与端口探测结果统一刷新按钮状态
         try:
             running = False
@@ -675,33 +691,39 @@ class ProcessManager:
                 running = is_http_reachable(self.app)
             if running:
                 self.app.big_btn.set_state("running")
-                self.app.big_btn.set_text("停止")
+                self.app.big_btn.set_display("正常运行", "点击停止")
             else:
                 self.app.big_btn.set_state("idle")
-                self.app.big_btn.set_text("一键启动")
+                self.app.big_btn.set_display("🚀 一键启动")
         except Exception:
             pass
 
     def refresh_running_status_async(self):  #
         def _bg():
+            # 启动中或停止中时，不刷新按钮状态，避免覆盖中间态
+            if getattr(self.app, '_launching', False) or getattr(self, '_stopping', False):
+                return
             try:
                 running = False
                 try:
                     if self.comfyui_process and self.comfyui_process.poll() is None:
                         running = True
                     else:
-                        running = is_http_reachable(self.app)
+                        running = is_http_reachable(self.app, _log=True)
                 except Exception:
                     running = False
 
                 def _ui():
                     try:
+                        # 二次检查：防止在异步回调期间状态已变化
+                        if getattr(self.app, '_launching', False) or getattr(self, '_stopping', False):
+                            return
                         if running:
                             self.app.big_btn.set_state("running")
-                            self.app.big_btn.set_text("停止")
+                            self.app.big_btn.set_display("正常运行", "点击停止")
                         else:
                             self.app.big_btn.set_state("idle")
-                            self.app.big_btn.set_text("一键启动")
+                            self.app.big_btn.set_display("🚀 一键启动")
                     except Exception:
                         pass
 
@@ -734,13 +756,13 @@ class ProcessManager:
         try:
             if is_http_reachable(self.app):
                 self.app.big_btn.set_state("running")
-                self.app.big_btn.set_text("停止")
+                self.app.big_btn.set_display("正常运行", "点击停止")
             else:
                 self.app.big_btn.set_state("idle")
-                self.app.big_btn.set_text("一键启动")
+                self.app.big_btn.set_display("🚀 一键启动")
         except Exception:
             self.app.big_btn.set_state("idle")
-            self.app.big_btn.set_text("一键启动")
+            self.app.big_btn.set_display("🚀 一键启动")
 
     def stop_all_comfyui_instances(self) -> bool:  #
         """尝试关闭所有检测到的 ComfyUI 实例（包括非本启动器启动的）。

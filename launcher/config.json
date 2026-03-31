@@ -12,7 +12,8 @@
     "disable_all_custom_nodes": false,
     "vram_mode": "",
     "disable_api_nodes": false,
-    "use_new_manager": false
+    "use_new_manager": false,
+    "show_console": true
   },
   "ui_settings": {
     "window_width": 800,

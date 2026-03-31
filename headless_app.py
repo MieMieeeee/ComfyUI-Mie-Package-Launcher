@@ -145,6 +145,7 @@ class HeadlessAppContext:
         self.browser_open_mode = StringVar(
             launch_opts.get("browser_open_mode", "default")
         )
+        self.show_console = BoolVar(launch_opts.get("show_console", True))
 
         # HF mirror settings
         proxy_settings = self.config.get("proxy_settings", {})

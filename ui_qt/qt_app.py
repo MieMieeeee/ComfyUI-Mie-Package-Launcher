@@ -73,23 +73,56 @@ class BoolVar:
 class BigBtnProxy:
     def __init__(self):
         self._btn = None
+        self._status_label = None
+        self._action_label = None
         self._state = "idle"
         self._text = None
 
-    def attach(self, qbtn):
+    def attach(self, qbtn, status_label=None, action_label=None):
         self._btn = qbtn
+        self._status_label = status_label
+        self._action_label = action_label
         if self._text is not None:
-            try:
-                qbtn.setText(self._text)
-            except Exception:
-                pass
+            self._apply_text(self._text)
 
     def set_state(self, s):
         self._state = s
 
     def set_text(self, t):
         self._text = t
-        if self._btn is not None:
+        self._apply_text(t)
+
+    def set_display(self, status, action=""):
+        """设置双行显示：状态行（大字）+ 操作行（小字）"""
+        self._text = f"{status}\n{action}" if action else status
+        if self._status_label is not None:
+            self._status_label.setText(status)
+            self._status_label.setVisible(True)
+        if self._action_label is not None:
+            self._action_label.setText(action)
+            self._action_label.setVisible(bool(action))
+        if self._status_label is None and self._btn is not None:
+            try:
+                self._btn.setText(self._text)
+            except Exception:
+                pass
+
+    def _apply_text(self, t):
+        if self._status_label is not None:
+            if '\n' in t:
+                parts = t.split('\n', 1)
+                self._status_label.setText(parts[0])
+                self._status_label.setVisible(True)
+                if self._action_label is not None:
+                    self._action_label.setText(parts[1])
+                    self._action_label.setVisible(bool(parts[1]))
+            else:
+                self._status_label.setText(t)
+                self._status_label.setVisible(True)
+                if self._action_label is not None:
+                    self._action_label.setText("")
+                    self._action_label.setVisible(False)
+        elif self._btn is not None:
             try:
                 self._btn.setText(t)
             except Exception:
@@ -625,6 +658,7 @@ class PyQtLauncher(QtWidgets.QMainWindow, process_events.ProcessCallback):
         self.attention_mode = Var("")
         self.browser_open_mode = Var("default")
         self.custom_browser_path = Var("")
+        self.show_console = BoolVar(True)
         launch_cfg = (
             self.config.get("launch_options", {})
             if isinstance(self.config, dict)
@@ -670,6 +704,9 @@ class PyQtLauncher(QtWidgets.QMainWindow, process_events.ProcessCallback):
             )
             self.custom_browser_path.set(
                 launch_cfg.get("custom_browser_path", self.custom_browser_path.get())
+            )
+            self.show_console.set(
+                launch_cfg.get("show_console", True)
             )
         except Exception:
             pass
@@ -813,10 +850,11 @@ class PyQtLauncher(QtWidgets.QMainWindow, process_events.ProcessCallback):
         self._setup_ui()
 
     def ui_post(self, fn):
+        """将函数投递到 UI 线程执行（线程安全）"""
         try:
-            if not hasattr(self, "_invoker") or (self._invoker is None):
+            if not hasattr(self, "_invoker") or self._invoker is None:
                 self._invoker = UiInvoker(self)
-            self._invoker.invoke_signal.emit(fn)
+            self._invoker._qt_invoke_signal.emit(fn)
         except Exception:
             try:
                 self.root.after(0, fn)
@@ -1978,7 +2016,31 @@ class PyQtLauncher(QtWidgets.QMainWindow, process_events.ProcessCallback):
         self._launch_page = page_launch  # 保存引用，用于后续更新显示
         try:
             if hasattr(self, "big_btn"):
-                self.big_btn.attach(page_launch.btn_toggle)
+                self.big_btn.attach(
+                    page_launch.btn_toggle,
+                    getattr(page_launch, "_btn_status_label", None),
+                    getattr(page_launch, "_btn_action_label", None),
+                )
+        except Exception:
+            pass
+
+        # 定时检测 ComfyUI 运行状态并同步按钮（每 5 秒）
+        try:
+            self._status_timer = QtCore.QTimer(self)
+            self._status_timer.timeout.connect(
+                lambda: (
+                    self.services.process.refresh_status()
+                    if hasattr(self, "services") and hasattr(self.services, "process")
+                    else None
+                )
+            )
+            self._status_timer.start(5000)
+            # 首次立即检测一次
+            QtCore.QTimer.singleShot(500, lambda: (
+                self.services.process.refresh_status()
+                if hasattr(self, "services") and hasattr(self.services, "process")
+                else None
+            ))
         except Exception:
             pass
         page_version = VersionPage(app=self, theme_manager=self.theme_manager)
@@ -2574,6 +2636,7 @@ class PyQtLauncher(QtWidgets.QMainWindow, process_events.ProcessCallback):
                 attention_mode=self.attention_mode.get() or "",
                 browser_open_mode=self.browser_open_mode.get() or "default",
                 custom_browser_path=self.custom_browser_path.get() or "",
+                show_console=self.show_console.get(),
             )
             self.services.config.update_proxy_settings(
                 pypi_proxy_mode=self.pypi_proxy_mode.get(),
