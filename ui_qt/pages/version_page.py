@@ -242,6 +242,10 @@ class VersionPage(BasePage):
         self._commit_page = 1
         self._commits_per_page = 50
         self._total_commits = 0
+        # 提交数快照：只在用户主动刷新时更新，分页导航时使用快照值避免竞争
+        self._commit_count_snapshot = 0
+        # 全量提交缓存（一次性加载，Python 侧分页，避免 git log --skip 跨页重复）
+        self._all_commits_cache = []
 
         # 翻页控件
         page_row = QtWidgets.QHBoxLayout()
@@ -380,11 +384,20 @@ class VersionPage(BasePage):
                 DialogHelper.show_warning(self, "失败", "ComfyUI目录不存在")
                 return
 
-            # Fetch
+            # Fetch（若是浅克隆则补全），完成后重新加载缓存
             progress.set_status("正在执行 git fetch...")
             if hasattr(self.app, "logger"):
                 self.app.logger.info("UI: 正在执行 git fetch...")
-            run_hidden([getattr(self.app, 'git_path', 'git') or "git", "fetch"], cwd=str(root))
+            git = getattr(self.app, 'git_path', 'git') or "git"
+            is_shallow = (root / ".git" / "shallow").exists()
+            if is_shallow:
+                run_hidden([git, "fetch", "--unshallow"], cwd=str(root))
+            else:
+                run_hidden([git, "fetch"], cwd=str(root))
+
+            # 重新加载全部 commits 到缓存
+            self._all_commits_cache = self._fetch_all_commits(root, git)
+            self._commit_page = 1
 
             # Refresh info
             progress.set_status("正在刷新表格...")
@@ -401,7 +414,7 @@ class VersionPage(BasePage):
             DialogHelper.show_warning(self, "失败", str(e))
 
     def _background_fetch(self):
-        """后台静默 fetch，不阻塞界面"""
+        """后台 fetch 并预填充本地缓存，完成后刷新 UI"""
         import threading
 
         def _bg():
@@ -410,15 +423,65 @@ class VersionPage(BasePage):
                 root = (base / "ComfyUI").resolve()
                 if not root.exists():
                     return
-                # 在后台线程执行 git fetch
-                run_hidden([getattr(self.app, 'git_path', 'git') or "git", "fetch"],
-                          capture_output=True, text=True, timeout=30, cwd=str(root))
-                # fetch 完成后回到 UI 线程刷新表格
-                QtCore.QTimer.singleShot(0, self._load_commit_history)
+                git = getattr(self.app, 'git_path', 'git') or "git"
+                is_shallow = (root / ".git" / "shallow").exists()
+                if is_shallow:
+                    run_hidden([git, "fetch", "--unshallow"],
+                              capture_output=True, text=True, timeout=120, cwd=str(root))
+                else:
+                    run_hidden([git, "fetch"],
+                              capture_output=True, text=True, timeout=30, cwd=str(root))
+
+                # 加载全部 commits 到缓存
+                commits = self._fetch_all_commits(root, git)
+                self._all_commits_cache = commits
+                # 回到 UI 线程刷新表格
+                QtCore.QTimer.singleShot(0, self._on_cache_loaded)
             except Exception:
-                pass  # 静默失败，不影响界面
+                pass
 
         threading.Thread(target=_bg, daemon=True).start()
+
+    def _fetch_all_commits(self, root, git):
+        """从本地 git 仓库获取全部提交记录"""
+        import subprocess
+        # 优先用 origin/HEAD
+        target = None
+        try:
+            r = subprocess.run(
+                [git, "rev-parse", "--verify", "origin/HEAD"],
+                capture_output=True, timeout=3, cwd=str(root)
+            )
+            if r.returncode == 0:
+                target = "origin/HEAD"
+        except Exception:
+            pass
+        if not target:
+            target = "HEAD"
+
+        commits = []
+        try:
+            # --first-parent 保证单线历史，避免合并带来的图遍历乱序
+            r = subprocess.run(
+                [git, "log", "--first-parent", "--date-order", "--date=short",
+                 "--pretty=format:%h|%ad|%an|%s", target],
+                capture_output=True, timeout=15, cwd=str(root)
+            )
+            # 直接读 bytes 用 UTF-8 解码，避免 Windows GBK 解码中文失败
+            stdout = r.stdout.decode("utf-8", errors="replace")
+            if r.returncode == 0 and stdout:
+                for line in stdout.splitlines():
+                    parts = line.split("|", 3)
+                    if len(parts) == 4:
+                        commits.append(parts)
+        except Exception:
+            pass
+        return commits
+
+    def _on_cache_loaded(self):
+        """缓存加载完成后刷新 UI（必须在 UI 线程调用）"""
+        self._commit_page = 1
+        self._load_commit_history()
 
     def _prev_page(self):
         """上一页"""
@@ -428,17 +491,11 @@ class VersionPage(BasePage):
 
     def _next_page(self):
         """下一页"""
-        total_pages = (self._total_commits + self._commits_per_page - 1) // self._commits_per_page
+        total = len(self._all_commits_cache) if self._all_commits_cache else self._commit_count_snapshot
+        total_pages = (total + self._commits_per_page - 1) // self._commits_per_page
         if self._commit_page < total_pages:
             self._commit_page += 1
             self._load_commit_history()
-
-    def _update_page_info(self):
-        """更新翻页信息"""
-        total_pages = max(1, (self._total_commits + self._commits_per_page - 1) // self._commits_per_page)
-        self.lbl_page_info.setText(f"第 {self._commit_page}/{total_pages} 页")
-        self.btn_prev_page.setEnabled(self._commit_page > 1)
-        self.btn_next_page.setEnabled(self._commit_page < total_pages)
 
     def _refresh_kernel_section(self, force_remote=False):
         """刷新版本信息"""
@@ -467,82 +524,26 @@ class VersionPage(BasePage):
         self._load_commit_history()
 
     def _load_commit_history(self):
-        """加载提交历史，始终优先使用远端分支"""
-        try:
-            base = Path(self.app.config.get("paths", {}).get("comfyui_root") or ".").resolve()
-            root = (base / "ComfyUI").resolve()
-        except Exception:
-            root = Path.cwd()
+        """从本地缓存加载提交历史（fetch 已预填充缓存）"""
+        all_commits = self._all_commits_cache
+        if not all_commits:
+            # 缓存尚未加载，等待 fetch 完成后的 _on_cache_loaded 刷新
+            return
 
-        git = getattr(self.app, 'git_path', 'git') or "git"
-        target = None
+        total = len(all_commits)
+        total_pages = max(1, (total + self._commits_per_page - 1) // self._commits_per_page)
+        self.lbl_page_info.setText(f"第 {self._commit_page}/{total_pages} 页")
+        self.btn_prev_page.setEnabled(self._commit_page > 1)
+        self.btn_next_page.setEnabled(self._commit_page < total_pages)
 
-        # 优先使用远端分支（最全的数据）
-        try:
-            r_up = run_hidden([git, "rev-parse", "--abbrev-ref", "--symbolic-full-name", "@{u}"],
-                            capture_output=True, text=True, timeout=3, cwd=str(root))
-            if r_up.returncode == 0 and r_up.stdout.strip():
-                target = r_up.stdout.strip()
-        except Exception:
-            pass
-
-        # Fallback: 尝试 origin/HEAD
-        if not target:
-            try:
-                r_oh = run_hidden([git, "rev-parse", "--verify", "origin/HEAD"],
-                                 capture_output=True, text=True, timeout=3, cwd=str(root))
-                if r_oh.returncode == 0:
-                    target = "origin/HEAD"
-            except Exception:
-                pass
-
-        # 最终 fallback: 本地 HEAD
-        if not target:
-            target = "HEAD"
-
-        # 获取总提交数（用于分页）
-        try:
-            r_count = run_hidden([git, "rev-list", "--count", target],
-                                capture_output=True, text=True, timeout=5, cwd=str(root))
-            if r_count.returncode == 0 and r_count.stdout.strip():
-                self._total_commits = int(r_count.stdout.strip())
-            else:
-                self._total_commits = 0
-        except Exception:
-            self._total_commits = 0
-
-        # 计算分页偏移
         skip = (self._commit_page - 1) * self._commits_per_page
-
-        r = run_hidden([git, "log", "--date=short",
-                       "--pretty=format:%h|%ad|%an|%s", "-n", str(self._commits_per_page),
-                       "--skip", str(skip), target],
-                      capture_output=True, text=True, timeout=8, cwd=str(root))
-
-        rows = []
-        if r.returncode == 0 and r.stdout:
-            for line in r.stdout.splitlines():
-                parts = line.split("|", 3)
-                if len(parts) == 4:
-                    rows.append(parts)
-
-        # Fallback to local HEAD if target failed
-        if r.returncode != 0 or not rows:
-            r = run_hidden([git, "log", "--date=short",
-                          "--pretty=format:%h|%ad|%an|%s", "-n", str(self._commits_per_page),
-                          "--skip", str(skip), "HEAD"],
-                         capture_output=True, text=True, timeout=8, cwd=str(root))
-            if r.returncode == 0 and r.stdout:
-                rows = []
-                for line in r.stdout.splitlines():
-                    parts = line.split("|", 3)
-                    if len(parts) == 4:
-                        rows.append(parts)
-
-        # 更新翻页信息
-        self._update_page_info()
+        rows = all_commits[skip:skip + self._commits_per_page]
 
         self.history_table.setRowCount(len(rows))
+
+        # 翻页后滚动到最上面
+        if rows:
+            self.history_table.scrollToItem(self.history_table.item(0, 0))
 
         try:
             import re
