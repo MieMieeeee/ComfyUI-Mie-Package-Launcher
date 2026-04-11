@@ -172,14 +172,6 @@ class UpdateService:
                 core_res = self.app.services.version.upgrade_latest(
                     stable_only=stable_only
                 )
-                if core_res and core_res.get("error"):
-                    try:
-                        vm_res = self.app.version_manager.update_to_latest(
-                            confirm=False, notify=False
-                        ) or {"component": "core"}
-                        core_res = vm_res
-                    except Exception:
-                        pass
                 post_core = self._safe_get_current_kernel_version()
                 try:
                     if isinstance(core_res, dict):

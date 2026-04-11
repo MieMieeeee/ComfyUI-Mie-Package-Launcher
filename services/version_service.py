@@ -1,6 +1,9 @@
 import re
+import sys
 import time
 import json
+import threading
+import subprocess
 from urllib.request import urlopen, Request
 from pathlib import Path
 from typing import Dict, Any, Optional, Tuple, List, Callable
@@ -12,6 +15,10 @@ class VersionService(IVersionService):
     def __init__(self, app):
         self.app = app
         self._api_failed = False  # 标记 API 是否已失败，避免重复尝试
+        self._api_failed_time = 0.0  # 上次 API 失败的时间戳，用于冷却恢复
+        self._cancel_event = threading.Event()
+        self._current_process = None  # subprocess.Popen 句柄，用于取消时终止
+        self._process_lock = threading.Lock()
 
     def refresh(self, scope: str = "all") -> None:
         from core.version_service import refresh_version_info
@@ -71,6 +78,119 @@ class VersionService(IVersionService):
             except Exception:
                 pass
         return r
+
+    # ── 取消控制 ──
+
+    def request_cancel(self):
+        """请求取消当前更新操作，终止正在运行的 git 进程。"""
+        self._cancel_event.set()
+        with self._process_lock:
+            proc = self._current_process
+        if proc and proc.poll() is None:
+            try:
+                proc.terminate()
+            except Exception:
+                pass
+            try:
+                proc.kill()
+            except Exception:
+                pass
+
+    def reset_cancel(self):
+        """开始新更新前重置取消状态。"""
+        self._cancel_event.clear()
+        with self._process_lock:
+            self._current_process = None
+
+    def is_cancelled(self) -> bool:
+        return self._cancel_event.is_set()
+
+    def _run_git_cancellable(self, cmd: list, timeout: int = 60, **kwargs):
+        """带取消支持的 git 命令执行，使用 Popen 代替 subprocess.run。
+
+        可通过 request_cancel() 终止正在运行的进程。
+        """
+        cwd = kwargs.get("cwd", self._repo_root())
+        # 替换 git 路径（与 _run_git 相同逻辑）
+        if isinstance(cmd, list) and cmd and str(cmd[0]).lower() == "git":
+            gp = getattr(self.app, "git_path", None)
+            if gp:
+                cmd[0] = gp
+
+        # 构建 Windows 隐藏窗口参数（与 run_hidden 一致）
+        popen_kwargs = {}
+        if sys.platform.startswith("win"):
+            si = subprocess.STARTUPINFO()
+            si.dwFlags |= subprocess.STARTF_USESHOWWINDOW
+            popen_kwargs["startupinfo"] = si
+            popen_kwargs["creationflags"] = subprocess.CREATE_NO_WINDOW
+
+        popen_kwargs["stdout"] = subprocess.PIPE
+        popen_kwargs["stderr"] = subprocess.PIPE
+        popen_kwargs["cwd"] = cwd
+
+        proc = subprocess.Popen(cmd, **popen_kwargs)
+        with self._process_lock:
+            self._current_process = proc
+
+        try:
+            stdout, stderr = proc.communicate(timeout=timeout)
+        except subprocess.TimeoutExpired:
+            proc.kill()
+            stdout, stderr = proc.communicate()
+            return subprocess.CompletedProcess(
+                args=cmd, returncode=-1,
+                stdout=stdout or b"", stderr=b"timeout expired",
+            )
+        finally:
+            with self._process_lock:
+                self._current_process = None
+
+        if isinstance(stdout, bytes):
+            stdout_str = stdout.decode("utf-8", errors="replace")
+        else:
+            stdout_str = stdout or ""
+        if isinstance(stderr, bytes):
+            stderr_str = stderr.decode("utf-8", errors="replace")
+        else:
+            stderr_str = stderr or ""
+
+        result = subprocess.CompletedProcess(
+            args=cmd, returncode=proc.returncode,
+            stdout=stdout_str, stderr=stderr_str,
+        )
+
+        # 处理 dubious ownership（与 _run_git 相同逻辑）
+        if result.returncode != 0 and "dubious ownership" in stderr_str:
+            try:
+                target_cwd = cwd or self._repo_root()
+                if getattr(self.app, "services", None) and getattr(
+                    self.app.services, "git", None
+                ):
+                    self.app.services.git.fix_unsafe_repo(target_cwd)
+                    proc2 = subprocess.Popen(cmd, **popen_kwargs)
+                    with self._process_lock:
+                        self._current_process = proc2
+                    try:
+                        stdout2, stderr2 = proc2.communicate(timeout=timeout)
+                    except subprocess.TimeoutExpired:
+                        proc2.kill()
+                        stdout2, stderr2 = proc2.communicate()
+                    finally:
+                        with self._process_lock:
+                            self._current_process = None
+                    if isinstance(stdout2, bytes):
+                        stdout2 = stdout2.decode("utf-8", errors="replace")
+                    if isinstance(stderr2, bytes):
+                        stderr2 = stderr2.decode("utf-8", errors="replace")
+                    return subprocess.CompletedProcess(
+                        args=cmd, returncode=proc2.returncode,
+                        stdout=stdout2 or "", stderr=stderr2 or "",
+                    )
+            except Exception:
+                pass
+
+        return result
 
     def _list_tags(self) -> list:
         try:
@@ -257,11 +377,19 @@ class VersionService(IVersionService):
                 logger.info("[_get_releases] 使用缓存, 返回 %d 条", len(cache))
             return cache
 
-        # 如果之前已失败且不强制刷新，直接返回空
+        # 如果之前已失败且不强制刷新，检查冷却时间
         if self._api_failed and not force_refresh:
+            elapsed = time.time() - self._api_failed_time
+            if elapsed < 60:
+                if logger:
+                    logger.info(
+                        "[_get_releases] API 之前已失败，冷却中 (%.0f/60s)", elapsed
+                    )
+                return []
+            # 冷却已过，允许重试
             if logger:
-                logger.info("[_get_releases] API 之前已失败，跳过")
-            return []
+                logger.info("[_get_releases] API 冷却已过 (%.0fs)，允许重试", elapsed)
+            self._api_failed = False
 
         owner, repo = self._origin_repo()
         if not owner or not repo:
@@ -326,6 +454,7 @@ class VersionService(IVersionService):
         # 标记 API 失败，避免后续重复尝试
         if mark_failed:
             self._api_failed = True
+            self._api_failed_time = time.time()
             if logger:
                 logger.info("[_get_releases] 标记 API 失败，后续将使用 git 方案")
 
@@ -546,6 +675,8 @@ class VersionService(IVersionService):
                     pass
 
         if stable_only:
+            if self.is_cancelled():
+                return {"component": "core", "error": "用户取消"}
             report("正在查找最新稳定版本...")
             info = self.get_latest_stable_kernel(
                 force_refresh=True, on_progress=on_progress
@@ -557,7 +688,11 @@ class VersionService(IVersionService):
                     "error": "no stable tag",
                 }
             report(f"正在切换到 {info.get('tag')}...")
-            res = self._checkout_commit(info["commit"])
+            tag = info.get("tag")
+            if tag:
+                res = self._checkout_tag(tag)
+            else:
+                res = self._checkout_commit(info["commit"])
             try:
                 res.update({"tag": info.get("tag"), "commit": info.get("commit")})
             except Exception:
@@ -585,11 +720,12 @@ class VersionService(IVersionService):
                 except Exception:
                     before_hash = ""
 
+                if self.is_cancelled():
+                    return {"component": "core", "error": "用户取消"}
+
                 report("正在从远程获取更新...")
-                fetch = self._run_git(
+                fetch = self._run_git_cancellable(
                     ["git", "fetch", "--prune"],
-                    capture_output=True,
-                    text=True,
                     timeout=30,
                     cwd=repo,
                 )
@@ -599,7 +735,12 @@ class VersionService(IVersionService):
                         if fetch
                         else "git fetch failed"
                     )
+                    if self.is_cancelled():
+                        return {"component": "core", "error": "用户取消"}
                     return {"component": "core", "error": msg}
+
+                if self.is_cancelled():
+                    return {"component": "core", "error": "用户取消"}
 
                 br = ""
                 try:
@@ -654,35 +795,37 @@ class VersionService(IVersionService):
                         )
                         return {"component": "core", "error": msg, "branch": br}
 
+                if self.is_cancelled():
+                    return {"component": "core", "error": "用户取消"}
+
                 report(f"正在拉取 {br} 分支最新代码...")
-                pull = self._run_git(
+                pull = self._run_git_cancellable(
                     ["git", "pull", "--ff-only"],
-                    capture_output=True,
-                    text=True,
                     timeout=60,
                     cwd=repo,
                 )
                 if not pull or pull.returncode != 0:
-                    pull2 = self._run_git(
-                        ["git", "pull"],
-                        capture_output=True,
-                        text=True,
+                    if self.is_cancelled():
+                        return {"component": "core", "error": "用户取消"}
+                    # ff-only 失败，尝试 rebase 作为安全 fallback（避免创建 merge commit）
+                    ff_err = (pull.stderr or pull.stdout or "") if pull else ""
+                    report("快进合并失败，尝试变基...")
+                    pull2 = self._run_git_cancellable(
+                        ["git", "pull", "--rebase"],
                         timeout=120,
                         cwd=repo,
                     )
                     if not pull2 or pull2.returncode != 0:
-                        msg = (
-                            (
-                                pull2.stderr
-                                or pull2.stdout
-                                or pull.stderr
-                                or pull.stdout
-                                or "git pull failed"
-                            )
-                            if (pull or pull2)
-                            else "git pull failed"
-                        )
-                        return {"component": "core", "error": msg, "branch": br}
+                        if self.is_cancelled():
+                            return {"component": "core", "error": "用户取消"}
+                        rebase_err = (pull2.stderr or pull2.stdout or "") if pull2 else ""
+                        msg = rebase_err or ff_err or "git pull failed"
+                        return {
+                            "component": "core",
+                            "error": f"更新失败（本地有修改冲突）: {msg[:200]}",
+                            "branch": br,
+                            "hint": "请在终端中手动执行 git reset --hard 后重试",
+                        }
 
                 try:
                     after = self._run_git(
@@ -737,5 +880,21 @@ class VersionService(IVersionService):
             if r and r.returncode == 0:
                 return {"component": "core", "updated": True}
             return {"component": "core", "error": r.stderr if r else "checkout failed"}
+        except Exception as e:
+            return {"component": "core", "error": str(e)}
+
+    def _checkout_tag(self, tag: str) -> Dict[str, Any]:
+        """通过 tag 名称 checkout，比 commit SHA 更优（git describe 能显示 tag 名）。"""
+        try:
+            r = self._run_git(
+                ["git", "checkout", f"tags/{tag}"],
+                capture_output=True,
+                text=True,
+                timeout=15,
+                cwd=self._repo_root(),
+            )
+            if r and r.returncode == 0:
+                return {"component": "core", "updated": True}
+            return {"component": "core", "error": r.stderr if r else "checkout tag failed"}
         except Exception as e:
             return {"component": "core", "error": str(e)}

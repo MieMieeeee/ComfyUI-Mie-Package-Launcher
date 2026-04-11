@@ -2754,10 +2754,15 @@ class PyQtLauncher(QtWidgets.QMainWindow, process_events.ProcessCallback):
             )
             pd.set_status("正在检查更新...")
 
-            # 设置取消回调：恢复按钮状态
+            # 设置取消回调：恢复按钮状态并终止后台 git 进程
             def _on_cancel():
                 try:
                     self._update_running = False
+                except Exception:
+                    pass
+                # 请求 version service 取消当前 git 操作
+                try:
+                    self.services.version.request_cancel()
                 except Exception:
                     pass
                 # 调用 on_done 回调恢复按钮
@@ -2785,6 +2790,12 @@ class PyQtLauncher(QtWidgets.QMainWindow, process_events.ProcessCallback):
         def _worker():
             core_res = None
             req_res = None
+
+            # 重置取消状态
+            try:
+                self.services.version.reset_cancel()
+            except Exception:
+                pass
 
             # 进度回调函数
             def on_progress(status: str):
@@ -2947,28 +2958,6 @@ class PyQtLauncher(QtWidgets.QMainWindow, process_events.ProcessCallback):
         except Exception:
             try:
                 self._update_running = False
-            except Exception:
-                pass
-
-    def _do_batch_update(self):
-        try:
-            results, summary = self.services.update.perform_batch_update()
-            try:
-                self.logger.info("更新摘要:\n%s", summary)
-            except Exception:
-                pass
-            try:
-                from ui_qt.widgets.dialog_helper import DialogHelper
-
-                DialogHelper.show_info(self, "更新完成", summary or "更新流程完成")
-            except Exception:
-                pass
-            self.get_version_info("core_only")
-        except Exception:
-            try:
-                from ui_qt.widgets.dialog_helper import DialogHelper
-
-                DialogHelper.show_warning(self, "更新失败", "更新过程中发生错误")
             except Exception:
                 pass
 

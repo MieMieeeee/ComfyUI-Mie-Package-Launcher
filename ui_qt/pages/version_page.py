@@ -330,6 +330,15 @@ class VersionPage(BasePage):
         if not commit_hash:
             return
 
+        # 检查 ComfyUI 是否正在运行
+        if hasattr(self.app, '_is_comfyui_running') and self.app._is_comfyui_running():
+            from ui_qt.widgets.dialog_helper import DialogHelper
+            DialogHelper.show_warning(
+                self, "无法切换",
+                "ComfyUI 正在运行中，无法切换提交。\n请先停止 ComfyUI 后再试。"
+            )
+            return
+
         # 显示进度对话框
         progress = ProgressDialog(parent=self, title="切换提交中", theme_manager=self.theme_manager)
         progress.set_status("正在切换 ComfyUI 到指定提交...")
