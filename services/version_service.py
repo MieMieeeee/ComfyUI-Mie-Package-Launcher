@@ -626,7 +626,50 @@ class VersionService(IVersionService):
             commit = r2.stdout.strip() if r2 and r2.returncode == 0 else None
         except Exception:
             commit = None
-        return {"tag": tag, "commit": commit}
+
+        # 检测 HEAD 是否精确在 tag 上
+        exact_tag = None
+        try:
+            r3 = self._run_git(
+                ["git", "describe", "--tags", "--exact-match", "HEAD"],
+                capture_output=True,
+                text=True,
+                timeout=10,
+                cwd=self._repo_root(),
+            )
+            if r3 and r3.returncode == 0:
+                exact_tag = r3.stdout.strip()
+        except Exception:
+            pass
+
+        # 获取日期
+        date_str = None
+        try:
+            r4 = self._run_git(
+                ["git", "log", "-1", "--format=%cs", "HEAD"],
+                capture_output=True,
+                text=True,
+                timeout=10,
+                cwd=self._repo_root(),
+            )
+            if r4 and r4.returncode == 0:
+                date_str = r4.stdout.strip() or None
+        except Exception:
+            pass
+
+        is_stable = exact_tag is not None
+        if is_stable:
+            display = f"{exact_tag} ({date_str})" if date_str else exact_tag
+        else:
+            display = f"{commit} ({date_str})" if commit and date_str else (commit or "未知")
+
+        return {
+            "tag": exact_tag or tag,
+            "commit": commit,
+            "date": date_str,
+            "is_stable": is_stable,
+            "display_version": display,
+        }
 
     def get_stable_version_map(self, force_refresh: bool = False) -> Dict[str, str]:
         """获取稳定版本的 commit -> tag 映射"""

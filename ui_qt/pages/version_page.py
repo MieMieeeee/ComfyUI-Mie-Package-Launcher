@@ -52,27 +52,17 @@ class VersionPage(BasePage):
         form_layout.setSpacing(10)
         form_layout.setLabelAlignment(QtCore.Qt.AlignLeft)
 
-        self.lbl_ver_branch = QtWidgets.QLabel("检测中...")
-        self.lbl_ver_commit = QtWidgets.QLabel("检测中...")
-
-        # 绑定数据显示 - 内核提交只显示commit哈希，不显示完整版本
-        if hasattr(self.app, 'comfyui_commit'):
-            self.app.comfyui_commit.bind(lambda v: self.lbl_ver_commit.setText(v))
+        self.lbl_kernel_version = QtWidgets.QLabel("检测中...")
 
         # 使用更醒目的标签颜色，不是 muted
         lbl_style = f"color: {self.theme_manager.colors.get('label_dim')}; font: 10pt 'Microsoft YaHei UI';"
         val_style = f"color: {self.theme_manager.colors.get('text')}; font: bold 10pt 'Microsoft YaHei UI';"
 
-        l_br = QtWidgets.QLabel("内核分支:")
-        l_br.setStyleSheet(lbl_style)
-        self.lbl_ver_branch.setStyleSheet(val_style)
+        l_kv = QtWidgets.QLabel("内核版本:")
+        l_kv.setStyleSheet(lbl_style)
+        self.lbl_kernel_version.setStyleSheet(val_style)
 
-        l_cm = QtWidgets.QLabel("内核提交:")
-        l_cm.setStyleSheet(lbl_style)
-        self.lbl_ver_commit.setStyleSheet(val_style)
-
-        form_layout.addRow(l_br, self.lbl_ver_branch)
-        form_layout.addRow(l_cm, self.lbl_ver_commit)
+        form_layout.addRow(l_kv, self.lbl_kernel_version)
         info_layout.addLayout(form_layout)
 
         # 设置面板
@@ -234,8 +224,7 @@ class VersionPage(BasePage):
             self.app._theme_widgets.extend(self._styled_widgets)
 
         # 暴露标签给主应用
-        self.app._version_branch_label = self.lbl_ver_branch
-        self.app._version_commit_label = self.lbl_ver_commit
+        self.app._version_kernel_label = self.lbl_kernel_version
         self.app._history_table = self.history_table
 
         # 分页相关
@@ -511,21 +500,7 @@ class VersionPage(BasePage):
         try:
             if hasattr(self.app, 'services') and hasattr(self.app.services, 'version'):
                 cur = self.app.services.version.get_current_kernel_version()
-                self.lbl_ver_commit.setText(cur.get("commit") or "未知")
-        except Exception:
-            pass
-
-        try:
-            base = Path(self.app.config.get("paths", {}).get("comfyui_root") or ".").resolve()
-            root = (base / "ComfyUI").resolve()
-        except Exception:
-            root = Path.cwd()
-
-        # 获取分支信息
-        try:
-            r = run_hidden([getattr(self.app, 'git_path', 'git') or "git", "rev-parse", "--abbrev-ref", "HEAD"],
-                          capture_output=True, text=True, timeout=6, cwd=str(root))
-            self.lbl_ver_branch.setText(r.stdout.strip() if r.returncode == 0 else "unknown")
+                self.lbl_kernel_version.setText(cur.get("display_version") or "未知")
         except Exception:
             pass
 
@@ -623,8 +598,7 @@ class VersionPage(BasePage):
         # 更新版本信息标签样式
         lbl_style = f"color: {self.theme_manager.colors.get('label_muted')}; font: 10pt 'Microsoft YaHei UI';"
         val_style = f"color: {self.theme_manager.colors.get('text')}; font: bold 10pt 'Microsoft YaHei UI';"
-        self.lbl_ver_branch.setStyleSheet(val_style)
-        self.lbl_ver_commit.setStyleSheet(val_style)
+        self.lbl_kernel_version.setStyleSheet(val_style)
 
         # 更新设置面板背景颜色
         if hasattr(self, 'settings_panel'):

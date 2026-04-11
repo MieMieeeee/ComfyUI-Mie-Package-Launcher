@@ -268,93 +268,96 @@ def refresh_version_info(app, scope: str = "all"):
                                 )
                         except Exception:
                             pass
-                        r = run_hidden(
-                            [app.git_path, "describe", "--tags", "--abbrev=0"],
-                            cwd=str(root),
-                            capture_output=True,
-                            text=True,
-                            timeout=8,
-                        )
-                        if r.returncode != 0 and "dubious ownership" in (
-                            getattr(r, "stderr", "") or ""
-                        ):
+
+                        # 获取 commit hash
+                        commit = ""
+                        try:
+                            r2 = run_hidden(
+                                [app.git_path, "rev-parse", "--short", "HEAD"],
+                                cwd=str(root),
+                                capture_output=True,
+                                text=True,
+                                timeout=8,
+                            )
+                            commit = r2.stdout.strip() if r2.returncode == 0 else ""
+                        except Exception:
+                            pass
+
+                        # 检测 HEAD 是否精确在 tag 上
+                        exact_tag = None
+                        try:
+                            r3 = run_hidden(
+                                [app.git_path, "describe", "--tags", "--exact-match", "HEAD"],
+                                cwd=str(root),
+                                capture_output=True,
+                                text=True,
+                                timeout=8,
+                            )
+                            if r3.returncode != 0 and "dubious ownership" in (
+                                getattr(r3, "stderr", "") or ""
+                            ):
+                                try:
+                                    if getattr(app, "services", None) and getattr(
+                                        app.services, "git", None
+                                    ):
+                                        app.services.git.fix_unsafe_repo(str(root))
+                                        r3 = run_hidden(
+                                            [app.git_path, "describe", "--tags", "--exact-match", "HEAD"],
+                                            cwd=str(root),
+                                            capture_output=True,
+                                            text=True,
+                                            timeout=8,
+                                        )
+                                except Exception:
+                                    pass
+                            if r3.returncode == 0:
+                                exact_tag = r3.stdout.strip()
+                        except Exception:
+                            pass
+
+                        # 获取日期
+                        date_str = None
+                        try:
+                            r4 = run_hidden(
+                                [app.git_path, "log", "-1", "--format=%cs", "HEAD"],
+                                cwd=str(root),
+                                capture_output=True,
+                                text=True,
+                                timeout=8,
+                            )
+                            if r4.returncode == 0:
+                                date_str = r4.stdout.strip() or None
+                        except Exception:
+                            pass
+
+                        # 格式化
+                        if exact_tag:
+                            display = f"{exact_tag} ({date_str})" if date_str else exact_tag
+                        else:
+                            display = f"{commit} ({date_str})" if commit and date_str else (commit or "未找到")
+
+                        def _set():
                             try:
-                                if getattr(app, "services", None) and getattr(
-                                    app.services, "git", None
-                                ):
-                                    app.services.git.fix_unsafe_repo(str(root))
-                                    r = run_hidden(
-                                        [
-                                            app.git_path,
-                                            "describe",
-                                            "--tags",
-                                            "--abbrev=0",
-                                        ],
-                                        cwd=str(root),
-                                        capture_output=True,
-                                        text=True,
-                                        timeout=8,
+                                if hasattr(app, "comfyui_commit"):
+                                    app.comfyui_commit.set(display)
+                            except Exception:
+                                pass
+                            try:
+                                app.comfyui_version.set(display)
+                            except Exception:
+                                pass
+                            try:
+                                if getattr(app, "logger", None):
+                                    app.logger.info(
+                                        "本地内核版本: tag=%s commit=%s display=%s",
+                                        exact_tag,
+                                        commit,
+                                        display,
                                     )
                             except Exception:
                                 pass
-                        if r.returncode == 0:
-                            tag = r.stdout.strip()
-                            try:
-                                r2 = run_hidden(
-                                    [app.git_path, "rev-parse", "--short", "HEAD"],
-                                    cwd=str(root),
-                                    capture_output=True,
-                                    text=True,
-                                    timeout=8,
-                                )
-                                commit = r2.stdout.strip() if r2.returncode == 0 else ""
-                            except Exception:
-                                commit = ""
 
-                            def _set():
-                                try:
-                                    if hasattr(app, "comfyui_commit"):
-                                        app.comfyui_commit.set(commit)
-                                except Exception:
-                                    pass
-                                try:
-                                    ver_text = tag or (
-                                        f"（{commit}）" if commit else "未找到"
-                                    )
-                                    app.comfyui_version.set(ver_text)
-                                except Exception:
-                                    pass
-                                try:
-                                    if getattr(app, "logger", None):
-                                        app.logger.info(
-                                            "本地内核版本: tag=%s commit=%s",
-                                            tag,
-                                            commit,
-                                        )
-                                except Exception:
-                                    pass
-
-                            _post(_set)
-                        else:
-                            try:
-                                r2 = run_hidden(
-                                    [app.git_path, "rev-parse", "--short", "HEAD"],
-                                    cwd=str(root),
-                                    capture_output=True,
-                                    text=True,
-                                    timeout=6,
-                                )
-                                commit = r2.stdout.strip() if r2.returncode == 0 else ""
-                                if commit:
-                                    _post(
-                                        lambda c=commit: app.comfyui_version.set(
-                                            f"（{c}）"
-                                        )
-                                    )
-                                else:
-                                    _post(lambda: app.comfyui_version.set("未找到"))
-                            except Exception:
-                                _post(lambda: app.comfyui_version.set("未找到"))
+                        _post(_set)
                     except Exception:
                         _post(lambda: app.comfyui_version.set("未找到"))
 

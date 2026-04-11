@@ -289,30 +289,9 @@ class VersionWorker(QtCore.QThread):
                     else:
                         self.gitStatus.emit(git_text or "")
                     if git_cmd and root.exists():
-                        r = run_hidden(
-                            [git_cmd, "describe", "--tags", "--abbrev=0"],
-                            cwd=str(root),
-                            capture_output=True,
-                            text=True,
-                            timeout=8,
-                        )
-                        if r.returncode != 0:
-                            r2 = run_hidden(
-                                [git_cmd, "rev-parse", "--short", "HEAD"],
-                                cwd=str(root),
-                                capture_output=True,
-                                text=True,
-                                timeout=6,
-                            )
-                            c = r2.stdout.strip() if r2.returncode == 0 else ""
-                            try:
-                                if hasattr(self.app, "comfyui_commit"):
-                                    self.app.comfyui_commit.set(c)
-                            except Exception:
-                                pass
-                            self.coreVersion.emit(f"（{c}）" if c else "未找到")
-                        else:
-                            tag = r.stdout.strip()
+                        # 获取 commit hash
+                        commit = ""
+                        try:
                             r2 = run_hidden(
                                 [git_cmd, "rev-parse", "--short", "HEAD"],
                                 cwd=str(root),
@@ -320,13 +299,52 @@ class VersionWorker(QtCore.QThread):
                                 text=True,
                                 timeout=8,
                             )
-                            c = r2.stdout.strip() if r2.returncode == 0 else ""
-                            try:
-                                if hasattr(self.app, "comfyui_commit"):
-                                    self.app.comfyui_commit.set(c)
-                            except Exception:
-                                pass
-                            self.coreVersion.emit(f"{tag}（{c}）")
+                            commit = r2.stdout.strip() if r2.returncode == 0 else ""
+                        except Exception:
+                            pass
+
+                        # 检测 HEAD 是否精确在 tag 上
+                        exact_tag = None
+                        try:
+                            r3 = run_hidden(
+                                [git_cmd, "describe", "--tags", "--exact-match", "HEAD"],
+                                cwd=str(root),
+                                capture_output=True,
+                                text=True,
+                                timeout=8,
+                            )
+                            if r3.returncode == 0:
+                                exact_tag = r3.stdout.strip()
+                        except Exception:
+                            pass
+
+                        # 获取日期
+                        date_str = None
+                        try:
+                            r4 = run_hidden(
+                                [git_cmd, "log", "-1", "--format=%cs", "HEAD"],
+                                cwd=str(root),
+                                capture_output=True,
+                                text=True,
+                                timeout=8,
+                            )
+                            if r4.returncode == 0:
+                                date_str = r4.stdout.strip() or None
+                        except Exception:
+                            pass
+
+                        # 格式化
+                        if exact_tag:
+                            display = f"{exact_tag} ({date_str})" if date_str else exact_tag
+                        else:
+                            display = f"{commit} ({date_str})" if commit and date_str else (commit or "未找到")
+
+                        try:
+                            if hasattr(self.app, "comfyui_commit"):
+                                self.app.comfyui_commit.set(display)
+                        except Exception:
+                            pass
+                        self.coreVersion.emit(display)
                         try:
                             self.app.logger.info("UI: 内核版本标签已生成")
                         except Exception:

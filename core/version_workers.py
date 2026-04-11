@@ -125,15 +125,6 @@ class ComfyUIVersionWorker(BaseVersionWorker):
                 self.versionReady.emit("未找到Git命令")
                 return
 
-            # 获取 tag
-            r = run_hidden(
-                [git_cmd, "describe", "--tags", "--abbrev=0"],
-                cwd=str(root),
-                capture_output=True,
-                text=True,
-                timeout=self.TIMEOUT,
-            )
-
             # 获取 commit
             r2 = run_hidden(
                 [git_cmd, "rev-parse", "--short", "HEAD"],
@@ -144,13 +135,44 @@ class ComfyUIVersionWorker(BaseVersionWorker):
             )
             c = r2.stdout.strip() if r2.returncode == 0 else ""
 
-            if r.returncode != 0:
-                self.versionReady.emit(f"（{c}）" if c else "未找到")
-            else:
-                tag = r.stdout.strip()
-                self.versionReady.emit(f"{tag}（{c}）")
+            # 检测 HEAD 是否精确在 tag 上
+            exact_tag = None
+            try:
+                r3 = run_hidden(
+                    [git_cmd, "describe", "--tags", "--exact-match", "HEAD"],
+                    cwd=str(root),
+                    capture_output=True,
+                    text=True,
+                    timeout=10,
+                )
+                if r3.returncode == 0:
+                    exact_tag = r3.stdout.strip()
+            except Exception:
+                pass
 
-            self.commitReady.emit(c)
+            # 获取日期
+            date_str = None
+            try:
+                r4 = run_hidden(
+                    [git_cmd, "log", "-1", "--format=%cs", "HEAD"],
+                    cwd=str(root),
+                    capture_output=True,
+                    text=True,
+                    timeout=10,
+                )
+                if r4.returncode == 0:
+                    date_str = r4.stdout.strip() or None
+            except Exception:
+                pass
+
+            # 格式化
+            if exact_tag:
+                display = f"{exact_tag} ({date_str})" if date_str else exact_tag
+            else:
+                display = f"{c} ({date_str})" if c and date_str else (c or "未找到")
+
+            self.versionReady.emit(display)
+            self.commitReady.emit(display)
             self._log("info", "内核版本标签已生成")
         except Exception as e:
             self._log("warning", "内核版本检测失败: %s", e)
