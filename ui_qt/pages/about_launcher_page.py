@@ -359,6 +359,7 @@ class AboutLauncherPage(BasePage):
                 # 获取下载 URL
                 url = info.get("download_url", "")
                 backup_urls = info.get("backup_urls", [])
+                expected_sha256 = info.get("sha256", "")
 
                 # 定义进度回调
                 def on_progress(current, total):
@@ -367,12 +368,12 @@ class AboutLauncherPage(BasePage):
                 # 尝试主 URL
                 downloaded_file = None
                 if url:
-                    downloaded_file = service.download_update(url, on_progress)
+                    downloaded_file = service.download_update(url, on_progress, expected_sha256=expected_sha256)
 
                 # 尝试备用 URL
                 if not downloaded_file:
                     for backup_url in backup_urls:
-                        downloaded_file = service.download_update(backup_url, on_progress)
+                        downloaded_file = service.download_update(backup_url, on_progress, expected_sha256=expected_sha256)
                         if downloaded_file:
                             break
 

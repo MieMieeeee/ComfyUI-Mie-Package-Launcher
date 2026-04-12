@@ -21,7 +21,6 @@ class UpdateDialog(QtWidgets.QDialog):
         self.setModal(True)
         self.theme_manager = theme_manager
         self._update_info = update_info or {}
-        self._cancelled = False
 
         # UI Setup
         layout = QtWidgets.QVBoxLayout(self)
@@ -260,84 +259,3 @@ class UpdateDialog(QtWidgets.QDialog):
         self.btn_update.clicked.disconnect()
         self.btn_update.clicked.connect(self._on_update)
         self.btn_later.setVisible(True)
-
-
-class UpdateCheckDialog(QtWidgets.QDialog):
-    """检查更新对话框"""
-
-    def __init__(self, parent=None, theme_manager=None):
-        super().__init__(parent)
-        self.setWindowFlags(QtCore.Qt.Dialog | QtCore.Qt.FramelessWindowHint | QtCore.Qt.WindowStaysOnTopHint)
-        self.setAttribute(QtCore.Qt.WA_TranslucentBackground)
-        self.setModal(True)
-        self.theme_manager = theme_manager
-
-        layout = QtWidgets.QVBoxLayout(self)
-        layout.setContentsMargins(0, 0, 0, 0)
-
-        self.container = QtWidgets.QFrame()
-        self.container.setObjectName("CheckContainer")
-
-        bg = "#1F2937"
-        border = "#374151"
-        text = "#E5E7EB"
-        accent = "#6366F1"
-
-        if self.theme_manager:
-            c = self.theme_manager.colors
-            bg = c.get('content_bg', bg)
-            border = c.get('group_border', border)
-            text = c.get('text', text)
-            accent = c.get('accent', accent)
-
-        self.container.setStyleSheet(f"""
-            QFrame#CheckContainer {{
-                background-color: {bg};
-                border: 1px solid {border};
-                border-radius: 12px;
-            }}
-        """)
-
-        inner_layout = QtWidgets.QVBoxLayout(self.container)
-        inner_layout.setContentsMargins(24, 24, 24, 24)
-        inner_layout.setSpacing(16)
-
-        self.lbl_status = QtWidgets.QLabel("正在检查更新...")
-        self.lbl_status.setStyleSheet(f"color: {text}; font: 11pt 'Microsoft YaHei UI';")
-        self.lbl_status.setAlignment(QtCore.Qt.AlignCenter)
-        inner_layout.addWidget(self.lbl_status)
-
-        # 进度条（脉冲模式）
-        self.progress_bar = QtWidgets.QProgressBar()
-        self.progress_bar.setFixedHeight(4)
-        self.progress_bar.setTextVisible(False)
-        self.progress_bar.setRange(0, 0)
-        self.progress_bar.setStyleSheet(f"""
-            QProgressBar {{
-                background-color: rgba(0,0,0,0.2);
-                border-radius: 2px;
-                border: none;
-            }}
-            QProgressBar::chunk {{
-                background-color: {accent};
-                border-radius: 2px;
-            }}
-        """)
-        inner_layout.addWidget(self.progress_bar)
-
-        layout.addWidget(self.container)
-        self.setFixedSize(300, 120)
-
-    def set_status(self, text: str):
-        self.lbl_status.setText(text)
-        QtWidgets.QApplication.processEvents()
-
-    def show_result(self, has_update: bool, current: str = "", latest: str = ""):
-        """显示检查结果"""
-        if has_update:
-            self.accept()  # 让调用方显示 UpdateDialog
-        else:
-            self.lbl_status.setText(f"已是最新版本 ({current})")
-            self.progress_bar.setVisible(False)
-            QtWidgets.QApplication.processEvents()
-            QtCore.QTimer.singleShot(1500, self.reject)

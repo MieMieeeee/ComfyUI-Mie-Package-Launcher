@@ -4,6 +4,7 @@
 
 from pathlib import Path
 from urllib.request import urlopen, Request
+import concurrent.futures
 import json
 import hashlib
 import sys
@@ -82,9 +83,14 @@ class LauncherUpdateService:
             return self.CHANNEL_STABLE
 
     def set_channel(self, channel: str):
-        """设置更新通道"""
+        """设置更新通道
+
+        注意：在编译后的 exe 中，build_parameters.json 的 channel 会通过
+        _compiled_channel 优先生效。此方法主要用于开发/调试场景。
+        """
         if channel not in (self.CHANNEL_STABLE, self.CHANNEL_TEST):
             channel = self.CHANNEL_STABLE
+        self._compiled_channel = channel
         try:
             cfg = self.app.config or {}
             if "launcher_update" not in cfg:
@@ -329,15 +335,16 @@ class LauncherUpdateService:
         """检查是否有待处理的更新"""
         return self._get_pending_flag().exists()
 
-    def download_update(self, url: str, on_progress=None) -> str:
+    def download_update(self, url: str, on_progress=None, expected_sha256: str = "") -> str:
         """
-        下载更新文件
+        下载更新文件（带总超时和 SHA256 校验）
         返回: 下载文件路径，或 None（失败）
         """
         update_dir = self._get_update_dir()
         target_file = update_dir / "launcher_new.exe"
 
-        try:
+        def _do_download():
+            """内部下载函数，在 ThreadPoolExecutor 中运行以支持总超时。"""
             self._log("info", "launcher_update: downloading from %s", url)
             req = Request(url, headers={"User-Agent": "ComfyUI-Launcher"})
             with urlopen(req, timeout=30) as resp:
@@ -359,7 +366,39 @@ class LauncherUpdateService:
                                 pass
 
             self._log("info", "launcher_update: download complete, size=%d", downloaded)
+
+        try:
+            with concurrent.futures.ThreadPoolExecutor(max_workers=1) as executor:
+                future = executor.submit(_do_download)
+                future.result(timeout=120)  # 120 秒总超时
+
+            # SHA256 校验
+            if expected_sha256:
+                actual_hash = self.calculate_sha256(str(target_file))
+                if actual_hash != expected_sha256:
+                    self._log(
+                        "error",
+                        "launcher_update: SHA256 mismatch (expected=%s, got=%s)",
+                        expected_sha256[:16],
+                        actual_hash[:16],
+                    )
+                    try:
+                        target_file.unlink()
+                    except Exception:
+                        pass
+                    return None
+                self._log("info", "launcher_update: SHA256 verified OK")
+
             return str(target_file)
+
+        except concurrent.futures.TimeoutError:
+            self._log("error", "launcher_update: download timed out (120s)")
+            try:
+                if target_file.exists():
+                    target_file.unlink()
+            except Exception:
+                pass
+            return None
 
         except Exception as e:
             self._log("error", "launcher_update: download failed: %s", e)
@@ -389,7 +428,21 @@ class LauncherUpdateService:
 chcp 65001 > nul
 echo 正在更新启动器，请稍候...
 timeout /t 3 > nul
+
 copy /y "{new_exe}" "{current_exe}"
+if errorlevel 1 (
+    timeout /t 3 > nul
+    copy /y "{new_exe}" "{current_exe}"
+    if errorlevel 1 (
+        echo 更新失败：无法覆盖启动器文件
+        if exist "{new_exe}" del /f /q "{new_exe}"
+        del "{flag_path}"
+        timeout /t 5 > nul
+        start "" "{current_exe}"
+        exit /b 1
+    )
+)
+
 if exist "{new_exe}" del /f /q "{new_exe}"
 del "{flag_path}"
 echo 更新完成！
@@ -426,15 +479,15 @@ exit
         返回: True 表示应该退出并执行更新
         """
         if not self.has_pending_update():
+            # 没有待处理更新，但有残留文件则清理
+            self._cleanup_orphaned_files()
             return False
 
         bat_path = self._get_bat_script()
         if not bat_path.exists():
-            # 清理无效标记
-            try:
-                self._get_pending_flag().unlink()
-            except Exception:
-                pass
+            # bat 丢失，清理所有残留
+            self._log("warning", "launcher_update: bat script missing, cleaning up")
+            self.clear_pending_update()
             return False
 
         try:
@@ -452,7 +505,18 @@ exit
             return True
         except Exception as e:
             self._log("error", "launcher_update: apply failed: %s", e)
+            self.clear_pending_update()
             return False
+
+    def _cleanup_orphaned_files(self):
+        """清理没有 flag 的残留 launcher_new.exe。"""
+        try:
+            new_exe = self._get_update_dir() / "launcher_new.exe"
+            if new_exe.exists():
+                self._log("info", "launcher_update: cleaning up orphaned download")
+                new_exe.unlink()
+        except Exception:
+            pass
 
     def clear_pending_update(self):
         """清除待处理的更新"""
