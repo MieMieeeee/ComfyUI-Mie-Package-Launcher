@@ -127,24 +127,39 @@ def is_http_reachable(app, _log=False) -> bool:
     try:
         url = f"http://127.0.0.1:{port}/system_stats"
         req = Request(url, headers={"Accept": "application/json", "User-Agent": "ComfyUI-Launcher"})
-        with urlopen(req, timeout=0.4) as resp:
-            code = getattr(resp, "status", None)
-            if code is None:
-                try:
-                    code = resp.getcode()
-                except Exception:
-                    code = None
-            result = code == 200
-            if _log:
-                try:
-                    app.logger.info("[probe] is_http_reachable: port=%s, code=%s, result=%s", port, code, result)
-                except Exception:
-                    pass
-            return result
+        last_err = None
+        for timeout in (0.4, 1.5):
+            try:
+                with urlopen(req, timeout=timeout) as resp:
+                    code = getattr(resp, "status", None)
+                    if code is None:
+                        try:
+                            code = resp.getcode()
+                        except Exception:
+                            code = None
+                    result = code == 200
+                    if _log:
+                        try:
+                            app.logger.info("[probe] is_http_reachable: port=%s, code=%s, result=%s", port, code, result)
+                        except Exception:
+                            pass
+                    return result
+            except Exception as e:
+                last_err = e
+        if _log:
+            try:
+                reason = getattr(last_err, "reason", None)
+                if reason is not None:
+                    app.logger.info("[probe] is_http_reachable: port=%s, 失败: %s, reason=%r, msg=%s", port, type(last_err).__name__, reason, str(last_err))
+                else:
+                    app.logger.info("[probe] is_http_reachable: port=%s, 失败: %s, msg=%s", port, type(last_err).__name__, str(last_err))
+            except Exception:
+                pass
+        return False
     except Exception as e:
         if _log:
             try:
-                app.logger.info("[probe] is_http_reachable: port=%s, 失败: %s", port, type(e).__name__)
+                app.logger.info("[probe] is_http_reachable: port=%s, 失败: %s, msg=%s", port, type(e).__name__, str(e))
             except Exception:
                 pass
         return False

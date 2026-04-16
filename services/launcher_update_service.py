@@ -4,6 +4,7 @@
 
 from pathlib import Path
 from urllib.request import urlopen, Request
+from urllib.parse import urlsplit, urlunsplit, quote
 import concurrent.futures
 import json
 import hashlib
@@ -16,6 +17,19 @@ class _UpdateSources(dict):
 
     def __contains__(self, key):
         return super().__contains__(key) or key in self.values()
+
+
+def _encode_url(url: str) -> str:
+    """对 URL 中的非 ASCII 字符进行百分号编码"""
+    try:
+        parts = urlsplit(url)
+        if any(ord(c) > 127 for c in parts.path):
+            encoded_path = quote(parts.path, safe='/:@!$&\'()*+,;=')
+            return urlunsplit((parts.scheme, parts.netloc, encoded_path,
+                               parts.query, parts.fragment))
+    except Exception:
+        pass
+    return url
 
 
 class LauncherUpdateService:
@@ -174,6 +188,7 @@ class LauncherUpdateService:
 
     def _fetch_update_payload(self, url: str, headers: dict):
         self._log("debug", "launcher_update: checking %s", url)
+        url = _encode_url(url)
         req = Request(url, headers=headers)
         with urlopen(req, timeout=5) as resp:
             raw = resp.read()
@@ -346,6 +361,7 @@ class LauncherUpdateService:
         def _do_download():
             """内部下载函数，在 ThreadPoolExecutor 中运行以支持总超时。"""
             self._log("info", "launcher_update: downloading from %s", url)
+            url = _encode_url(url)
             req = Request(url, headers={"User-Agent": "ComfyUI-Launcher"})
             with urlopen(req, timeout=30) as resp:
                 total_size = int(resp.headers.get("Content-Length", 0))
