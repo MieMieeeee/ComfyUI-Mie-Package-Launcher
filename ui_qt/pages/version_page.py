@@ -260,7 +260,16 @@ class VersionPage(BasePage):
         try:
             QtCore.QTimer.singleShot(100, self._refresh_kernel_section)
             # 后台静默 fetch，不阻塞界面
-            QtCore.QTimer.singleShot(500, self._background_fetch)
+            delay_seconds = 180
+            try:
+                cfg = getattr(self.app, "config", None)
+                vp = cfg.get("version_preferences", {}) if isinstance(cfg, dict) else {}
+                delay_seconds = int(vp.get("background_fetch_delay_seconds", 180))
+                if delay_seconds < 0:
+                    delay_seconds = 0
+            except Exception:
+                delay_seconds = 180
+            QtCore.QTimer.singleShot(int(delay_seconds * 1000), self._background_fetch)
         except Exception:
             pass
 
@@ -388,10 +397,25 @@ class VersionPage(BasePage):
                 self.app.logger.info("UI: 正在执行 git fetch...")
             git = getattr(self.app, 'git_path', 'git') or "git"
             is_shallow = (root / ".git" / "shallow").exists()
+            version_svc = getattr(getattr(self.app, "services", None), "version", None)
             if is_shallow:
-                run_hidden([git, "fetch", "--unshallow"], cwd=str(root))
+                if version_svc and hasattr(version_svc, "run_git_network"):
+                    version_svc.run_git_network(
+                        [git, "fetch", "--unshallow"],
+                        cwd=str(root),
+                        timeout=120,
+                    )
+                else:
+                    run_hidden([git, "fetch", "--unshallow"], cwd=str(root))
             else:
-                run_hidden([git, "fetch"], cwd=str(root))
+                if version_svc and hasattr(version_svc, "run_git_network"):
+                    version_svc.run_git_network(
+                        [git, "fetch"],
+                        cwd=str(root),
+                        timeout=30,
+                    )
+                else:
+                    run_hidden([git, "fetch"], cwd=str(root))
 
             # 重新加载全部 commits 到缓存
             self._all_commits_cache = self._fetch_all_commits(root, git)
@@ -423,12 +447,53 @@ class VersionPage(BasePage):
                     return
                 git = getattr(self.app, 'git_path', 'git') or "git"
                 is_shallow = (root / ".git" / "shallow").exists()
+                version_svc = getattr(getattr(self.app, "services", None), "version", None)
                 if is_shallow:
-                    run_hidden([git, "fetch", "--unshallow"],
-                              capture_output=True, text=True, timeout=120, cwd=str(root))
+                    if version_svc and hasattr(version_svc, "run_git_network"):
+                        r = version_svc.run_git_network(
+                            [git, "fetch", "--unshallow"],
+                            capture_output=True,
+                            text=True,
+                            timeout=120,
+                            cwd=str(root),
+                            blocking=False,
+                            busy_message="skip background fetch: update running",
+                        )
+                        if getattr(r, "returncode", 0) == 2:
+                            if hasattr(self.app, "logger"):
+                                self.app.logger.info("UI: 后台fetch跳过（更新占用git锁）")
+                            return
+                    else:
+                        run_hidden(
+                            [git, "fetch", "--unshallow"],
+                            capture_output=True,
+                            text=True,
+                            timeout=120,
+                            cwd=str(root),
+                        )
                 else:
-                    run_hidden([git, "fetch"],
-                              capture_output=True, text=True, timeout=30, cwd=str(root))
+                    if version_svc and hasattr(version_svc, "run_git_network"):
+                        r = version_svc.run_git_network(
+                            [git, "fetch"],
+                            capture_output=True,
+                            text=True,
+                            timeout=30,
+                            cwd=str(root),
+                            blocking=False,
+                            busy_message="skip background fetch: update running",
+                        )
+                        if getattr(r, "returncode", 0) == 2:
+                            if hasattr(self.app, "logger"):
+                                self.app.logger.info("UI: 后台fetch跳过（更新占用git锁）")
+                            return
+                    else:
+                        run_hidden(
+                            [git, "fetch"],
+                            capture_output=True,
+                            text=True,
+                            timeout=30,
+                            cwd=str(root),
+                        )
 
                 # 加载全部 commits 到缓存
                 commits = self._fetch_all_commits(root, git)

@@ -5,6 +5,8 @@ Thumbs.db
 # AI
 .trae/
 .claude/
+.omc/
+.mcp.json
 
 # Python cache
 __pycache__/
@@ -28,6 +30,7 @@ docs/*.json
 # Logs
 *.log
 launcher/
+ref/
 
 # Build outputs (PyInstaller, etc.)
 dist/

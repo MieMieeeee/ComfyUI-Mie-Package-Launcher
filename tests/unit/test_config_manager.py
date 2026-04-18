@@ -40,6 +40,12 @@ class TestConfigManagerCharacterization(unittest.TestCase):
         self.assertEqual(loaded, config_data)
         self.assertEqual(self.read_json(), config_data)
 
+    def test_default_config_includes_version_preferences_background_fetch_delay(self):
+        manager = ConfigManager(self.config_file, self.logger)
+        cfg = manager.get_default_config()
+        vp = cfg.get("version_preferences", {})
+        self.assertEqual(vp.get("background_fetch_delay_seconds"), 180)
+
     def test_load_config_falls_back_to_defaults_for_corrupt_json_without_overwriting_file(
         self,
     ):

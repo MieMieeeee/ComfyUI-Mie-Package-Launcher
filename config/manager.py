@@ -102,6 +102,12 @@ class ConfigManager:
                 "source_url": "https://gitee.com/MieMieeeee/comfyui-mie-resources/raw/master/launcher/announcements/index.json",
                 "fallback_urls": [],
             },
+            "version_preferences": {
+                "stable_only": True,
+                "auto_update_deps": True,
+                "update_timeout": 120,
+                "background_fetch_delay_seconds": 180,
+            },
         }
 
     def load_config(self) -> Dict[str, Any]:

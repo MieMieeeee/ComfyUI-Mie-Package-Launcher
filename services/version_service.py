@@ -19,6 +19,7 @@ class VersionService(IVersionService):
         self._cancel_event = threading.Event()
         self._current_process = None  # subprocess.Popen 句柄，用于取消时终止
         self._process_lock = threading.Lock()
+        self._git_network_lock = threading.Lock()
 
     def refresh(self, scope: str = "all") -> None:
         from core.version_service import refresh_version_info
@@ -104,6 +105,41 @@ class VersionService(IVersionService):
 
     def is_cancelled(self) -> bool:
         return self._cancel_event.is_set()
+
+    def run_git_network(
+        self,
+        cmd: list,
+        *,
+        blocking: bool = True,
+        cancellable: bool = False,
+        busy_message: str = "git network operation skipped: busy",
+        **kwargs,
+    ):
+        """串行执行 git 网络操作，避免并发 fetch/pull 导致 refs 竞态。
+
+        Args:
+            cmd: git 命令参数
+            blocking: True=等待锁，False=忙时立即返回
+            cancellable: True=使用可取消执行器
+            busy_message: 非阻塞模式下未获取到锁时的错误信息
+        """
+        cmd_copy = list(cmd) if isinstance(cmd, list) else cmd
+        acquired = self._git_network_lock.acquire(blocking=blocking)
+        if not acquired:
+            return subprocess.CompletedProcess(
+                args=cmd_copy,
+                returncode=2,
+                stdout="",
+                stderr=busy_message,
+            )
+        try:
+            runner = self._run_git_cancellable if cancellable else self._run_git
+            return runner(cmd_copy, **kwargs)
+        finally:
+            try:
+                self._git_network_lock.release()
+            except Exception:
+                pass
 
     def _run_git_cancellable(self, cmd: list, timeout: int = 60, **kwargs):
         """带取消支持的 git 命令执行，使用 Popen 代替 subprocess.run。
@@ -510,7 +546,7 @@ class VersionService(IVersionService):
             try:
                 # 先 fetch tags
                 report("正在获取远程 tags...")
-                self._run_git(
+                self.run_git_network(
                     ["git", "fetch", "--tags"], cwd=self._repo_root(), timeout=30
                 )
 
@@ -571,7 +607,7 @@ class VersionService(IVersionService):
         else:
             report("API 获取 commit 失败，尝试 git fetch...")
             try:
-                self._run_git(
+                self.run_git_network(
                     ["git", "fetch", "origin", "tag", latest_tag],
                     cwd=self._repo_root(),
                     timeout=60,
@@ -767,10 +803,11 @@ class VersionService(IVersionService):
                     return {"component": "core", "error": "用户取消"}
 
                 report("正在从远程获取更新...")
-                fetch = self._run_git_cancellable(
+                fetch = self.run_git_network(
                     ["git", "fetch", "--prune"],
                     timeout=30,
                     cwd=repo,
+                    cancellable=True,
                 )
                 if not fetch or fetch.returncode != 0:
                     msg = (
@@ -842,10 +879,11 @@ class VersionService(IVersionService):
                     return {"component": "core", "error": "用户取消"}
 
                 report(f"正在拉取 {br} 分支最新代码...")
-                pull = self._run_git_cancellable(
+                pull = self.run_git_network(
                     ["git", "pull", "--ff-only"],
                     timeout=60,
                     cwd=repo,
+                    cancellable=True,
                 )
                 if not pull or pull.returncode != 0:
                     if self.is_cancelled():
@@ -853,10 +891,11 @@ class VersionService(IVersionService):
                     # ff-only 失败，尝试 rebase 作为安全 fallback（避免创建 merge commit）
                     ff_err = (pull.stderr or pull.stdout or "") if pull else ""
                     report("快进合并失败，尝试变基...")
-                    pull2 = self._run_git_cancellable(
+                    pull2 = self.run_git_network(
                         ["git", "pull", "--rebase"],
                         timeout=120,
                         cwd=repo,
+                        cancellable=True,
                     )
                     if not pull2 or pull2.returncode != 0:
                         if self.is_cancelled():
