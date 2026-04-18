@@ -161,6 +161,7 @@ class LaunchPage(BasePage):
             ("🖼️ 输出目录", self._open_output_dir),
             ("📦 输入目录", self._open_input_dir),
             ("🧩 插件目录", self._open_nodes_dir),
+            ("🧾 工作流目录", self._open_workflows_dir),
             ("🎨 模型目录", self._open_models_dir),
         ]
 
@@ -364,6 +365,19 @@ class LaunchPage(BasePage):
         models = root / "ComfyUI" / "models"
         if models.exists():
             self._open_path(str(models))
+
+    def _open_workflows_dir(self):
+        """打开工作流目录"""
+        try:
+            from utils.ui_actions import open_workflows_dir as _a
+            _a(self.app)
+            return
+        except Exception:
+            pass
+        root = Path(self.app.config.get('paths', {}).get('comfyui_root', '.'))
+        wf = root / "ComfyUI" / "user" / "default" / "workflows"
+        if wf.exists():
+            self._open_path(str(wf))
 
     def _open_path(self, path_str):
         """打开路径"""
