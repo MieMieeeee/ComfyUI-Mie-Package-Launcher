@@ -35,6 +35,19 @@ class ModelsPage(BasePage):
         layout.addWidget(title)
         self._page_title_refs.append(title)
 
+        # 仅使用内置模型库 / 恢复配置 按钮
+        btn_row = QtWidgets.QHBoxLayout()
+        btn_builtin = PrimaryButton("仅使用内置模型库", self.theme_manager.styles)
+        btn_builtin.setFixedWidth(180)
+        btn_builtin.clicked.connect(self._on_use_builtin_only)
+        btn_restore = PrimaryButton("恢复之前的配置", self.theme_manager.styles)
+        btn_restore.setFixedWidth(160)
+        btn_restore.clicked.connect(self._on_restore_config)
+        btn_row.addWidget(btn_builtin)
+        btn_row.addWidget(btn_restore)
+        btn_row.addStretch(1)
+        layout.addLayout(btn_row)
+
         # 配置卡片
         config_card = InfoCard("配置与映射", self.theme_manager.styles)
         layout.addWidget(config_card)
@@ -125,10 +138,18 @@ class ModelsPage(BasePage):
         layout.addWidget(mapping_card)
 
         # 添加样式组件引用
-        self._styled_widgets = [config_card, mapping_card, self.table, btn_update, btn_open_yaml, btn_open_dir]
+        self._styled_widgets = [config_card, mapping_card, self.table, btn_update, btn_open_yaml, btn_open_dir, btn_builtin, btn_restore]
         self._page_title_refs.append(lbl_bp)
         if hasattr(self.app, "_theme_widgets"):
             self.app._theme_widgets.extend(self._styled_widgets)
+
+        # 保存按钮引用，供禁用功能控制
+        self._btn_sel_bp = btn_sel_bp
+        self._btn_update = btn_update
+
+        # 如果配置中已禁用外置模型库，初始禁用更新映射按钮
+        if self.app.config.get("models", {}).get("disable_external", False):
+            self._btn_update.setEnabled(False)
 
         # 初始刷新一次映射表（从映射文件读取）
         try:
@@ -162,16 +183,88 @@ class ModelsPage(BasePage):
             self.table.setRowCount(0)
             self.lbl_count.setText("当前已映射子文件夹: 0")
 
+    def _on_use_builtin_only(self):
+        """点击 仅使用内置模型库：备份映射文件并禁用该功能"""
+        try:
+            if hasattr(self.app, 'services') and hasattr(self.app.services, 'model_path'):
+                yaml_path = self.app.services.model_path._get_yaml_path()
+                if yaml_path.exists():
+                    import shutil
+                    bak_path = yaml_path.with_suffix('.yaml.disabled_bak')
+                    shutil.copy2(str(yaml_path), str(bak_path))
+                    yaml_path.unlink()
+        except Exception:
+            pass
+        # 写入配置
+        self.app.config.setdefault("models", {})["disable_external"] = True
+        try:
+            if hasattr(self.app, "services") and hasattr(self.app.services, "config"):
+                self.app.services.config.save(self.app.config)
+        except Exception:
+            pass
+        # 清空显示
+        self.edit_base_path.setText("")
+        self.table.setRowCount(0)
+        self.lbl_count.setText("当前已映射子文件夹: 0")
+        # 禁用更新映射按钮（选择目录仍可用，选中后自动恢复）
+        self._btn_update.setEnabled(False)
+        DialogHelper.show_info(self, "已切换", "已切换为仅使用内置模型库，\n原配置已备份。请重启 ComfyUI 生效。")
+
+    def _on_restore_config(self):
+        """恢复之前备份的外置模型库配置"""
+        try:
+            if hasattr(self.app, 'services') and hasattr(self.app.services, 'model_path'):
+                yaml_path = self.app.services.model_path._get_yaml_path()
+                bak_path = yaml_path.with_suffix('.yaml.disabled_bak')
+                if bak_path.exists():
+                    import shutil
+                    shutil.copy2(str(bak_path), str(yaml_path))
+                    bak_path.unlink()
+                else:
+                    DialogHelper.show_info(self, "提示", "没有找到备份的配置文件。")
+                    return
+        except Exception as e:
+            DialogHelper.show_warning(self, "失败", f"恢复配置失败：{e}")
+            return
+        # 清除禁用标记
+        if self.app.config.get("models", {}).get("disable_external", False):
+            self.app.config["models"]["disable_external"] = False
+            try:
+                if hasattr(self.app, "services") and hasattr(self.app.services, "config"):
+                    self.app.services.config.save(self.app.config)
+            except Exception:
+                pass
+        # 恢复控件状态
+        self._btn_update.setEnabled(True)
+        # 刷新显示
+        try:
+            self.refresh_from_config()
+        except Exception:
+            pass
+        DialogHelper.show_info(self, "已恢复", "外置模型库配置已恢复。请重启 ComfyUI 生效。")
+
     def _select_base_path(self):
         """选择根目录"""
         d = QtWidgets.QFileDialog.getExistingDirectory(self, "选择模型库根目录", self.edit_base_path.text() or ".")
         if d:
             try:
-                # 规范化路径显示
-                path_str = str(Path(d).resolve())
+                p = Path(d).resolve()
+                # 如果选择了 ComfyUI 子目录，自动向上取一级
+                if p.name == "ComfyUI":
+                    p = p.parent
+                path_str = str(p)
                 self.edit_base_path.setText(path_str)
             except Exception:
                 self.edit_base_path.setText(d)
+            # 如果之前处于仅内置模式，自动恢复
+            if self.app.config.get("models", {}).get("disable_external", False):
+                self.app.config["models"]["disable_external"] = False
+                try:
+                    if hasattr(self.app, "services") and hasattr(self.app.services, "config"):
+                        self.app.services.config.save(self.app.config)
+                except Exception:
+                    pass
+                self._btn_update.setEnabled(True)
             # 自动更新映射配置
             self._update_mapping()
 

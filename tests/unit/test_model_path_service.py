@@ -558,10 +558,271 @@ class TestGetMappings:
 
         app = MagicMock()
         service = ModelPathService(app)
-        
+
         result = service.get_mappings()
-        
+
         assert isinstance(result, list)
         for item in result:
             assert isinstance(item, tuple)
             assert len(item) == 2  # (key, value)
+
+
+class TestGetStandardMappingsSDStyle:
+    """Test _get_standard_mappings detects SD WebUI-style folder names."""
+
+    def test_sd_checkpoints_detected(self, tmp_path):
+        """Should map 'checkpoints' to 'Stable-diffusion/' when that folder exists."""
+        from services.model_path_service import ModelPathService
+
+        app = MagicMock()
+        service = ModelPathService(app)
+
+        base = tmp_path / "sd_models"
+        base.mkdir()
+        (base / "Stable-diffusion").mkdir()
+
+        result = service._get_standard_mappings(str(base))
+        mapping = dict(result)
+
+        assert mapping["checkpoints"] == "Stable-diffusion/"
+
+    def test_sd_lora_detected(self, tmp_path):
+        """Should map 'loras' to 'Lora/' when that folder exists."""
+        from services.model_path_service import ModelPathService
+
+        app = MagicMock()
+        service = ModelPathService(app)
+
+        base = tmp_path / "sd_models"
+        base.mkdir()
+        (base / "Lora").mkdir()
+
+        result = service._get_standard_mappings(str(base))
+        mapping = dict(result)
+
+        assert mapping["loras"] == "Lora/"
+
+    def test_sd_upscale_detected(self, tmp_path):
+        """Should map 'upscale_models' to 'ESRGAN/' when that folder exists."""
+        from services.model_path_service import ModelPathService
+
+        app = MagicMock()
+        service = ModelPathService(app)
+
+        base = tmp_path / "sd_models"
+        base.mkdir()
+        (base / "ESRGAN").mkdir()
+
+        result = service._get_standard_mappings(str(base))
+        mapping = dict(result)
+
+        assert mapping["upscale_models"] == "ESRGAN/"
+
+    def test_sd_controlnet_detected(self, tmp_path):
+        """Should map 'controlnet' to 'ControlNet/' when that folder exists."""
+        from services.model_path_service import ModelPathService
+
+        app = MagicMock()
+        service = ModelPathService(app)
+
+        base = tmp_path / "sd_models"
+        base.mkdir()
+        (base / "ControlNet").mkdir()
+
+        result = service._get_standard_mappings(str(base))
+        mapping = dict(result)
+
+        assert mapping["controlnet"] == "ControlNet/"
+
+    def test_sd_multi_folders(self, tmp_path):
+        """Should detect multiple SD-style folders simultaneously."""
+        from services.model_path_service import ModelPathService
+
+        app = MagicMock()
+        service = ModelPathService(app)
+
+        base = tmp_path / "sd_models"
+        base.mkdir()
+        (base / "Stable-diffusion").mkdir()
+        (base / "Lora").mkdir()
+        (base / "VAE").mkdir()
+        (base / "ESRGAN").mkdir()
+        (base / "ControlNet").mkdir()
+
+        result = service._get_standard_mappings(str(base))
+        mapping = dict(result)
+
+        assert mapping["checkpoints"] == "Stable-diffusion/"
+        assert mapping["loras"] == "Lora/"
+        assert mapping["vae"] == "VAE/"
+        assert mapping["upscale_models"] == "ESRGAN/"
+        assert mapping["controlnet"] == "ControlNet/"
+
+
+class TestResolveBasePathSDStyle:
+    """Test _resolve_base_path recognizes SD WebUI-style folder names."""
+
+    def test_resolve_recognizes_stable_diffusion(self, tmp_path):
+        """Should return base_path when it contains 'Stable-diffusion/'."""
+        from services.model_path_service import ModelPathService
+
+        app = MagicMock()
+        service = ModelPathService(app)
+
+        base = tmp_path / "sd_models"
+        base.mkdir()
+        (base / "Stable-diffusion").mkdir()
+
+        result = service._resolve_base_path(str(base))
+        assert result == str(base)
+
+    def test_resolve_recognizes_lora(self, tmp_path):
+        """Should return base_path when it contains 'Lora/'."""
+        from services.model_path_service import ModelPathService
+
+        app = MagicMock()
+        service = ModelPathService(app)
+
+        base = tmp_path / "sd_models"
+        base.mkdir()
+        (base / "Lora").mkdir()
+
+        result = service._resolve_base_path(str(base))
+        assert result == str(base)
+
+    def test_resolve_recognizes_esrgan(self, tmp_path):
+        """Should return base_path when it contains 'ESRGAN/'."""
+        from services.model_path_service import ModelPathService
+
+        app = MagicMock()
+        service = ModelPathService(app)
+
+        base = tmp_path / "sd_models"
+        base.mkdir()
+        (base / "ESRGAN").mkdir()
+
+        result = service._resolve_base_path(str(base))
+        assert result == str(base)
+
+    def test_resolve_recognizes_multiple_sd_folders(self, tmp_path):
+        """Should return base_path when it contains multiple SD-style folders."""
+        from services.model_path_service import ModelPathService
+
+        app = MagicMock()
+        service = ModelPathService(app)
+
+        base = tmp_path / "sd_models"
+        base.mkdir()
+        (base / "Stable-diffusion").mkdir()
+        (base / "Lora").mkdir()
+        (base / "VAE").mkdir()
+        (base / "ESRGAN").mkdir()
+
+        result = service._resolve_base_path(str(base))
+        assert result == str(base)
+
+
+class TestUpdateMappingSDStyle:
+    """Test update_mapping end-to-end with SD WebUI-style folders."""
+
+    def test_update_mapping_sd_style_generates_correct_yaml(self, tmp_path):
+        """YAML should contain SD-style folder paths under correct ComfyUI keys."""
+        from services.model_path_service import ModelPathService
+
+        app = MagicMock()
+        app.config = {"paths": {"comfyui_root": str(tmp_path)}}
+        app.logger = MagicMock()
+
+        comfyui_dir = tmp_path / "ComfyUI"
+        comfyui_dir.mkdir()
+
+        base = tmp_path / "sd_models"
+        base.mkdir()
+        (base / "Stable-diffusion").mkdir()
+        (base / "Lora").mkdir()
+
+        service = ModelPathService(app)
+        result = service.update_mapping(str(base))
+
+        assert result is True
+
+        yaml_path = comfyui_dir / "extra_model_paths.yaml"
+        content = yaml_path.read_text(encoding="utf-8")
+
+        assert "checkpoints: Stable-diffusion/" in content
+        assert "loras: Lora/" in content
+
+    def test_update_mapping_sd_style_preserves_extra_dirs(self, tmp_path):
+        """YAML should have SD mappings plus auto-discovered extra folders."""
+        from services.model_path_service import ModelPathService
+
+        app = MagicMock()
+        app.config = {"paths": {"comfyui_root": str(tmp_path)}}
+        app.logger = MagicMock()
+
+        comfyui_dir = tmp_path / "ComfyUI"
+        comfyui_dir.mkdir()
+
+        base = tmp_path / "sd_models"
+        base.mkdir()
+        (base / "Stable-diffusion").mkdir()
+        (base / "custom_models").mkdir()
+
+        service = ModelPathService(app)
+        result = service.update_mapping(str(base))
+
+        assert result is True
+
+        yaml_path = comfyui_dir / "extra_model_paths.yaml"
+        content = yaml_path.read_text(encoding="utf-8")
+
+        assert "checkpoints: Stable-diffusion/" in content
+        assert "custom_models" in content
+
+
+class TestUpdateMappingDisabled:
+    """Test is_disabled() and disabled guard in update_mapping()."""
+
+    def test_is_disabled_returns_false_by_default(self):
+        """is_disabled should return False when config has no disable flag."""
+        from services.model_path_service import ModelPathService
+
+        app = MagicMock()
+        app.config = {}
+        service = ModelPathService(app)
+
+        assert service.is_disabled() is False
+
+    def test_is_disabled_returns_true_when_set(self):
+        """is_disabled should return True when config has disable flag set."""
+        from services.model_path_service import ModelPathService
+
+        app = MagicMock()
+        app.config = {"models": {"disable_external": True}}
+        service = ModelPathService(app)
+
+        assert service.is_disabled() is True
+
+    def test_update_mapping_noop_when_disabled(self, tmp_path):
+        """update_mapping should return False and not create YAML when disabled."""
+        from services.model_path_service import ModelPathService
+
+        app = MagicMock()
+        app.config = {
+            "paths": {"comfyui_root": str(tmp_path)},
+            "models": {"disable_external": True},
+        }
+        app.logger = MagicMock()
+
+        comfyui_dir = tmp_path / "ComfyUI"
+        comfyui_dir.mkdir()
+
+        base = tmp_path / "external_models"
+        base.mkdir()
+
+        service = ModelPathService(app)
+        result = service.update_mapping(str(base))
+
+        assert result is False
+        yaml_path = comfyui_dir / "extra_model_paths.yaml"
+        assert not yaml_path.exists()

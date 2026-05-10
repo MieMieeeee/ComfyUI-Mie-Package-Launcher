@@ -3,6 +3,19 @@ from pathlib import Path
 from typing import Dict, Any, List
 
 class ModelPathService:
+    # SD WebUI-style folder name aliases (from ComfyUI official a1111 example)
+    # Maps ComfyUI key -> list of alternative folder names to probe
+    SD_STYLE_ALIASES = {
+        "checkpoints": ["Stable-diffusion"],
+        "configs": ["Stable-diffusion"],
+        "vae": ["VAE"],
+        "loras": ["Lora", "LyCORIS"],
+        "upscale_models": ["ESRGAN", "RealESRGAN", "SwinIR"],
+        "controlnet": ["ControlNet"],
+        "embeddings": ["embeddings"],
+        "hypernetworks": ["hypernetworks"],
+    }
+
     def __init__(self, app):
         self.app = app
         # Standard folder mapping relative to the external base path (ordered)
@@ -20,6 +33,10 @@ class ModelPathService:
             ("audio_encoders", "models/audio_encoders/"),
             ("model_patches", "models/model_patches/"),
         ]
+
+    def is_disabled(self) -> bool:
+        """Check if external model library is disabled via config."""
+        return bool(self.app.config.get("models", {}).get("disable_external", False))
 
     def _get_yaml_path(self) -> Path:
         base = Path(self.app.config.get("paths", {}).get("comfyui_root") or ".").resolve()
@@ -62,91 +79,86 @@ class ModelPathService:
         Get standard mappings, prioritizing detected paths.
         1. Check if base_path/models/key exists -> models/key/
         2. Check if base_path/key exists -> key/
-        3. Fallback: if base_path name is 'models' -> key/ else models/key/
+        3. Check SD WebUI-style aliases (e.g. Stable-diffusion, Lora, ESRGAN)
+        4. Fallback: if base_path name is 'models' -> key/ else models/key/
         """
         if not base_path:
             return list(self.standard_map)
-            
+
         try:
             base_dir = Path(base_path)
-            if not base_dir.exists():
-                # If base path doesn't exist, use fallback logic based on name
-                base_is_models = base_dir.name.lower() == "models"
-            else:
-                base_is_models = base_dir.name.lower() == "models"
+            base_is_models = base_dir.name.lower() == "models"
         except Exception:
             base_is_models = False
             base_dir = None
-            
+
         adjusted_map = []
-        
-        # Helper to check existence safely
+
         def check_exists(path_obj):
             try:
                 return path_obj.exists() and path_obj.is_dir()
             except Exception:
                 return False
 
+        # Cache actual directory names for case-sensitive alias matching
+        actual_dir_names = None
+        if base_dir and base_dir.exists():
+            try:
+                actual_dir_names = {d.name for d in base_dir.iterdir() if d.is_dir()}
+            except Exception:
+                actual_dir_names = set()
+
         for key, value in self.standard_map:
-            # Determine best mapping for this key
-            # Standard map value usually looks like "models/checkpoints/"
-            # We want to check:
-            # A) base_path / "models" / key
-            # B) base_path / key
-            
-            # Extract clean key name from standard map if possible, or just use key
-            # actually standard_map keys are "checkpoints", "loras", etc.
-            # value might be complex like "models/text_encoders/\nmodels/clip/"
-            
             new_lines = []
             for vline in value.split("\n"):
-                # vline is like "models/checkpoints/"
-                # We need to determine if we should keep "models/" prefix or remove it
-                
-                # Default behavior based on name fallback
-                use_short_path = base_is_models
-                
-                # Clean up vline to get relative path candidate
-                clean_vline = vline.strip().rstrip("/") # e.g. "models/checkpoints"
-                
+                clean_vline = vline.strip().rstrip("/")
+
                 if base_dir and base_dir.exists():
-                    # Try to probe
-                    # 1. Full standard path (relative to base)
-                    p_full = base_dir / clean_vline # base/models/checkpoints
-                    
-                    # 2. Short path (relative to base) - remove 'models/' prefix if present
+                    # 1. Full standard path
+                    p_full = base_dir / clean_vline
+                    if check_exists(p_full):
+                        new_lines.append(vline)
+                        continue
+
+                    # 2. SD WebUI-style aliases (check before short path to handle
+                    #    case-insensitive filesystems where "controlnet" matches "ControlNet")
+                    aliases = self.SD_STYLE_ALIASES.get(key, [])
+                    found_alias = False
+                    for alias in aliases:
+                        if alias in actual_dir_names:
+                            new_lines.append(alias + "/")
+                            found_alias = True
+                            break
+
+                    if found_alias:
+                        continue
+
+                    # 3. Short path (strip models/ prefix)
                     if clean_vline.startswith("models/"):
-                        short_vline = clean_vline[7:] # "checkpoints"
+                        short_vline = clean_vline[7:]
                     else:
                         short_vline = clean_vline
-                    p_short = base_dir / short_vline # base/checkpoints
-                    
-                    if check_exists(p_full):
-                        # Standard path exists, use it
-                        use_short_path = False
-                    elif check_exists(p_short):
-                        # Short path exists, use it
-                        use_short_path = True
-                    else:
-                        # Neither exists, stick to fallback
-                        pass
+                    p_short = base_dir / short_vline
+                    if check_exists(p_short):
+                        new_lines.append(short_vline + "/")
+                        continue
 
-                # Construct new line
-                if use_short_path:
-                    if vline.startswith("models/"):
-                        new_lines.append(vline[7:])
+                    # 4. Fallback
+                    if base_is_models:
+                        new_lines.append(short_vline + "/")
                     else:
                         new_lines.append(vline)
                 else:
-                    # Ensure it starts with models/ if not present? 
-                    # standard_map already has models/ prefix for most
                     new_lines.append(vline)
-                    
+
             adjusted_map.append((key, "\n".join(new_lines)))
         return adjusted_map
 
     def update_mapping(self, base_path: str) -> bool:
         import shutil
+
+        if self.is_disabled():
+            return False
 
         if not base_path.strip():
             return False
@@ -295,6 +307,17 @@ class ModelPathService:
                 return base_path
             if (p / "checkpoints").exists() and (p / "checkpoints").is_dir():
                 return base_path
+
+            # 1b. Check SD WebUI-style aliases
+            all_aliases = set()
+            for aliases in self.SD_STYLE_ALIASES.values():
+                all_aliases.update(aliases)
+            for child in p.iterdir():
+                try:
+                    if child.is_dir() and child.name in all_aliases:
+                        return base_path
+                except Exception:
+                    continue
                 
             # 2. Check children (depth 1)
             # Prioritize 'models' folder if found directly
