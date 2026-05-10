@@ -352,8 +352,8 @@ class LaunchControlsSection(QtWidgets.QWidget):
     def _save_config(self):
         """保存配置"""
         try:
-            if hasattr(self.app, '_save_config'):
-                self.app._save_config()
+            if hasattr(self.app, 'save_config'):
+                self.app.save_config()
         except Exception:
             pass
 

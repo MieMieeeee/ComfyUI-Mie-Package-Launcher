@@ -154,7 +154,7 @@ class ComfyUIVersionWorker(BaseVersionWorker):
             date_str = None
             try:
                 r4 = run_hidden(
-                    [git_cmd, "log", "-1", "--format=%cs", "HEAD"],
+                    [git_cmd, "log", "-1", "--format=%as", "HEAD"],
                     cwd=str(root),
                     capture_output=True,
                     text=True,

@@ -188,7 +188,7 @@ def build_nuitka(is_test=False):
         )
 
         if result.returncode != 0:
-            print(f"\n❌ 构建失败，返回码: {result.returncode}")
+            print(f"\n[X] 构建失败，返回码: {result.returncode}")
             sys.exit(1)
 
         # 检查输出（Nuitka 实际输出目录基于脚本名）
@@ -217,7 +217,7 @@ def build_nuitka(is_test=False):
             size_mb = total_size / (1024 * 1024)
 
             print("\n" + "=" * 60)
-            print("✅ Nuitka 构建成功！")
+            print("[OK] Nuitka 构建成功！")
             print("=" * 60)
             print(f"[输出] 目录: {dist_dir}")
             print(f"[输出] EXE: {exe_path}")
@@ -227,11 +227,11 @@ def build_nuitka(is_test=False):
             print(f"[提示] Enigma 打包后的外层 exe 可以安全命名为 ComfyUI启动器.exe")
             print("=" * 60)
         else:
-            print(f"\n❌ 未找到生成的 exe: {exe_path}")
+            print(f"\n[X] 未找到生成的 exe: {exe_path}")
             sys.exit(1)
 
     except Exception as e:
-        print(f"\n❌ 构建异常: {e}")
+        print(f"\n[X] 构建异常: {e}")
         sys.exit(1)
 
 
