@@ -167,12 +167,121 @@ def batch_install_packages(
     return results
 
 
+def _run_pip_streaming(cmd, logger, on_progress):
+    """Run pip with streaming stdout, reporting download progress via on_progress.
+
+    Reads stdout treating both \\r and \\n as line delimiters, so pip's
+    progress-bar updates are captured in real time.  Returns a
+    CompletedProcess with full stdout/stderr for downstream parsing.
+    """
+    import re as _re
+    import subprocess
+    import threading
+
+    si = None
+    cf = 0
+    if os.name == "nt":
+        si = subprocess.STARTUPINFO()
+        si.dwFlags |= subprocess.STARTF_USESHOWWINDOW
+        cf = subprocess.CREATE_NO_WINDOW
+
+    if logger:
+        logger.info("执行 pip requirements 安装（流式）: %s", " ".join(map(str, cmd)))
+
+    proc = subprocess.Popen(
+        cmd,
+        stdout=subprocess.PIPE,
+        stderr=subprocess.PIPE,
+        startupinfo=si,
+        creationflags=cf,
+    )
+
+    # Drain stderr in background to avoid pipe deadlock
+    stderr_parts = []
+
+    def _drain():
+        try:
+            while True:
+                c = proc.stderr.read(8192)
+                if not c:
+                    break
+                stderr_parts.append(c)
+        except Exception:
+            pass
+
+    stderr_thread = threading.Thread(target=_drain, daemon=True)
+    stderr_thread.start()
+
+    stdout_lines = []
+    buf = b""
+    pkg = None
+
+    while True:
+        chunk = proc.stdout.read(512)
+        if not chunk:
+            break
+        buf += chunk
+        # Process complete lines (delimited by \r or \n)
+        while True:
+            cr = buf.find(b"\r")
+            lf = buf.find(b"\n")
+            if cr < 0 and lf < 0:
+                break
+            pos = min(p for p in (cr, lf) if p >= 0)
+            raw = buf[:pos].decode("utf-8", errors="ignore").strip()
+            buf = buf[pos + 1 :]
+            if not raw:
+                continue
+            stdout_lines.append(raw)
+            try:
+                if raw.startswith("Collecting "):
+                    token = raw[len("Collecting ") :].split()[0]
+                    pkg = _re.split(r"[><=!]", token)[0].split("[")[0]
+                    on_progress(f"正在收集依赖: {pkg}")
+                elif raw.startswith("Downloading "):
+                    sm = _re.search(r"\(([^)]+)\)", raw)
+                    size = sm.group(1).strip() if sm else ""
+                    if not pkg:
+                        url = raw.split("Downloading ", 1)[1].split("(")[0].strip()
+                        pkg = url.split("/")[-1].split("-")[0]
+                    on_progress(
+                        f"正在下载 {pkg} ({size})" if size else f"正在下载 {pkg}"
+                    )
+                elif "Installing collected packages" in raw:
+                    on_progress("正在安装依赖包...")
+                else:
+                    # pip progress bar: "11.1/22.2 MB" or "2.2M/22.2M"
+                    pm = _re.search(
+                        r"([\d.]+)\s*/\s*([\d.]+)\s*([kKmMgG][bB]?)\b", raw
+                    )
+                    if pm and pkg:
+                        cur, tot, unit = pm.group(1), pm.group(2), pm.group(3)
+                        on_progress(f"正在下载 {pkg}  {cur} {unit} / {tot} {unit}")
+            except Exception:
+                pass
+
+    proc.wait()
+    stderr_thread.join(timeout=5)
+    stderr_out = b"".join(stderr_parts).decode("utf-8", errors="ignore")
+
+    if logger:
+        logger.info("pip 流式安装完成: rc=%d", proc.returncode)
+
+    return subprocess.CompletedProcess(
+        args=cmd,
+        returncode=proc.returncode,
+        stdout="\n".join(stdout_lines),
+        stderr=stderr_out,
+    )
+
+
 def install_requirements_file(
     requirements_file: Union[str, Path],
     python_exec: Union[str, Path],
     index_url: Optional[str] = None,
     upgrade: bool = False,
     logger: Optional[logging.Logger] = None,
+    on_progress=None,
 ) -> Dict[str, Any]:
     if logger is None:
         logger = logging.getLogger(__name__)
@@ -203,7 +312,10 @@ def install_requirements_file(
         if index_url:
             cmd.extend(["-i", index_url])
         logger.info(f"执行 pip requirements 安装: {' '.join(cmd)}")
-        pip_result = run_hidden(cmd, capture_output=True, text=True)
+        if on_progress:
+            pip_result = _run_pip_streaming(cmd, logger, on_progress)
+        else:
+            pip_result = run_hidden(cmd, capture_output=True, text=True)
         if pip_result.returncode == 0:
             result["success"] = True
             stdout = getattr(pip_result, "stdout", "") or ""

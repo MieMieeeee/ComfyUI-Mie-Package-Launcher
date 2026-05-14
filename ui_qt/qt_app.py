@@ -2877,7 +2877,7 @@ class PyQtLauncher(QtWidgets.QMainWindow, process_events.ProcessCallback):
                     if hasattr(self, "auto_update_deps_var") and bool(
                         self.auto_update_deps_var.get()
                     ):
-                        req_res = self.services.update.sync_requirements_files()
+                        req_res = self.services.update.sync_requirements_files(on_progress=on_progress)
                 except Exception as e:
                     req_res = {"component": "requirements", "error": str(e)}
 

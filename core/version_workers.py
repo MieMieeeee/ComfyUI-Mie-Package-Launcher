@@ -320,7 +320,7 @@ except Exception as e:
                 output = result.stdout.strip()
                 if "|" in output:
                     gpu_name, driver_version = output.split("|", 1)
-                    self.gpuStatusReady.emit(f"{gpu_name} ({driver_version})")
+                    self.gpuStatusReady.emit(f"✓ {gpu_name} ({driver_version})")
                     self._log("info", "显卡驱动状态=%s (%s)", gpu_name, driver_version)
                 elif "无NVIDIA" in output or "错误" in output:
                     self.gpuStatusReady.emit("未检测到NVIDIA显卡")

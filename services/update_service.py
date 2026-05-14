@@ -301,7 +301,7 @@ class UpdateService:
                     lines.append("模板库：更新流程完成")
         return results, "\n".join(lines)
 
-    def sync_requirements_files(self) -> Dict[str, Any]:
+    def sync_requirements_files(self, on_progress=None) -> Dict[str, Any]:
         needs_consistency = self._needs_consistency()
         if not needs_consistency:
             return {"component": "requirements", "updated": False}
@@ -320,6 +320,7 @@ class UpdateService:
                     index_url=idx,
                     upgrade=True,
                     logger=self.app.logger,
+                    on_progress=on_progress,
                 )
                 ok = res.get("success") and not res.get("error")
                 sync_summary.append(f"{rf.name}: {'OK' if ok else 'FAIL'}")

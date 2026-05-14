@@ -770,6 +770,8 @@ class VersionService(IVersionService):
             tag = info.get("tag")
             if tag:
                 res = self._checkout_tag(tag)
+                if res.get("error") and info.get("commit"):
+                    res = self._checkout_commit(info["commit"])
             else:
                 res = self._checkout_commit(info["commit"])
             try:
@@ -977,6 +979,24 @@ class VersionService(IVersionService):
             )
             if r and r.returncode == 0:
                 return {"component": "core", "updated": True}
+            # Tag 不在本地，fetch 单个 tag 后重试
+            try:
+                self.run_git_network(
+                    ["git", "fetch", "origin", "tag", tag],
+                    timeout=60,
+                    cwd=self._repo_root(),
+                )
+                r = self._run_git(
+                    ["git", "checkout", f"tags/{tag}"],
+                    capture_output=True,
+                    text=True,
+                    timeout=15,
+                    cwd=self._repo_root(),
+                )
+                if r and r.returncode == 0:
+                    return {"component": "core", "updated": True}
+            except Exception:
+                pass
             return {"component": "core", "error": r.stderr if r else "checkout tag failed"}
         except Exception as e:
             return {"component": "core", "error": str(e)}

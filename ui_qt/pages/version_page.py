@@ -259,16 +259,18 @@ class VersionPage(BasePage):
         # 延迟刷新版本信息与提交历史（避免阻塞 UI 显示）
         try:
             QtCore.QTimer.singleShot(100, self._refresh_kernel_section)
+            # 启动时立即从本地加载提交历史（不发网络请求），填充表格
+            QtCore.QTimer.singleShot(500, self._load_local_commits_background)
             # 后台静默 fetch，不阻塞界面
-            delay_seconds = 180
+            delay_seconds = 30
             try:
                 cfg = getattr(self.app, "config", None)
                 vp = cfg.get("version_preferences", {}) if isinstance(cfg, dict) else {}
-                delay_seconds = int(vp.get("background_fetch_delay_seconds", 180))
+                delay_seconds = int(vp.get("background_fetch_delay_seconds", 30))
                 if delay_seconds < 0:
                     delay_seconds = 0
             except Exception:
-                delay_seconds = 180
+                delay_seconds = 30
             QtCore.QTimer.singleShot(int(delay_seconds * 1000), self._background_fetch)
         except Exception:
             pass
@@ -435,6 +437,43 @@ class VersionPage(BasePage):
             progress.close()
             DialogHelper.show_warning(self, "失败", str(e))
 
+    def _load_local_commits_background(self):
+        """后台加载本地提交历史（不发网络请求），启动时立即填充表格"""
+        if self._all_commits_cache:
+            return
+        import threading
+
+        def _bg():
+            try:
+                # 更新进行中不写缓存，避免覆盖更新后的数据
+                if getattr(self.app, "_update_running", False):
+                    return
+                base = Path(self.app.config.get("paths", {}).get("comfyui_root") or ".").resolve()
+                root = (base / "ComfyUI").resolve()
+                if not root.exists():
+                    return
+                git = getattr(self.app, 'git_path', 'git') or "git"
+                commits = self._fetch_all_commits(root, git)
+                try:
+                    if hasattr(self.app, "logger"):
+                        self.app.logger.info(
+                            "UI: 本地提交历史加载完成: %d 条, root=%s",
+                            len(commits), root
+                        )
+                except Exception:
+                    pass
+                if commits and not self._all_commits_cache and not getattr(self.app, "_update_running", False):
+                    self._all_commits_cache = commits
+                    QtCore.QTimer.singleShot(0, self._on_cache_loaded)
+            except Exception as e:
+                try:
+                    if hasattr(self.app, "logger"):
+                        self.app.logger.warning("UI: 本地提交历史加载失败: %s", e)
+                except Exception:
+                    pass
+
+        threading.Thread(target=_bg, daemon=True).start()
+
     def _background_fetch(self):
         """后台 fetch 并预填充本地缓存，完成后刷新 UI"""
         import threading
@@ -508,19 +547,35 @@ class VersionPage(BasePage):
     def _fetch_all_commits(self, root, git):
         """从本地 git 仓库获取全部提交记录"""
         import subprocess
-        # 优先用 origin/HEAD
+        # 优先用远端分支，确保能看到当前版本之后的提交
         target = None
+        for candidate in ["origin/HEAD", "origin/master", "origin/main"]:
+            try:
+                r = subprocess.run(
+                    [git, "rev-parse", "--verify", candidate],
+                    capture_output=True, timeout=3, cwd=str(root)
+                )
+                if r.returncode == 0:
+                    target = candidate
+                    break
+            except Exception:
+                pass
         try:
-            r = subprocess.run(
-                [git, "rev-parse", "--verify", "origin/HEAD"],
-                capture_output=True, timeout=3, cwd=str(root)
-            )
-            if r.returncode == 0:
-                target = "origin/HEAD"
+            if hasattr(self.app, "logger"):
+                self.app.logger.info("UI: git log target=%s", target or "HEAD")
         except Exception:
             pass
         if not target:
             target = "HEAD"
+            try:
+                if hasattr(self.app, "logger"):
+                    self.app.logger.warning(
+                        "UI: 未找到远端跟踪分支 (origin/HEAD|master|main)，"
+                        "提交历史仅显示本地数据，可能不完整。"
+                        "请执行'刷新提交历史(远端)'补全。"
+                    )
+            except Exception:
+                pass
 
         commits = []
         try:
@@ -537,14 +592,36 @@ class VersionPage(BasePage):
                     parts = line.split("|", 3)
                     if len(parts) == 4:
                         commits.append(parts)
-        except Exception:
-            pass
+            else:
+                try:
+                    if hasattr(self.app, "logger"):
+                        self.app.logger.warning(
+                            "UI: git log 失败: target=%s, rc=%d, stderr=%s",
+                            target, r.returncode,
+                            r.stderr.decode("utf-8", errors="replace")[:200] if r.stderr else ""
+                        )
+                except Exception:
+                    pass
+        except Exception as e:
+            try:
+                if hasattr(self.app, "logger"):
+                    self.app.logger.warning("UI: git log 异常: target=%s, error=%s", target, e)
+            except Exception:
+                pass
+        # 按日期降序（最新在前），消除 --first-parent 遍历导致的日期交错
+        commits.sort(key=lambda c: c[1], reverse=True)
         return commits
 
     def _on_cache_loaded(self):
         """缓存加载完成后刷新 UI（必须在 UI 线程调用）"""
         self._commit_page = 1
         self._load_commit_history()
+
+    def showEvent(self, event):
+        """页面切换到前台时，若缓存有数据但表格为空则刷新"""
+        super().showEvent(event)
+        if self._all_commits_cache and self.history_table.rowCount() == 0:
+            self._load_commit_history()
 
     def _prev_page(self):
         """上一页"""

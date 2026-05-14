@@ -84,7 +84,7 @@ class ProcessManager:
                 except Exception:
                     pass
             else:
-                running = is_http_reachable(self.app, _log=True)
+                running = is_http_reachable(self.app, _log=False)
                 try:
                     self.app.logger.info("[toggle] 检测结果: running=%s, btn_state=%s", running, btn_state)
                 except Exception:
@@ -709,7 +709,7 @@ class ProcessManager:
                     if self.comfyui_process and self.comfyui_process.poll() is None:
                         running = True
                     else:
-                        running = is_http_reachable(self.app, _log=True)
+                        running = is_http_reachable(self.app, _log=False)
                 except Exception:
                     running = False
 
