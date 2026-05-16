@@ -286,6 +286,7 @@ class GpuCheckWorker(BaseVersionWorker):
             gpu_name = None
             driver_version = None
 
+            # 方法1: pynvml
             pynvml_script = """
 import sys
 import os
@@ -320,22 +321,43 @@ except Exception as e:
                 output = result.stdout.strip()
                 if "|" in output:
                     gpu_name, driver_version = output.split("|", 1)
-                    self.gpuStatusReady.emit(f"✓ {gpu_name} ({driver_version})")
-                    self._log("info", "显卡驱动状态=%s (%s)", gpu_name, driver_version)
-                elif "无NVIDIA" in output or "错误" in output:
-                    self.gpuStatusReady.emit("未检测到NVIDIA显卡")
-                    self._log("info", "未检测到NVIDIA显卡")
+                    self._log("info", "pynvml 检测成功 - GPU=%s Driver=%s", gpu_name, driver_version)
                 else:
-                    self.gpuStatusReady.emit(output)
+                    self._log("info", "pynvml 输出: %s", output)
             else:
-                self.gpuStatusReady.emit("检测失败")
-                self._log(
-                    "warning",
-                    "GPU检测失败: rc=%s stdout=%s stderr=%s",
-                    result.returncode,
-                    result.stdout,
-                    result.stderr,
-                )
+                self._log("warning", "pynvml 检测失败: rc=%s", result.returncode)
+
+            # 方法2: nvidia-smi 兜底
+            if not gpu_name:
+                import shutil
+                nvidia_smi_path = shutil.which("nvidia-smi")
+                if nvidia_smi_path:
+                    try:
+                        r = run_hidden(
+                            [nvidia_smi_path, "--query-gpu=name,driver_version",
+                             "--format=csv,noheader,nounits"],
+                            capture_output=True, text=True, timeout=10,
+                        )
+                        if r.returncode == 0 and r.stdout.strip():
+                            lines = r.stdout.strip().splitlines()
+                            if lines:
+                                parts = lines[0].split(",")
+                                if len(parts) >= 1:
+                                    gpu_name = parts[0].strip()
+                                if len(parts) >= 2:
+                                    driver_version = parts[1].strip()
+                                self._log("info", "nvidia-smi 检测成功 - GPU=%s Driver=%s", gpu_name, driver_version)
+                    except Exception as e:
+                        self._log("warning", "nvidia-smi 检测失败: %s", e)
+
+            # 生成结果
+            if gpu_name and driver_version:
+                self.gpuStatusReady.emit(f"✓ {gpu_name} ({driver_version})")
+            elif gpu_name:
+                self.gpuStatusReady.emit(f"✓ {gpu_name}")
+            else:
+                self.gpuStatusReady.emit("未检测到NVIDIA显卡")
+                self._log("info", "未检测到NVIDIA显卡")
         except Exception as e:
             self.gpuStatusReady.emit("检测失败")
             self._log("warning", "GPU检测异常: %s", e)
