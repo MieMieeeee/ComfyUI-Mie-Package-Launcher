@@ -1735,7 +1735,7 @@ class PyQtLauncher(QtWidgets.QMainWindow, process_events.ProcessCallback):
 
         # Main Layout Spacing (for rounded corners visibility)
         try:
-            main.setSpacing(12)
+            main.setSpacing(0)
             main.setContentsMargins(12, 12, 12, 12)
         except Exception:
             pass

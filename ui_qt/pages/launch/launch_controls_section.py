@@ -42,8 +42,8 @@ class LaunchControlsSection(QtWidgets.QWidget):
         form_layout.setColumnStretch(3, 1)
         form_layout.setColumnMinimumWidth(0, 90)
         form_layout.setHorizontalSpacing(20)
-        form_layout.setVerticalSpacing(12)
-        form_layout.setContentsMargins(12, 12, 12, 12)
+        form_layout.setVerticalSpacing(8)
+        form_layout.setContentsMargins(8, 12, 8, 12)
 
         main_layout.addWidget(form_group)
 

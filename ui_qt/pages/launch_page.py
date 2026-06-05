@@ -46,7 +46,7 @@ class LaunchPage(BasePage):
 
         # 右侧按钮容器
         right_container = QtWidgets.QWidget()
-        right_container.setFixedWidth(150)
+        right_container.setFixedWidth(200)
         right_layout = QtWidgets.QVBoxLayout(right_container)
         right_layout.setContentsMargins(0, 0, 0, 0)
         right_layout.setSpacing(8)
@@ -86,7 +86,7 @@ class LaunchPage(BasePage):
         self._update_button_state()
 
         # 常见问题按钮
-        btn_faq = QtWidgets.QPushButton("查看常见问题")
+        btn_faq = QtWidgets.QPushButton("常见问题")
         btn_faq.setCursor(Qt.PointingHandCursor)
         btn_faq.setSizePolicy(QtWidgets.QSizePolicy.Expanding, QtWidgets.QSizePolicy.Expanding)
         btn_faq.setStyleSheet(self._get_primary_button_style())
@@ -104,8 +104,17 @@ class LaunchPage(BasePage):
         self.btn_package = btn_package
 
         right_layout.addWidget(btn_toggle, 4)
-        right_layout.addWidget(btn_faq, 1)
-        right_layout.addWidget(btn_package, 1)
+
+        # 底部：常见问题 + 打包日志 横排
+        bottom_row = QtWidgets.QWidget()
+        bottom_layout = QtWidgets.QHBoxLayout(bottom_row)
+        bottom_layout.setContentsMargins(0, 0, 0, 0)
+        bottom_layout.setSpacing(4)
+        btn_faq.setSizePolicy(QtWidgets.QSizePolicy.Expanding, QtWidgets.QSizePolicy.Expanding)
+        btn_package.setSizePolicy(QtWidgets.QSizePolicy.Expanding, QtWidgets.QSizePolicy.Expanding)
+        bottom_layout.addWidget(btn_faq)
+        bottom_layout.addWidget(btn_package)
+        right_layout.addWidget(bottom_row, 1)
 
         # 启动控制区块
         self.launch_controls_section = LaunchControlsSection(
