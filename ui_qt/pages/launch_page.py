@@ -94,8 +94,18 @@ class LaunchPage(BasePage):
         btn_faq.setToolTip("查看常见问题解决方案")
         self.btn_faq = btn_faq
 
+        # 打包日志按钮（报bug用）
+        btn_package = QtWidgets.QPushButton("打包日志")
+        btn_package.setCursor(Qt.PointingHandCursor)
+        btn_package.setSizePolicy(QtWidgets.QSizePolicy.Expanding, QtWidgets.QSizePolicy.Expanding)
+        btn_package.setStyleSheet(self._get_primary_button_style())
+        btn_package.clicked.connect(self._on_package_logs)
+        btn_package.setToolTip("将启动器和 ComfyUI 日志打包成 zip，方便报bug时附带")
+        self.btn_package = btn_package
+
         right_layout.addWidget(btn_toggle, 4)
         right_layout.addWidget(btn_faq, 1)
+        right_layout.addWidget(btn_package, 1)
 
         # 启动控制区块
         self.launch_controls_section = LaunchControlsSection(
@@ -225,6 +235,33 @@ class LaunchPage(BasePage):
         """切换启动状态"""
         if hasattr(self.app, 'services') and hasattr(self.app.services, 'process'):
             self.app.services.process.toggle()
+
+    def _on_package_logs(self):
+        """打包启动器和 ComfyUI 日志，弹窗让用户选保存位置。"""
+        import os
+        from utils.ui_actions import package_logs
+        from ui_qt.widgets.dialog_helper import DialogHelper
+
+        result = package_logs(self.app, parent=self)
+        if result is None:
+            return  # 用户取消
+        if result is False:
+            DialogHelper.show_error(
+                self,
+                '打包失败',
+                '日志打包失败，请检查写入权限或重试。',
+            )
+            return
+
+        try:
+            os.startfile(str(result.parent))
+        except Exception:
+            pass
+        DialogHelper.show_info(
+            self,
+            '日志已打包',
+            f"已保存到\n{result}\n\n所在文件夹已打开",
+        )
 
     def _choose_root(self):
         """选择根目录"""

@@ -112,3 +112,39 @@ def open_web(app):
                 pass
         DialogHelper.show_info(None, "提示", "未设置或无法使用自定义浏览器，使用默认浏览器打开")
     webbrowser.open(url)
+
+
+def package_logs(app, parent=None):
+    """Prompt the user for a save location, then bundle launcher + ComfyUI logs.
+
+    Returns the resulting zip ``Path`` on success, ``None`` if the user
+    cancelled the dialog, or ``False`` if packaging itself failed.
+    """
+    from datetime import datetime as _dt
+    from services.log_package_service import create_log_package
+
+    default_dir = Path.cwd() / "launcher" / "logs"
+    try:
+        default_dir.mkdir(parents=True, exist_ok=True)
+    except Exception:
+        pass
+    default_name = f"comfyui-logs-{_dt.now().strftime('%Y%m%d_%H%M%S')}.zip"
+    default_path = str(default_dir / default_name)
+
+    path_str, _ = QtWidgets.QFileDialog.getSaveFileName(
+        parent,
+        "保存日志包",
+        default_path,
+        "Zip 文件 (*.zip)",
+    )
+    if not path_str:
+        return None  # user cancelled
+
+    try:
+        return create_log_package(app, Path(path_str))
+    except Exception as e:
+        try:
+            app.logger.error("日志打包失败: %s", e)
+        except Exception:
+            pass
+        return False
