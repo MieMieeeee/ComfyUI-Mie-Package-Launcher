@@ -678,17 +678,17 @@ def _format_update_summary(core_res, req_res):
             # 提示：仅在有失败时出现，且只挑出与失败原因匹配的指引
             if is_mirror_issue:
                 lines.append(
-                    "提示：未同步的包可能 PyPI 镜像未及时同步，"
-                    "可稍后重试或在 设置 → PyPI 镜像 中切换 PyPI 官方源。"
+                    "提示：未同步的包可能 PyPI 镜像未及时同步，可稍后重试。"
+                    "也可在 设置 → PyPI 镜像 中选择“取消”，改用 PyPI 官方源后重试。"
                 )
             elif failed and not missing:
                 lines.append(
                     "提示：依赖中存在非镜像类错误，可稍后重试，"
-                    "或在 设置 → PyPI 镜像 中切换其他镜像源后再试。"
+                    "或在 设置 → PyPI 镜像 中选择“取消”改用 PyPI 官方源后再试。"
                 )
             elif generic_err and not is_mirror_issue:
                 lines.append(
-                    "提示：可稍后重试，或在 设置 → PyPI 镜像 中切换其他镜像源。"
+                    "提示：可稍后重试，或在 设置 → PyPI 镜像 中选择“取消”改用官方源。"
                 )
         elif generic_err:
             # 既没有 installed/satisfied 也没有 missing/failed，但有 error
@@ -2872,10 +2872,20 @@ class PyQtLauncher(QtWidgets.QMainWindow, process_events.ProcessCallback):
             except Exception:
                 pass
 
-            # 进度回调函数
-            def on_progress(status: str):
+            # 进度回调函数：接受 (text, percent) 两个参数
+            # percent 为 None 表示息式 (脉冲)，0-100 切换到确定进度条
+            def on_progress(status, percent=None):
                 if pd and not pd.is_cancelled():
-                    self.ui_post(lambda s=status: pd.set_status(s))
+                    self.ui_post(lambda s=status, p=percent: _apply_progress(s, p))
+
+            def _apply_progress(text, percent):
+                if pd is None or pd.is_cancelled():
+                    return
+                try:
+                    pd.set_status(text)
+                    pd.set_progress(percent if percent is not None else None)
+                except Exception:
+                    pass
 
             try:
                 # 检查是否已取消

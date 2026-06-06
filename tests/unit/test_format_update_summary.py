@@ -301,3 +301,32 @@ class TestQtAppShutdown:
         # PyQt5 中 QApplication.quit() 不会自动销毁实例，instance() 仍非 None，
         # 但我们确认可以再次拿到同一个实例，没有泄漏
         assert QtWidgets.QApplication.instance() is not None
+
+
+
+class TestFormatUpdateSummaryHintMentionsCancel:
+    """镜像失败的提示必须明确告诉用户可以“取消”镜像源。"""
+
+    def test_mirror_hint_says_cancel(self):
+        summary = _format_update_summary(
+            None,
+            {
+                "success": False,
+                "error_code": "VERSION_NOT_FOUND",
+                "missing": ["comfyui-frontend-package==1.45.15"],
+            },
+        )
+        assert "提示" in summary
+        assert "取消" in summary
+
+    def test_non_mirror_hint_says_cancel(self):
+        summary = _format_update_summary(
+            None,
+            {
+                "success": False,
+                "error_code": "PIP_PARTIAL_FAILURE",
+                "failed": [{"spec": "x==1", "reason": "net", "stderr": ""}],
+            },
+        )
+        assert "提示" in summary
+        assert "取消" in summary

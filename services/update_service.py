@@ -312,8 +312,12 @@ class UpdateService:
         installed_all = []
         satisfied_all = []
         missing_all = []
+        failed_all = []
         error_parts = []
+        # 依赖错误码：多个 requirements 文件间优先保留镜像类（VERSION_NOT_FOUND），否则取最后一个非空码。
+        error_code = None
         any_success = False
+        any_partial = False
         for rf in req_files:
             try:
                 # 使用 upgrade=True 来升级所有依赖（包括前端包和模板库）
@@ -333,11 +337,21 @@ class UpdateService:
                     satisfied_all.append(item)
                 for item in res.get("missing") or []:
                     missing_all.append(item)
+                for item in res.get("failed") or []:
+                    failed_all.append(item)
                 if res.get("error"):
                     err = str(res.get("error"))
                     if len(err) > 200:
                         err = err[:200] + "..."
                     error_parts.append(f"{rf.name}: {err}")
+                if res.get("partial"):
+                    any_partial = True
+                # 依赖错误码优先保留：镜像类 > 其他部分失败 > 全部失败
+                rc = res.get("error_code")
+                if rc == "VERSION_NOT_FOUND":
+                    error_code = "VERSION_NOT_FOUND"
+                elif error_code != "VERSION_NOT_FOUND" and rc:
+                    error_code = rc
                 if ok:
                     any_success = True
             except Exception as e:
@@ -345,10 +359,13 @@ class UpdateService:
         return {
             "component": "requirements",
             "updated": any_success and not error_parts,
+            "partial": any_partial,
             "summary": "; ".join(sync_summary),
             "installed": installed_all,
             "satisfied": satisfied_all,
             "missing": missing_all,
+            "failed": failed_all,
+            "error_code": error_code,
             "error": "; ".join(error_parts) if error_parts else None,
         }
 

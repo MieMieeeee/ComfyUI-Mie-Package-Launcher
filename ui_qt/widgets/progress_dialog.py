@@ -145,9 +145,10 @@ class ProgressDialog(QtWidgets.QDialog):
         QtWidgets.QApplication.processEvents()
 
     def set_progress(self, value, maximum=100):
-        if maximum <= 0:
+        """设置进度条。value 为 None 表示息式 (脉冲)模式。"""
+        if value is None or maximum <= 0:
             self.pbar.setRange(0, 0)
         else:
             self.pbar.setRange(0, maximum)
-            self.pbar.setValue(value)
+            self.pbar.setValue(max(0, min(int(value), maximum)))
         QtWidgets.QApplication.processEvents()

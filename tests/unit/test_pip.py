@@ -759,3 +759,163 @@ class TestInstallRequirementsFileVersionNotFound:
         assert "comfyui-workflow-templates==0.9.98" in result.get("missing", [])
         # both packages were attempted individually
         assert mock_install.call_count == 2
+
+
+
+class TestInstallRequirementsFileProgress:
+    """install_requirements_file must drive an on_progress callback so the UI can show package-level progress."""
+
+    def test_forwards_per_package_progress_with_index_and_total(self, tmp_path):
+        from utils.pip import install_requirements_file
+
+        req_file = tmp_path / "requirements.txt"
+        req_file.write_text(
+            "torch==2.1.0\nnumpy==1.26.0\ncomfyui-frontend-package==1.45.15\n",
+            encoding="utf-8",
+        )
+
+        def fake_install(spec, python_exec, **kwargs):
+            # 偶带调用 on_progress 验证不会报错
+            inner = kwargs.get("on_progress")
+            if inner is not None:
+                inner("正在下载 11.0/22.0 MB")
+            return {
+                "success": True,
+                "updated": True,
+                "up_to_date": False,
+                "version": spec.split("==")[1],
+                "error": None,
+                "error_code": None,
+            }
+
+        events = []
+
+        def my_progress(text, percent=None):
+            events.append((text, percent))
+
+        with patch("utils.pip.install_or_update_package", side_effect=fake_install):
+            install_requirements_file(str(req_file), "python", on_progress=my_progress)
+
+        # 以包索引为靠扪拆分出三个包的首个事件
+        # 文本里包含包名和索引
+        assert len(events) >= 3
+        assert "1/3" in events[0][0] and "torch==2.1.0" in events[0][0]
+        assert "2/3" in events[2][0] and "numpy==1.26.0" in events[2][0]
+        assert "3/3" in events[4][0] and "comfyui-frontend-package" in events[4][0]
+        # 每个包首个事件的 pct 与该包对应
+        assert events[0][1] == 33
+        assert events[2][1] == 66
+        assert events[4][1] == 100
+
+    def test_progress_callback_optional(self, tmp_path):
+        """不传 on_progress 也能跑通，向后兼容。"""
+        from utils.pip import install_requirements_file
+
+        req_file = tmp_path / "requirements.txt"
+        req_file.write_text("torch==2.1.0\n", encoding="utf-8")
+
+        def fake_install(spec, python_exec, **kwargs):
+            return {
+                "success": True,
+                "updated": True,
+                "up_to_date": False,
+                "version": "2.1.0",
+                "error": None,
+                "error_code": None,
+            }
+
+        with patch("utils.pip.install_or_update_package", side_effect=fake_install):
+            result = install_requirements_file(str(req_file), "python")
+        assert result["success"] is True
+
+    def test_progress_continues_after_failure(self, tmp_path):
+        """A failing package still emits a progress event for its slot."""
+        from utils.pip import install_requirements_file
+
+        req_file = tmp_path / "requirements.txt"
+        req_file.write_text("a==1\nbad==1\nc==1\n", encoding="utf-8")
+
+        def fake_install(spec, python_exec, **kwargs):
+            if spec.startswith("bad"):
+                return {
+                    "success": False,
+                    "updated": False,
+                    "up_to_date": False,
+                    "version": None,
+                    "error": "err",
+                    "error_code": "PIP_COMMAND_FAILED",
+                }
+            return {
+                "success": True,
+                "updated": True,
+                "up_to_date": False,
+                "version": "1.0",
+                "error": None,
+                "error_code": None,
+            }
+
+        events = []
+        with patch("utils.pip.install_or_update_package", side_effect=fake_install):
+            install_requirements_file(
+                str(req_file), "python", on_progress=lambda t, p=None: events.append((t, p))
+            )
+        # 3 packages → 3 events with pcts 33, 66, 100
+        pcts = [e[1] for e in events]
+        assert pcts == [33, 66, 100]
+        assert "2/3" in events[1][0] and "bad==1" in events[1][0]
+
+
+class TestInstallOrUpdatePackageProgress:
+    """install_or_update_package must accept on_progress and forward it to streaming pip."""
+
+    def test_signature_accepts_on_progress(self):
+        import inspect
+        from utils.pip import install_or_update_package
+        sig = inspect.signature(install_or_update_package)
+        assert "on_progress" in sig.parameters
+
+    def test_uses_streaming_when_on_progress_given(self, monkeypatch):
+        from utils import pip as pipmod
+
+        captured = {}
+
+        def fake_streaming(cmd, logger, on_progress):
+            captured["called"] = True
+            captured["on_progress"] = on_progress
+            return MagicMock(returncode=0, stdout="", stderr="")
+
+        monkeypatch.setattr(pipmod, "_run_pip_streaming", fake_streaming)
+
+        # 让 run_hidden 丢出异常，验证不会走到那个分支
+        def fake_run_hidden(*a, **kw):
+            raise AssertionError("run_hidden should not be called when on_progress is given")
+
+        monkeypatch.setattr(pipmod, "run_hidden", fake_run_hidden)
+
+        events = []
+        pipmod.install_or_update_package(
+            "torch", "python", on_progress=lambda t, p=None: events.append((t, p))
+        )
+        assert captured.get("called") is True
+        # _run_pip_streaming 会调用 on_progress，但这里只验证函数被传递
+        assert captured.get("on_progress") is not None
+
+    def test_uses_run_hidden_when_no_on_progress(self, monkeypatch):
+        from utils import pip as pipmod
+
+        called = {"hidden": False, "stream": False}
+
+        def fake_run_hidden(*a, **kw):
+            called["hidden"] = True
+            return MagicMock(returncode=0, stdout="", stderr="")
+
+        def fake_streaming(cmd, logger, on_progress):
+            called["stream"] = True
+            return MagicMock(returncode=0, stdout="", stderr="")
+
+        monkeypatch.setattr(pipmod, "run_hidden", fake_run_hidden)
+        monkeypatch.setattr(pipmod, "_run_pip_streaming", fake_streaming)
+
+        pipmod.install_or_update_package("torch", "python")
+        assert called["hidden"] is True
+        assert called["stream"] is False

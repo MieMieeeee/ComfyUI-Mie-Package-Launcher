@@ -91,7 +91,15 @@ def install_or_update_package(
     index_url: Optional[str] = None,
     upgrade: bool = True,
     logger: Optional[logging.Logger] = None,
+    on_progress=None,
 ) -> Dict[str, Any]:
+    """Install or upgrade a single package, optionally streaming pip progress.
+
+    ``on_progress`` follows the ``(text, percent)`` convention where ``text``
+    is a human-readable status line and ``percent`` is an optional 0-100
+    value (``None`` means indeterminate). When provided, the install runs
+    via the streaming helper so pip's per-byte progress reaches the caller.
+    """
     if logger is None:
         logger = logging.getLogger(__name__)
     # 保持原有字段不变，新增 error_code 作为规范化错误码（双写迁移）
@@ -116,7 +124,10 @@ def install_or_update_package(
         if index_url:
             cmd.extend(["-i", index_url])
         logger.info(f"执行 pip 操作: {' '.join(cmd)}")
-        pip_result = run_hidden(cmd, capture_output=True, text=True)
+        if on_progress is not None:
+            pip_result = _run_pip_streaming(cmd, logger, on_progress)
+        else:
+            pip_result = run_hidden(cmd, capture_output=True, text=True)
         if pip_result.returncode == 0:
             result["success"] = True
             stdout = getattr(pip_result, "stdout", "") or ""
@@ -554,8 +565,24 @@ def install_requirements_file(
         )
 
         any_new_install = False
-        for spec in specs:
+        total = len(specs)
+        for idx, spec in enumerate(specs, start=1):
             name, _ver = _split_name_version(spec)
+            # 每个包都给调用方报上“正在更新 idx/total: spec”作为背景状态，
+            # 让进度对话框能看到当前是哪个包、剩什么。
+            overall_pct = int(idx / total * 100) if total else 100
+
+            def _pkg_progress(text, percent=None, _spec=spec, _idx=idx, _total=total, _pct=overall_pct):
+                if on_progress is None:
+                    return
+                # 底层 pip 会输出“正在下载 X/Y MB”类的子状态，贴到包名后面
+                tail = f"  {text}" if text else ""
+                status = f"正在更新依赖 {_idx}/{_total}：{_spec}{tail}".strip()
+                on_progress(status, _pct)
+
+            # 每进入一个包，先报一次“开始处理”，确保进度不会卡在某个包里
+            _pkg_progress("准备安装包代理检查…")
+
             try:
                 pkg_result = install_or_update_package(
                     spec,
@@ -563,17 +590,21 @@ def install_requirements_file(
                     index_url=index_url,
                     upgrade=upgrade,
                     logger=logger,
+                    on_progress=_pkg_progress,
                 )
             except Exception as e:
                 logger.error("安装 %s 时异常: %s", spec, e)
-                result["failed"].append(
-                    {
-                        "spec": spec,
-                        "reason": f"异常: {e}",
-                        "stderr": str(e),
-                    }
-                )
-                continue
+                # 封装异常为 install_or_update_package 的返回结果，
+                # 让后面的错误分支统一处理，不会遗漏进度事件
+                _pkg_progress(f"安装异常: {e}")
+                pkg_result = {
+                    "success": False,
+                    "updated": False,
+                    "up_to_date": False,
+                    "version": None,
+                    "error": f"pip 操作异常: {e}",
+                    "error_code": "PIP_OPERATION_EXCEPTION",
+                }
 
             if pkg_result.get("success"):
                 version = pkg_result.get("version") or ""

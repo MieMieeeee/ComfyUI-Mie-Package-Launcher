@@ -167,3 +167,94 @@ class TestSyncRequirementsFilesUpdatedFlag(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
+
+
+
+class TestSyncRequirementsFilesPropagatesErrorCode(unittest.TestCase):
+    """sync_requirements_files must propagate error_code / failed / partial so the summary UI knows what to render."""
+
+    def setUp(self):
+        from services.update_service import UpdateService
+
+        self.app = MagicMock()
+        self.app.logger = MagicMock()
+        self.app.config.get.return_value = {}
+        self.app.pypi_proxy_mode.get.return_value = "aliyun"
+        self.app.pypi_proxy_url.get.return_value = ""
+        self.app.auto_update_deps_var.get.return_value = True
+        self.svc = UpdateService(self.app)
+
+    def test_mirror_error_code_is_preserved(self):
+        """VERSION_NOT_FOUND from install_requirements_file must surface in the service result."""
+        mirror_res = {
+            "success": True,
+            "partial": True,
+            "updated": True,
+            "error_code": "VERSION_NOT_FOUND",
+            "installed": ["torch-2.1.0"],
+            "satisfied": ["numpy-1.26.0"],
+            "missing": ["comfyui-frontend-package==1.45.15"],
+            "failed": [],
+        }
+        with tempfile.TemporaryDirectory() as tmp:
+            req_file = Path(tmp) / "requirements.txt"
+            req_file.write_text("torch==2.1.0\n", encoding="utf-8")
+            with patch.object(self.svc, "_resolve_comfy_root", return_value=Path(tmp)), \
+                 patch.object(self.svc, "_collect_requirement_files", return_value=[req_file]), \
+                 patch.object(self.svc, "_resolve_python_exec", return_value="python"), \
+                 patch("services.update_service.PIPUTILS.install_requirements_file", return_value=mirror_res):
+                result = self.svc.sync_requirements_files()
+        self.assertEqual(result.get("error_code"), "VERSION_NOT_FOUND")
+        self.assertTrue(result.get("partial"))
+        self.assertEqual(result.get("missing"), ["comfyui-frontend-package==1.45.15"])
+
+    def test_non_mirror_error_code_is_preserved(self):
+        """PIP_PARTIAL_FAILURE / PIP_REQUIREMENTS_COMMAND_FAILED must also propagate."""
+        fail_res = {
+            "success": False,
+            "partial": False,
+            "updated": False,
+            "error_code": "PIP_PARTIAL_FAILURE",
+            "installed": [],
+            "satisfied": [],
+            "missing": [],
+            "failed": [{"spec": "x==1", "reason": "network", "stderr": ""}],
+        }
+        with tempfile.TemporaryDirectory() as tmp:
+            req_file = Path(tmp) / "requirements.txt"
+            req_file.write_text("x==1\n", encoding="utf-8")
+            with patch.object(self.svc, "_resolve_comfy_root", return_value=Path(tmp)), \
+                 patch.object(self.svc, "_collect_requirement_files", return_value=[req_file]), \
+                 patch.object(self.svc, "_resolve_python_exec", return_value="python"), \
+                 patch("services.update_service.PIPUTILS.install_requirements_file", return_value=fail_res):
+                result = self.svc.sync_requirements_files()
+        self.assertEqual(result.get("error_code"), "PIP_PARTIAL_FAILURE")
+        self.assertEqual(len(result.get("failed") or []), 1)
+        self.assertEqual(result["failed"][0]["spec"], "x==1")
+
+    def test_mirror_error_wins_when_multiple_req_files_mixed(self):
+        """If one file has mirror issue and another has non-mirror error, mirror wins (more informative)."""
+        mirror_res = {
+            "success": True, "partial": True, "updated": True,
+            "error_code": "VERSION_NOT_FOUND",
+            "installed": [], "satisfied": [], "missing": ["a==1"], "failed": [],
+        }
+        other_res = {
+            "success": False, "partial": False, "updated": False,
+            "error_code": "PIP_REQUIREMENTS_COMMAND_FAILED",
+            "installed": [], "satisfied": [], "missing": [], "failed": [],
+        }
+        with tempfile.TemporaryDirectory() as tmp:
+            r1 = Path(tmp) / "r1.txt"
+            r1.write_text("a==1\n", encoding="utf-8")
+            r2 = Path(tmp) / "r2.txt"
+            r2.write_text("b==1\n", encoding="utf-8")
+            with patch.object(self.svc, "_resolve_comfy_root", return_value=Path(tmp)), \
+                 patch.object(self.svc, "_collect_requirement_files", return_value=[r1, r2]), \
+                 patch.object(self.svc, "_resolve_python_exec", return_value="python"), \
+                 patch("services.update_service.PIPUTILS.install_requirements_file",
+                       side_effect=[mirror_res, other_res]):
+                result = self.svc.sync_requirements_files()
+        self.assertEqual(result.get("error_code"), "VERSION_NOT_FOUND")
+        # missing and failed are both aggregated
+        self.assertIn("a==1", result.get("missing") or [])
