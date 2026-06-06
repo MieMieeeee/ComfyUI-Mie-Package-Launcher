@@ -509,3 +509,120 @@ class TestInstallRequirementsFile:
                     call_args = mock_run.call_args[0][0]
                     assert "-i" in call_args
                     assert "https://pypi.example.com/simple" in call_args
+
+
+class TestParseMissingPackagesFromStderr:
+    """_parse_missing_packages should pull 'version not found' packages out of pip stderr."""
+
+    def test_extracts_single_missing_package(self):
+        from utils.pip import _parse_missing_packages
+        stderr = (
+            "ERROR: Could not find a version that satisfies the requirement "
+            "comfyui-workflow-templates==0.9.98 "
+            "(from versions: 0.1.0, 0.1.1, ... 0.9.92)"
+        )
+        missing = _parse_missing_packages(stderr)
+        assert missing == ["comfyui-workflow-templates==0.9.98"]
+
+    def test_extracts_multiple_missing_packages(self):
+        from utils.pip import _parse_missing_packages
+        stderr = (
+            "ERROR: Could not find a version that satisfies the requirement pkg-a==1.0\n"
+            "ERROR: Could not find a version that satisfies the requirement pkg-b==2.0"
+        )
+        missing = _parse_missing_packages(stderr)
+        assert "pkg-a==1.0" in missing
+        assert "pkg-b==2.0" in missing
+        assert len(missing) == 2
+
+    def test_returns_empty_for_other_errors(self):
+        from utils.pip import _parse_missing_packages
+        stderr = "ERROR: Could not open requirements file: [Errno 2] No such file or directory"
+        missing = _parse_missing_packages(stderr)
+        assert missing == []
+
+    def test_handles_empty_stderr(self):
+        from utils.pip import _parse_missing_packages
+        assert _parse_missing_packages("") == []
+
+
+class TestFilterRequirementsFile:
+    """_filter_requirements should comment out missing-package lines in a temp file."""
+
+    def test_comments_out_listed_packages(self, tmp_path):
+        from utils.pip import _filter_requirements
+        src = tmp_path / "requirements.txt"
+        src.write_text(
+            "comfyui-frontend-package==1.43.18\n"
+            "comfyui-workflow-templates==0.9.98\n"
+            "torch>=2.0",
+            encoding="utf-8",
+        )
+        out = _filter_requirements(src, {"comfyui-workflow-templates==0.9.98"})
+        text = out.read_text(encoding="utf-8")
+        assert "comfyui-frontend-package==1.43.18" in text
+        assert "torch>=2.0" in text
+        assert "comfyui-workflow-templates==0.9.98" not in text or "#" in text.split("comfyui-workflow-templates==0.9.98")[0][-3:]
+
+    def test_returns_original_when_nothing_to_filter(self, tmp_path):
+        from utils.pip import _filter_requirements
+        src = tmp_path / "requirements.txt"
+        src.write_text("torch>=2.0", encoding="utf-8")
+        out = _filter_requirements(src, {"nonexistent==9.9.9"})
+        assert out == src
+
+
+class TestInstallRequirementsFileVersionNotFound:
+    """install_requirements_file should detect 'version not found' and surface missing packages."""
+
+    def test_returns_version_not_found_with_missing_list(self):
+        from utils.pip import install_requirements_file
+        stderr = (
+            "ERROR: Could not find a version that satisfies the requirement "
+            "comfyui-workflow-templates==0.9.98 (from versions: 0.1.0, ... 0.9.92)"
+        )
+        mock_req_path = MagicMock()
+        mock_req_path.exists.return_value = True
+        mock_req_path.name = "requirements.txt"
+        mock_pip_path = MagicMock()
+        mock_pip_path.exists.return_value = True
+        with patch("utils.pip.Path.resolve") as mock_resolve:
+            mock_resolve.side_effect = [mock_req_path, MagicMock()]
+            with patch("utils.pip.run_hidden") as mock_run:
+                fail = MagicMock(returncode=1, stdout="", stderr=stderr)
+                mock_run.return_value = fail
+                with patch("utils.pip.compute_pip_executable", return_value=mock_pip_path):
+                    result = install_requirements_file("requirements.txt", "python")
+        assert result["success"] is False
+        assert result["error_code"] == "VERSION_NOT_FOUND"
+        assert "comfyui-workflow-templates==0.9.98" in result.get("missing", [])
+
+    def test_partial_retry_installs_rest_when_some_missing(self, tmp_path):
+        from utils.pip import install_requirements_file
+        req_file = tmp_path / "requirements.txt"
+        req_file.write_text(
+            "comfyui-frontend-package==1.43.18\n"
+            "comfyui-workflow-templates==0.9.98",
+            encoding="utf-8",
+        )
+        stderr_fail = (
+            "ERROR: Could not find a version that satisfies the requirement "
+            "comfyui-workflow-templates==0.9.98 (from versions: 0.1.0, ... 0.9.92)"
+        )
+        fail = MagicMock(returncode=1, stdout="", stderr=stderr_fail)
+        ok = MagicMock(
+            returncode=0,
+            stdout="Successfully installed comfyui-frontend-package-1.43.18",
+            stderr="",
+        )
+        mock_pip_path = MagicMock()
+        mock_pip_path.exists.return_value = True
+        with patch("utils.pip.run_hidden", side_effect=[fail, ok]) as mock_run:
+            with patch("utils.pip.compute_pip_executable", return_value=mock_pip_path):
+                result = install_requirements_file(
+                    str(req_file), "python", upgrade=True
+                )
+        assert result["success"] is True
+        assert "comfyui-frontend-package-1.43.18" in result.get("installed", [])
+        assert "comfyui-workflow-templates==0.9.98" in result.get("missing", [])
+        assert mock_run.call_count == 2

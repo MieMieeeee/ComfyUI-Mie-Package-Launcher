@@ -311,6 +311,9 @@ class UpdateService:
         sync_summary = []
         installed_all = []
         satisfied_all = []
+        missing_all = []
+        error_parts = []
+        any_success = False
         for rf in req_files:
             try:
                 # 使用 upgrade=True 来升级所有依赖（包括前端包和模板库）
@@ -328,14 +331,25 @@ class UpdateService:
                     installed_all.append(item)
                 for item in res.get("satisfied") or []:
                     satisfied_all.append(item)
-            except Exception:
+                for item in res.get("missing") or []:
+                    missing_all.append(item)
+                if res.get("error"):
+                    err = str(res.get("error"))
+                    if len(err) > 200:
+                        err = err[:200] + "..."
+                    error_parts.append(f"{rf.name}: {err}")
+                if ok:
+                    any_success = True
+            except Exception as e:
                 sync_summary.append(f"{rf.name}: FAIL")
         return {
             "component": "requirements",
-            "updated": True,
+            "updated": any_success and not error_parts,
             "summary": "; ".join(sync_summary),
             "installed": installed_all,
             "satisfied": satisfied_all,
+            "missing": missing_all,
+            "error": "; ".join(error_parts) if error_parts else None,
         }
 
     def _resolve_index_url(self) -> str | None:
@@ -348,6 +362,8 @@ class UpdateService:
                 u = (self.app.pypi_proxy_url.get() or "").strip()
                 if u:
                     idx = u
+            elif mode == "none":
+                idx = "https://pypi.org/simple/"
         except Exception:
             idx = None
         return idx

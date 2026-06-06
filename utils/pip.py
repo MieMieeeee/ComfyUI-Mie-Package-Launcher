@@ -275,6 +275,63 @@ def _run_pip_streaming(cmd, logger, on_progress):
     )
 
 
+import re as _re_missing
+
+_MISSING_PKG_RE = _re_missing.compile(
+    r"Could not find a version that satisfies the requirement\s+"
+    r"([A-Za-z0-9_.\-]+\s*[><=!~]+\s*[A-Za-z0-9_.+\-]+)"
+)
+
+
+def _parse_missing_packages(stderr):
+    """Extract package specs that pip could not find a version for."""
+    if not stderr:
+        return []
+    seen = set()
+    out = []
+    for line in stderr.splitlines():
+        m = _MISSING_PKG_RE.search(line)
+        if not m:
+            continue
+        spec = m.group(1).strip()
+        if spec in seen:
+            continue
+        seen.add(spec)
+        out.append(spec)
+    return out
+
+
+def _filter_requirements(req_path, missing):
+    """Write a filtered requirements file with missing-package lines commented out."""
+    if not missing:
+        return req_path
+    try:
+        text = req_path.read_text(encoding="utf-8")
+    except Exception:
+        return req_path
+    out_lines = []
+    matched = False
+    for line in text.splitlines():
+        stripped = line.strip()
+        if not stripped or stripped.startswith("#"):
+            out_lines.append(line)
+            continue
+        is_missing = False
+        for spec in missing:
+            if spec in line:
+                is_missing = True
+                matched = True
+                break
+        out_lines.append(("# " + line) if is_missing else line)
+    if not matched:
+        return req_path
+    filtered = req_path.with_suffix(req_path.suffix + ".filtered")
+    try:
+        filtered.write_text("\n".join(out_lines) + "\n", encoding="utf-8")
+    except Exception:
+        return req_path
+    return filtered
+
 def install_requirements_file(
     requirements_file: Union[str, Path],
     python_exec: Union[str, Path],
@@ -378,6 +435,68 @@ def install_requirements_file(
             stderr = getattr(pip_result, "stderr", "") or ""
             result["error"] = f"pip requirements 执行失败: {stderr}"
             result["error_code"] = "PIP_REQUIREMENTS_COMMAND_FAILED"
+            missing = _parse_missing_packages(stderr)
+            if missing:
+                # 包名称或版本在当前镜像上尚未同步
+                result["error_code"] = "VERSION_NOT_FOUND"
+                result["missing"] = list(missing)
+                logger.warning(
+                    "pip 未找到版本: %s",
+                    ", ".join(missing),
+                )
+                try:
+                    filtered_path = _filter_requirements(req_path, set(missing))
+                except Exception as e:
+                    logger.error("过滤 requirements 失败: %s", e)
+                    filtered_path = req_path
+                if filtered_path != req_path:
+                    retry_cmd = list(cmd)
+                    for i, c in enumerate(retry_cmd):
+                        if c == str(req_path):
+                            retry_cmd[i] = str(filtered_path)
+                            break
+                    logger.info("跳过镜像尚未同步的包，安装其余依赖: %s", ", ".join(missing))
+                    if on_progress:
+                        retry_result = _run_pip_streaming(retry_cmd, logger, on_progress)
+                    else:
+                        retry_result = run_hidden(retry_cmd, capture_output=True, text=True)
+                    if retry_result.returncode == 0:
+                        result["success"] = True
+                        result["partial"] = True
+                        result["updated"] = True
+                        result["up_to_date"] = False
+                        retry_stdout = getattr(retry_result, "stdout", "") or ""
+                        try:
+                            import re as _re_retry
+                            for line in retry_stdout.splitlines():
+                                if "Successfully installed" in line:
+                                    tail = line.split("Successfully installed", 1)[1].strip()
+                                    for t in tail.split():
+                                        m = _re_retry.match(
+                                            r"^([A-Za-z0-9_.\-]+)-([0-9][A-Za-z0-9_.+\-]*)$",
+                                            t,
+                                        )
+                                        if m:
+                                            result["installed"].append(f"{m.group(1)}-{m.group(2)}")
+                                        else:
+                                            result["installed"].append(t)
+                                elif "Requirement already satisfied" in line:
+                                    m = _re_retry.search(
+                                        r"Requirement already satisfied:\s*([A-Za-z0-9_.\-]+).*?\(.*?version\s+([A-Za-z0-9_.+\-]+)",
+                                        line,
+                                    )
+                                    if m:
+                                        result["satisfied"].append(f"{m.group(1)}-{m.group(2)}")
+                        except Exception:
+                            pass
+                        logger.info("部分依赖完成安装")
+                    else:
+                        retry_stderr = getattr(retry_result, "stderr", "") or ""
+                        logger.error("跳过未同步包后重试仍失败: %s", retry_stderr[:200])
+                    try:
+                        filtered_path.unlink()
+                    except Exception:
+                        pass
             logger.error(result["error"])
     except Exception as e:
         result["error"] = f"pip requirements 操作异常: {str(e)}"
