@@ -382,133 +382,250 @@ class TestInstallRequirementsFile:
             assert result["success"] is False
             assert "不存在" in result["error"]
 
-    def test_returns_success_on_successful_install(self):
-        """Should return success=True when pip install succeeds."""
+    def test_returns_success_on_successful_install(self, tmp_path):
+        """Should return success=True when every package installs ok."""
         from utils.pip import install_requirements_file
-        
-        mock_result = MagicMock()
-        mock_result.returncode = 0
-        mock_result.stdout = "Successfully installed requests-2.28.0\nInstalling collected packages: requests"
-        mock_result.stderr = ""
-        
-        mock_req_path = MagicMock()
-        mock_req_path.exists.return_value = True
-        mock_req_path.name = "requirements.txt"
-        
-        mock_pip_path = MagicMock()
-        mock_pip_path.exists.return_value = True
-        
-        with patch("utils.pip.Path.resolve") as mock_resolve:
-            mock_resolve.side_effect = [mock_req_path, MagicMock()]
-            with patch("utils.pip.run_hidden", return_value=mock_result):
-                with patch("utils.pip.compute_pip_executable", return_value=mock_pip_path):
-                    result = install_requirements_file("requirements.txt", "python")
-                    assert result["success"] is True
 
-    def test_parses_installed_packages(self):
-        """Should parse installed package names and versions."""
-        from utils.pip import install_requirements_file
-        
-        mock_result = MagicMock()
-        mock_result.returncode = 0
-        mock_result.stdout = "Successfully installed requests-2.28.0 flask-2.0.0"
-        mock_result.stderr = ""
-        
-        mock_req_path = MagicMock()
-        mock_req_path.exists.return_value = True
-        mock_req_path.name = "requirements.txt"
-        
-        mock_pip_path = MagicMock()
-        mock_pip_path.exists.return_value = True
-        
-        with patch("utils.pip.Path.resolve") as mock_resolve:
-            mock_resolve.side_effect = [mock_req_path, MagicMock()]
-            with patch("utils.pip.run_hidden", return_value=mock_result):
-                with patch("utils.pip.compute_pip_executable", return_value=mock_pip_path):
-                    result = install_requirements_file("requirements.txt", "python")
-                    assert "requests-2.28.0" in result["installed"]
-                    assert "flask-2.0.0" in result["installed"]
+        req_file = tmp_path / "requirements.txt"
+        req_file.write_text("requests==2.28.0\nflask==2.0.0", encoding="utf-8")
 
-    def test_parses_satisfied_packages(self):
-        """Should parse already-satisfied packages."""
-        from utils.pip import install_requirements_file
-        
-        mock_result = MagicMock()
-        mock_result.returncode = 0
-        mock_result.stdout = "Requirement already satisfied: requests (2.28.0) (from -r requirements.txt)"
-        mock_result.stderr = ""
-        
-        mock_req_path = MagicMock()
-        mock_req_path.exists.return_value = True
-        mock_req_path.name = "requirements.txt"
-        
-        mock_pip_path = MagicMock()
-        mock_pip_path.exists.return_value = True
-        
-        with patch("utils.pip.Path.resolve") as mock_resolve:
-            mock_resolve.side_effect = [mock_req_path, MagicMock()]
-            with patch("utils.pip.run_hidden", return_value=mock_result):
-                with patch("utils.pip.compute_pip_executable", return_value=mock_pip_path):
-                    result = install_requirements_file("requirements.txt", "python")
-                    assert result["success"] is True
-                    assert len(result["satisfied"]) > 0
+        def fake_install(spec, python_exec, **kwargs):
+            return {
+                "success": True,
+                "updated": True,
+                "up_to_date": False,
+                "version": spec.split("==")[1],
+                "error": None,
+                "error_code": None,
+            }
 
-    def test_returns_error_on_failure(self):
-        """Should return error when pip install fails."""
+        with patch("utils.pip.install_or_update_package", side_effect=fake_install):
+            result = install_requirements_file(str(req_file), "python")
+
+        assert result["success"] is True
+        assert result["partial"] is False
+        assert result["error"] is None
+
+    def test_parses_installed_packages(self, tmp_path):
+        """Should aggregate installed package names and versions from per-package results."""
         from utils.pip import install_requirements_file
-        
-        mock_result = MagicMock()
-        mock_result.returncode = 1
-        mock_result.stdout = ""
-        mock_result.stderr = "ERROR: Could not open requirements file."
-        
-        mock_req_path = MagicMock()
-        mock_req_path.exists.return_value = True
-        mock_req_path.name = "requirements.txt"
-        
-        mock_pip_path = MagicMock()
-        mock_pip_path.exists.return_value = True
-        
-        with patch("utils.pip.Path.resolve") as mock_resolve:
-            mock_resolve.side_effect = [mock_req_path, MagicMock()]
-            with patch("utils.pip.run_hidden", return_value=mock_result):
-                with patch("utils.pip.compute_pip_executable", return_value=mock_pip_path):
-                    result = install_requirements_file("requirements.txt", "python")
-                    assert result["success"] is False
-                    assert "pip requirements 执行失败" in result["error"]
+
+        req_file = tmp_path / "requirements.txt"
+        req_file.write_text("requests==2.28.0\nflask==2.0.0", encoding="utf-8")
+
+        def fake_install(spec, python_exec, **kwargs):
+            ver = spec.split("==")[1]
+            return {
+                "success": True,
+                "updated": True,
+                "up_to_date": False,
+                "version": ver,
+                "error": None,
+                "error_code": None,
+            }
+
+        with patch("utils.pip.install_or_update_package", side_effect=fake_install):
+            result = install_requirements_file(str(req_file), "python")
+
+        assert "requests-2.28.0" in result["installed"]
+        assert "flask-2.0.0" in result["installed"]
+        assert result["installed"][0].startswith("requests-")
+
+    def test_parses_satisfied_packages(self, tmp_path):
+        """Should aggregate already-satisfied packages from per-package results."""
+        from utils.pip import install_requirements_file
+
+        req_file = tmp_path / "requirements.txt"
+        req_file.write_text("requests==2.28.0\nflask==2.0.0", encoding="utf-8")
+
+        def fake_install(spec, python_exec, **kwargs):
+            ver = spec.split("==")[1]
+            return {
+                "success": True,
+                "updated": False,
+                "up_to_date": True,
+                "version": ver,
+                "error": None,
+                "error_code": None,
+            }
+
+        with patch("utils.pip.install_or_update_package", side_effect=fake_install):
+            result = install_requirements_file(str(req_file), "python")
+
+        assert result["success"] is True
+        assert len(result["satisfied"]) == 2
+        assert "requests-2.28.0" in result["satisfied"]
+        assert result["installed"] == []
+
+    def test_returns_error_on_failure(self, tmp_path):
+        """Should return error and failed[] when every package install fails."""
+        from utils.pip import install_requirements_file
+
+        req_file = tmp_path / "requirements.txt"
+        req_file.write_text("badpkg==1.0", encoding="utf-8")
+
+        def fake_install(spec, python_exec, **kwargs):
+            return {
+                "success": False,
+                "updated": False,
+                "up_to_date": False,
+                "version": None,
+                "error": "pip 命令执行失败: ERROR: Could not open requirements file.",
+                "error_code": "PIP_COMMAND_FAILED",
+            }
+
+        with patch("utils.pip.install_or_update_package", side_effect=fake_install):
+            result = install_requirements_file(str(req_file), "python")
+
+        assert result["success"] is False
+        assert len(result["failed"]) == 1
+        assert result["failed"][0]["spec"] == "badpkg==1.0"
+        assert result["error_code"] == "PIP_REQUIREMENTS_COMMAND_FAILED"
 
     def test_handles_exception_gracefully(self):
         """Should return error on exception."""
         from utils.pip import install_requirements_file
-        
+
         with patch("utils.pip.Path.resolve", side_effect=Exception("test error")):
             result = install_requirements_file("requirements.txt", "python")
             assert result["success"] is False
             assert "pip requirements 操作异常" in result["error"]
 
-    def test_uses_index_url_when_provided(self):
-        """Should include -i index_url in command when provided."""
+    def test_uses_index_url_when_provided(self, tmp_path):
+        """Should pass index_url to per-package install calls."""
         from utils.pip import install_requirements_file
-        
-        mock_result = MagicMock()
-        mock_result.returncode = 0
-        mock_result.stdout = "Successfully installed"
-        
-        mock_req_path = MagicMock()
-        mock_req_path.exists.return_value = True
-        mock_req_path.name = "requirements.txt"
-        
-        mock_pip_path = MagicMock()
-        mock_pip_path.exists.return_value = True
-        
-        with patch("utils.pip.Path.resolve") as mock_resolve:
-            mock_resolve.side_effect = [mock_req_path, MagicMock()]
-            with patch("utils.pip.run_hidden", return_value=mock_result) as mock_run:
-                with patch("utils.pip.compute_pip_executable", return_value=mock_pip_path):
-                    install_requirements_file("requirements.txt", "python", index_url="https://pypi.example.com/simple")
-                    call_args = mock_run.call_args[0][0]
-                    assert "-i" in call_args
-                    assert "https://pypi.example.com/simple" in call_args
+
+        req_file = tmp_path / "requirements.txt"
+        req_file.write_text("requests==2.28.0", encoding="utf-8")
+
+        def fake_install(spec, python_exec, **kwargs):
+            return {
+                "success": True,
+                "updated": True,
+                "up_to_date": False,
+                "version": "2.28.0",
+                "error": None,
+                "error_code": None,
+            }
+
+        with patch("utils.pip.install_or_update_package", side_effect=fake_install) as mock_install:
+            install_requirements_file(
+                str(req_file),
+                "python",
+                index_url="https://pypi.example.com/simple",
+            )
+            for call in mock_install.call_args_list:
+                assert call.kwargs.get("index_url") == "https://pypi.example.com/simple"
+
+    def test_per_package_install_continues_after_failure(self, tmp_path):
+        """One package failing must not block the others (key behavior change)."""
+        from utils.pip import install_requirements_file
+
+        req_file = tmp_path / "requirements.txt"
+        req_file.write_text(
+            "comfyui-frontend-package==1.45.15\n"
+            "torch==2.1.0\n"
+            "comfyui-workflow-templates==0.9.98",
+            encoding="utf-8",
+        )
+
+        def fake_install(spec, python_exec, **kwargs):
+            if spec.startswith("comfyui-"):
+                return {
+                    "success": False,
+                    "updated": False,
+                    "up_to_date": False,
+                    "version": None,
+                    "error": "pip 命令执行失败: Could not find a version",
+                    "error_code": "VERSION_NOT_FOUND",
+                }
+            return {
+                "success": True,
+                "updated": True,
+                "up_to_date": False,
+                "version": "2.1.0",
+                "error": None,
+                "error_code": None,
+            }
+
+        with patch("utils.pip.install_or_update_package", side_effect=fake_install):
+            result = install_requirements_file(str(req_file), "python")
+
+        # torch still got installed; the two comfyui-* landed in missing
+        assert result["success"] is True
+        assert result["partial"] is True
+        assert "torch-2.1.0" in result["installed"]
+        assert len(result["missing"]) == 2
+        assert "comfyui-frontend-package==1.45.15" in result["missing"]
+        assert "comfyui-workflow-templates==0.9.98" in result["missing"]
+
+    def test_non_mirror_failure_lands_in_failed(self, tmp_path):
+        """Non-VESION_NOT_FOUND errors should populate failed[] with reason."""
+        from utils.pip import install_requirements_file
+
+        req_file = tmp_path / "requirements.txt"
+        req_file.write_text("torch==2.1.0\nflask==2.0.0", encoding="utf-8")
+
+        def fake_install(spec, python_exec, **kwargs):
+            if spec.startswith("torch"):
+                return {
+                    "success": False,
+                    "updated": False,
+                    "up_to_date": False,
+                    "version": None,
+                    "error": "pip 命令执行失败: Network is unreachable",
+                    "error_code": "PIP_COMMAND_FAILED",
+                }
+            return {
+                "success": True,
+                "updated": True,
+                "up_to_date": False,
+                "version": "2.0.0",
+                "error": None,
+                "error_code": None,
+            }
+
+        with patch("utils.pip.install_or_update_package", side_effect=fake_install):
+            result = install_requirements_file(str(req_file), "python")
+
+        assert result["success"] is True
+        assert result["partial"] is True
+        assert len(result["failed"]) == 1
+        assert result["failed"][0]["spec"] == "torch==2.1.0"
+        assert "Network is unreachable" in result["failed"][0]["reason"]
+        assert result["missing"] == []
+        assert result["error_code"] == "PIP_PARTIAL_FAILURE"
+
+    def test_empty_requirements_file_is_satisfied(self, tmp_path):
+        """An empty/comment-only file should short-circuit to up_to_date."""
+        from utils.pip import install_requirements_file
+
+        req_file = tmp_path / "requirements.txt"
+        req_file.write_text("# nothing here\n\n--index-url https://x\n", encoding="utf-8")
+
+        with patch("utils.pip.install_or_update_package") as mock_install:
+            result = install_requirements_file(str(req_file), "python")
+
+        assert result["success"] is True
+        assert result["up_to_date"] is True
+        mock_install.assert_not_called()
+
+    def test_parse_requirements_skips_comments_and_options(self):
+        """_parse_requirements_file should ignore comments, options, and env markers."""
+        from utils.pip import _parse_requirements_file
+
+        with tempfile.TemporaryDirectory() as tmp:
+            req = Path(tmp) / "r.txt"
+            req.write_text(
+                "# a comment\n"
+                "--extra-index-url https://x\n"
+                "-r other.txt\n"
+                "torch>=2.0 ; python_version < '3.10'\n"
+                "requests==2.28.0\n",
+                encoding="utf-8",
+            )
+            specs = _parse_requirements_file(req)
+        assert specs == ["torch>=2.0", "requests==2.28.0"]
 
 
 class TestParseMissingPackagesFromStderr:
@@ -575,27 +692,30 @@ class TestFilterRequirementsFile:
 class TestInstallRequirementsFileVersionNotFound:
     """install_requirements_file should detect 'version not found' and surface missing packages."""
 
-    def test_returns_version_not_found_with_missing_list(self):
+    def test_returns_version_not_found_with_missing_list(self, tmp_path):
         from utils.pip import install_requirements_file
-        stderr = (
-            "ERROR: Could not find a version that satisfies the requirement "
-            "comfyui-workflow-templates==0.9.98 (from versions: 0.1.0, ... 0.9.92)"
-        )
-        mock_req_path = MagicMock()
-        mock_req_path.exists.return_value = True
-        mock_req_path.name = "requirements.txt"
-        mock_pip_path = MagicMock()
-        mock_pip_path.exists.return_value = True
-        with patch("utils.pip.Path.resolve") as mock_resolve:
-            mock_resolve.side_effect = [mock_req_path, MagicMock()]
-            with patch("utils.pip.run_hidden") as mock_run:
-                fail = MagicMock(returncode=1, stdout="", stderr=stderr)
-                mock_run.return_value = fail
-                with patch("utils.pip.compute_pip_executable", return_value=mock_pip_path):
-                    result = install_requirements_file("requirements.txt", "python")
-        assert result["success"] is False
+        req_file = tmp_path / "requirements.txt"
+        req_file.write_text("comfyui-workflow-templates==0.9.98", encoding="utf-8")
+
+        def fake_install(spec, python_exec, **kwargs):
+            return {
+                "success": False,
+                "updated": False,
+                "up_to_date": False,
+                "version": None,
+                "error": (
+                    "pip 命令执行失败: ERROR: Could not find a version "
+                    "that satisfies the requirement comfyui-workflow-templates==0.9.98"
+                ),
+                "error_code": "VERSION_NOT_FOUND",
+            }
+
+        with patch("utils.pip.install_or_update_package", side_effect=fake_install):
+            result = install_requirements_file(str(req_file), "python")
+
         assert result["error_code"] == "VERSION_NOT_FOUND"
         assert "comfyui-workflow-templates==0.9.98" in result.get("missing", [])
+        assert result["success"] is False
 
     def test_partial_retry_installs_rest_when_some_missing(self, tmp_path):
         from utils.pip import install_requirements_file
@@ -605,24 +725,37 @@ class TestInstallRequirementsFileVersionNotFound:
             "comfyui-workflow-templates==0.9.98",
             encoding="utf-8",
         )
-        stderr_fail = (
-            "ERROR: Could not find a version that satisfies the requirement "
-            "comfyui-workflow-templates==0.9.98 (from versions: 0.1.0, ... 0.9.92)"
-        )
-        fail = MagicMock(returncode=1, stdout="", stderr=stderr_fail)
-        ok = MagicMock(
-            returncode=0,
-            stdout="Successfully installed comfyui-frontend-package-1.43.18",
-            stderr="",
-        )
-        mock_pip_path = MagicMock()
-        mock_pip_path.exists.return_value = True
-        with patch("utils.pip.run_hidden", side_effect=[fail, ok]) as mock_run:
-            with patch("utils.pip.compute_pip_executable", return_value=mock_pip_path):
-                result = install_requirements_file(
-                    str(req_file), "python", upgrade=True
-                )
+
+        def fake_install(spec, python_exec, **kwargs):
+            if spec.startswith("comfyui-workflow-templates"):
+                return {
+                    "success": False,
+                    "updated": False,
+                    "up_to_date": False,
+                    "version": None,
+                    "error": (
+                        "pip 命令执行失败: ERROR: Could not find a version "
+                        "that satisfies the requirement comfyui-workflow-templates==0.9.98"
+                    ),
+                    "error_code": "VERSION_NOT_FOUND",
+                }
+            return {
+                "success": True,
+                "updated": True,
+                "up_to_date": False,
+                "version": "1.43.18",
+                "error": None,
+                "error_code": None,
+            }
+
+        with patch("utils.pip.install_or_update_package", side_effect=fake_install) as mock_install:
+            result = install_requirements_file(
+                str(req_file), "python", upgrade=True
+            )
+
         assert result["success"] is True
+        assert result["partial"] is True
         assert "comfyui-frontend-package-1.43.18" in result.get("installed", [])
         assert "comfyui-workflow-templates==0.9.98" in result.get("missing", [])
-        assert mock_run.call_count == 2
+        # both packages were attempted individually
+        assert mock_install.call_count == 2

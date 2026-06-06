@@ -183,6 +183,92 @@ class TestFormatUpdateSummary:
         # 紧跟着的失败明细必须以 "  - " 开头
         assert lines[count_line + 1].startswith("  - ")
 
+    def test_failed_with_per_item_reason(self):
+        # 非镜像失败：每条 failed 都带自己的 reason，不能一刷全部填充同一个错误
+        summary = _format_update_summary(
+            None,
+            {
+                "success": True,
+                "partial": True,
+                "error_code": "PIP_PARTIAL_FAILURE",
+                "installed": ["torch-2.1.0"],
+                "satisfied": [],
+                "missing": [],
+                "failed": [
+                    {
+                        "spec": "pkg-a==1.0",
+                        "reason": "ERROR: No matching distribution",
+                        "stderr": "long",
+                    },
+                    {
+                        "spec": "pkg-b==2.0",
+                        "reason": "Network is unreachable",
+                        "stderr": "long",
+                    },
+                ],
+            },
+        )
+        # 计数行：1 项更新 + 2 项失败
+        assert "依赖：已满足 0 项，已更新 1 项，失败 2 项" in summary
+        # 每条 failed 都带自己的 reason
+        assert "  - pkg-a==1.0（ERROR: No matching distribution）" in summary
+        assert "  - pkg-b==2.0（Network is unreachable）" in summary
+        # 提示是非镜像类提示
+        assert "非镜像类错误" in summary
+
+    def test_mixed_missing_and_failed(self):
+        # missing + failed 混同：两类都该出现，提示以镜像类为准
+        summary = _format_update_summary(
+            None,
+            {
+                "success": True,
+                "partial": True,
+                "error_code": "PIP_PARTIAL_FAILURE",
+                "installed": ["torch-2.1.0"],
+                "satisfied": ["numpy-1.26.0"],
+                "missing": ["comfyui-frontend-package==1.45.15"],
+                "failed": [
+                    {
+                        "spec": "broken-pkg==0.1",
+                        "reason": "Permission denied",
+                        "stderr": "long",
+                    },
+                ],
+            },
+        )
+        assert "依赖：已满足 1 项，已更新 1 项，失败 2 项" in summary
+        # missing 在前，failed 在后
+        missing_idx = summary.find("comfyui-frontend-package==1.45.15")
+        failed_idx = summary.find("broken-pkg==0.1")
+        assert missing_idx < failed_idx
+        assert "镜像源未同步" in summary
+        # 混合场景下，提示以镜像类为准（if/elif 互斥）
+
+    def test_only_failed_no_missing(self):
+        # 只有 failed 没有 missing：提示只出非镜像类
+        summary = _format_update_summary(
+            None,
+            {
+                "success": False,
+                "error_code": "PIP_REQUIREMENTS_COMMAND_FAILED",
+                "installed": [],
+                "satisfied": [],
+                "missing": [],
+                "failed": [
+                    {
+                        "spec": "x==1",
+                        "reason": "Could not connect to proxy",
+                        "stderr": "long",
+                    }
+                ],
+            },
+        )
+        assert "依赖：已满足 0 项，已更新 0 项，失败 1 项" in summary
+        assert "  - x==1（Could not connect to proxy）" in summary
+        # 不出现镜像提示
+        assert "PyPI 镜像未及时同步" not in summary
+        assert "非镜像类错误" in summary
+
 
 class TestQtAppShutdown:
     """对应 offscreen 模式的"关掉"测试：QApplication 必须能干净 quit。"""

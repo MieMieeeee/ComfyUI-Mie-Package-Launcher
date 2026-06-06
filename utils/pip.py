@@ -139,7 +139,10 @@ def install_or_update_package(
             stderr = getattr(pip_result, "stderr", "") or ""
             result["error"] = f"pip 命令执行失败: {stderr}"
             # 规范化错误码：命令返回非零但未抛异常
-            result["error_code"] = "PIP_COMMAND_FAILED"
+            if "Could not find a version" in stderr:
+                result["error_code"] = "VERSION_NOT_FOUND"
+            else:
+                result["error_code"] = "PIP_COMMAND_FAILED"
             logger.error(result["error"])
     except Exception as e:
         result["error"] = f"pip 操作异常: {str(e)}"
@@ -332,6 +335,54 @@ def _filter_requirements(req_path, missing):
         return req_path
     return filtered
 
+def _parse_requirements_file(req_path) -> List[str]:
+    """Extract package specs from a pip requirements file.
+
+    Skips empty lines, comments (lines starting with ``#`` and inline ``#``),
+    command-line options (``-r``, ``-e``, ``--index-url`` and friends), and
+    strips environment markers (``pkg ; python_version < "3.10"``). The
+    remaining non-empty lines are returned as package specs that can be fed
+    directly to ``pip install <spec>``.
+    """
+    try:
+        text = Path(req_path).read_text(encoding="utf-8")
+    except Exception:
+        return []
+    specs: List[str] = []
+    for raw in text.splitlines():
+        # strip inline comments
+        line = raw.split("#", 1)[0].strip() if "#" in raw else raw.strip()
+        if not line:
+            continue
+        # skip pip options and -r / -e includes
+        if line.startswith("-"):
+            continue
+        # strip environment markers
+        if ";" in line:
+            line = line.split(";", 1)[0].strip()
+        if line:
+            specs.append(line)
+    return specs
+
+
+def _split_name_version(spec: str):
+    """Pull ``(name, version)`` out of a requirement spec.
+
+    For ``comfyui-frontend-package==1.45.15`` returns
+    ``("comfyui-frontend-package", "1.45.15")``; for ``torch>=2.0`` returns
+    ``("torch", ">=2.0")``; for ``requests`` returns ``("requests", "")``.
+    """
+    import re as _re_split
+
+    m = _re_split.match(
+        r"^\s*([A-Za-z0-9_.\-]+)\s*([><=!~].*)?\s*$",
+        spec,
+    )
+    if not m:
+        return spec, ""
+    return m.group(1), (m.group(2) or "").strip()
+
+
 def _retry_install_remaining(
     req_path,
     missing,
@@ -444,142 +495,151 @@ def install_requirements_file(
     logger: Optional[logging.Logger] = None,
     on_progress=None,
 ) -> Dict[str, Any]:
+    """Install each package in the requirements file individually.
+
+    ``pip install -r requirements.txt`` bails out on the first error, so
+    one missing or conflicting package stops the rest from being installed.
+    We instead parse the file and run ``pip install <spec>`` for each
+    package, then aggregate the per-package results. One failure does not
+    block the others.
+
+    Returns a result dict with the same top-level shape as before plus a
+    ``failed`` list of ``{spec, reason, stderr}`` for non-mirror errors::
+
+        {
+            "success": bool,            # all packages installed ok
+            "partial": bool,            # at least one package installed
+            "updated": bool,            # at least one was actually new
+            "up_to_date": bool,         # everything was already satisfied
+            "error": str | None,
+            "error_code": str | None,
+            "installed": ["name-version", ...],
+            "satisfied": ["name-version", ...],
+            "missing": ["pkg==1.0", ...],          # 镜像未同步
+            "failed": [{"spec": ..., "reason": ..., "stderr": ...}, ...],
+        }
+    """
     if logger is None:
         logger = logging.getLogger(__name__)
-    # 保持原有字段不变，新增 error_code 作为规范化错误码（双写迁移）
     result: Dict[str, Any] = {
         "success": False,
+        "partial": False,
         "updated": False,
         "up_to_date": False,
         "error": None,
         "error_code": None,
         "installed": [],
         "satisfied": [],
+        "missing": [],
+        "failed": [],
     }
     try:
         req_path = Path(requirements_file).resolve()
-        python_path = Path(python_exec).resolve()
         if not req_path.exists():
             result["error"] = f"requirements 文件不存在: {str(req_path)}"
             result["error_code"] = "REQUIREMENTS_FILE_NOT_FOUND"
             logger.error(result["error"])
             return result
-        pip_exe = compute_pip_executable(python_path)
-        if pip_exe.exists():
-            cmd = [str(pip_exe), "install"]
-        else:
-            cmd = [str(python_path), "-m", "pip", "install"]
-        cmd.extend(["-r", str(req_path)])
-        if index_url:
-            cmd.extend(["-i", index_url])
-        logger.info(f"执行 pip requirements 安装: {' '.join(cmd)}")
-        if on_progress:
-            pip_result = _run_pip_streaming(cmd, logger, on_progress)
-        else:
-            pip_result = run_hidden(cmd, capture_output=True, text=True)
-        if pip_result.returncode == 0:
-            result["success"] = True
-            stdout = getattr(pip_result, "stdout", "") or ""
-            try:
-                import re as _re
 
-                for line in stdout.splitlines():
-                    if "Successfully installed" in line:
-                        tail = line.split("Successfully installed", 1)[1].strip()
-                        toks = tail.split()
-                        for t in toks:
-                            m = _re.match(
-                                r"^([A-Za-z0-9_.\-]+)-([0-9][A-Za-z0-9_.+\-]*)$", t
-                            )
-                            if m:
-                                name = m.group(1)
-                                ver = m.group(2)
-                                result["installed"].append(f"{name}-{ver}")
-                            else:
-                                result["installed"].append(t)
-                    elif "Requirement already satisfied" in line:
-                        m = _re.search(
-                            r"Requirement already satisfied:\s*([A-Za-z0-9_.\-]+).*?\(.*?version\s+([A-Za-z0-9_.+\-]+)\)",
-                            line,
-                        )
-                        if m:
-                            result["satisfied"].append(f"{m.group(1)}-{m.group(2)}")
-                        else:
-                            m2 = _re.search(
-                                r"Requirement already satisfied:\s*([A-Za-z0-9_.\-]+)",
-                                line,
-                            )
-                            if m2:
-                                result["satisfied"].append(m2.group(1))
-                if result["installed"]:
-                    for item in result["installed"]:
-                        try:
-                            logger.info(f"依赖变更: 安装/更新 {item}")
-                        except Exception:
-                            pass
-                if result["satisfied"]:
-                    try:
-                        logger.info(f"依赖满足: {', '.join(result['satisfied'])}")
-                    except Exception:
-                        pass
-            except Exception:
-                pass
-            result["updated"] = (
-                ("Installing collected packages" in stdout)
-                or ("Successfully installed" in stdout)
-                or ("Successfully upgraded" in stdout)
-            )
-            result["up_to_date"] = (
-                "Requirement already satisfied" in stdout
-            ) and not result["updated"]
-            logger.info(
-                f"requirements 安装完成: {req_path.name}, 更新={result['updated']}, 最新={result['up_to_date']}"
-            )
+        specs = _parse_requirements_file(req_path)
+        if not specs:
+            result["up_to_date"] = True
+            result["success"] = True
+            return result
+
+        logger.info(
+            "开始逐个安装 requirements: %s（共 %d 项）",
+            req_path.name,
+            len(specs),
+        )
+
+        any_new_install = False
+        for spec in specs:
+            name, _ver = _split_name_version(spec)
+            try:
+                pkg_result = install_or_update_package(
+                    spec,
+                    python_exec,
+                    index_url=index_url,
+                    upgrade=upgrade,
+                    logger=logger,
+                )
+            except Exception as e:
+                logger.error("安装 %s 时异常: %s", spec, e)
+                result["failed"].append(
+                    {
+                        "spec": spec,
+                        "reason": f"异常: {e}",
+                        "stderr": str(e),
+                    }
+                )
+                continue
+
+            if pkg_result.get("success"):
+                version = pkg_result.get("version") or ""
+                label = f"{name}-{version}" if version else name
+                if pkg_result.get("up_to_date"):
+                    result["satisfied"].append(label)
+                else:
+                    result["installed"].append(label)
+                    any_new_install = True
+                continue
+
+            err_code = pkg_result.get("error_code")
+            stderr = pkg_result.get("error") or ""
+            if err_code == "VERSION_NOT_FOUND":
+                # 镜像未同步
+                result["missing"].append(spec)
+            else:
+                # 其他错误（网络、权限、冲突...）
+                short = stderr.strip().replace("\r", " ").replace("\n", " ")
+                if len(short) > 200:
+                    short = short[:200] + "…"
+                result["failed"].append(
+                    {
+                        "spec": spec,
+                        "reason": short or "未知错误",
+                        "stderr": stderr,
+                    }
+                )
+
+        # 汇总状态
+        total_failed = len(result["missing"]) + len(result["failed"])
+        if total_failed == 0:
+            result["success"] = True
+            result["up_to_date"] = not any_new_install
+            result["updated"] = any_new_install
         else:
-            stderr = getattr(pip_result, "stderr", "") or ""
-            result["error"] = f"pip requirements 执行失败: {stderr}"
-            result["error_code"] = "PIP_REQUIREMENTS_COMMAND_FAILED"
-            missing = _parse_missing_packages(stderr)
-            if missing:
-                # 包名称或版本在当前镜像上尚未同步
-                result["error_code"] = "VERSION_NOT_FOUND"
-                result["missing"] = list(missing)
-                logger.warning(
-                    "pip 未找到版本: %s",
-                    ", ".join(missing),
-                )
-                # 尝试跳过这些包，尽可能地安装其余依赖
-                retry = _retry_install_remaining(
-                    req_path, list(missing), cmd, logger, on_progress
-                )
-                try:
-                    fp = retry.pop("filtered_path", None)
-                except Exception:
-                    fp = None
-                if retry.get("installed"):
-                    result["installed"].extend(retry["installed"])
-                if retry.get("satisfied"):
-                    result["satisfied"].extend(retry["satisfied"])
-                if retry.get("success"):
-                    result["success"] = True
-                    result["partial"] = True
-                    result["updated"] = True
-                    result["up_to_date"] = False
-                    # 部分成功\uff1a清除原始 error\uff0c让 summary 能根据 success 判断
-                    result["error"] = None
+            # 至少部分成功
+            if result["installed"] or result["satisfied"]:
+                result["partial"] = True
+                result["success"] = True
+                result["updated"] = any_new_install
+                if result["missing"] and not result["failed"]:
                     result["error_code"] = "VERSION_NOT_FOUND"
-                elif retry.get("error"):
-                    # 重试仍失败\uff1a保留原 error\uff0c并记录 retry 的 stderr
-                    logger.error(
-                        "跳过包重试仍失败: %s",
-                        (retry["error"] or "")[:200],
+                elif result["failed"] and not result["missing"]:
+                    result["error_code"] = "PIP_PARTIAL_FAILURE"
+                else:
+                    result["error_code"] = "PIP_PARTIAL_FAILURE"
+            else:
+                result["success"] = False
+                if result["missing"]:
+                    result["error_code"] = "VERSION_NOT_FOUND"
+                    result["error"] = (
+                        f"{len(result['missing'])} 个包未找到版本"
                     )
-                if fp:
-                    try:
-                        fp.unlink()
-                    except Exception:
-                        pass
-            logger.error(result["error"])
+                else:
+                    result["error_code"] = "PIP_REQUIREMENTS_COMMAND_FAILED"
+                    result["error"] = (
+                        f"{len(result['failed'])} 个包安装失败"
+                    )
+        logger.info(
+            "requirements 安装汇总 %s: 安装 %d / 满足 %d / 失败 %d",
+            req_path.name,
+            len(result["installed"]),
+            len(result["satisfied"]),
+            total_failed,
+        )
     except Exception as e:
         result["error"] = f"pip requirements 操作异常: {str(e)}"
         result["error_code"] = "PIP_REQUIREMENTS_OPERATION_EXCEPTION"

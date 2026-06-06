@@ -643,44 +643,55 @@ def _format_update_summary(core_res, req_res):
                 lines.append(f"内核：更新流程完成{suffix}")
     if isinstance(req_res, dict):
         missing = req_res.get("missing") or []
+        failed = req_res.get("failed") or []
         installed = req_res.get("installed") or []
         satisfied = req_res.get("satisfied") or []
+        # missing = 镜像未同步（VERSION_NOT_FOUND）类
+        # failed  = 其他错误（网络、权限、冲突...）类，每条自带 reason
         is_mirror_issue = req_res.get("error_code") == "VERSION_NOT_FOUND" and bool(missing)
         generic_err = str(req_res.get("error") or "").strip().replace("\r", " ").replace("\n", " ")
         if len(generic_err) > 200:
             generic_err = generic_err[:200] + "…"
+        total_failures = len(missing) + len(failed)
 
-        if installed or satisfied or missing:
+        if installed or satisfied or total_failures:
             # 一行三项计数
             counts = (
                 f"依赖：已满足 {len(satisfied)} 项，"
                 f"已更新 {len(installed)} 项，"
-                f"失败 {len(missing)} 项"
+                f"失败 {total_failures} 项"
             )
             lines.append(counts)
             # 失败明细：作为子项缩进挂在计数行下
+            # 镜像未同步在前，其他错误在后，每条都带自己的原因
+            detail_lines = []
             for pkg in missing[:5]:
-                if is_mirror_issue:
-                    reason = "镜像源未同步"
-                elif generic_err:
-                    reason = generic_err
-                else:
-                    reason = "未知原因"
-                lines.append(f"  - {pkg}（{reason}）")
-            if len(missing) > 5:
-                lines.append(f"  - ... 等 {len(missing)} 个")
+                detail_lines.append(f"  - {pkg}（镜像源未同步）")
+            for item in failed[: max(0, 5 - len(missing))]:
+                spec = item.get("spec") if isinstance(item, dict) else str(item)
+                reason = (item.get("reason") if isinstance(item, dict) else None) or generic_err or "未知原因"
+                detail_lines.append(f"  - {spec}（{reason}）")
+            lines.extend(detail_lines)
+            remaining = total_failures - len(detail_lines)
+            if remaining > 0:
+                lines.append(f"  - ... 等 {total_failures} 个")
             # 提示：仅在有失败时出现，且只挑出与失败原因匹配的指引
             if is_mirror_issue:
                 lines.append(
                     "提示：未同步的包可能 PyPI 镜像未及时同步，"
                     "可稍后重试或在 设置 → PyPI 镜像 中切换 PyPI 官方源。"
                 )
+            elif failed and not missing:
+                lines.append(
+                    "提示：依赖中存在非镜像类错误，可稍后重试，"
+                    "或在 设置 → PyPI 镜像 中切换其他镜像源后再试。"
+                )
             elif generic_err and not is_mirror_issue:
                 lines.append(
                     "提示：可稍后重试，或在 设置 → PyPI 镜像 中切换其他镜像源。"
                 )
         elif generic_err:
-            # 既没有 installed/satisfied 也没有 missing，但有 error
+            # 既没有 installed/satisfied 也没有 missing/failed，但有 error
             lines.append(
                 f"依赖：已满足 0 项，已更新 0 项，失败 1 项"
             )
