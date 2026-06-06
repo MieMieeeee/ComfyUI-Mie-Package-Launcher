@@ -332,6 +332,110 @@ def _filter_requirements(req_path, missing):
         return req_path
     return filtered
 
+def _retry_install_remaining(
+    req_path,
+    missing,
+    original_cmd,
+    logger,
+    on_progress=None,
+):
+    """Skip the packages that pip could not find and install the rest.
+
+    Independent of ``install_requirements_file`` so callers (and tests) can
+    exercise the partial-retry path on its own. Returns a dict with the
+    same shape as ``install_requirements_file``'s result, plus a
+    ``partial`` flag.
+
+    The caller is responsible for unlinking the temporary filtered
+    requirements file (this function returns the path so the caller can
+    clean up after merging the result).
+    """
+    if logger is None:
+        logger = logging.getLogger(__name__)
+    out = {
+        "success": False,
+        "partial": False,
+        "updated": False,
+        "up_to_date": False,
+        "error": None,
+        "error_code": None,
+        "installed": [],
+        "satisfied": [],
+        "missing": list(missing),
+        "filtered_path": None,
+    }
+    try:
+        filtered_path = _filter_requirements(req_path, set(missing))
+    except Exception as e:
+        logger.error("\u8fc7\u6ee4 requirements \u5931\u8d25: %s", e)
+        out["error"] = f"\u8fc7\u6ee4 requirements \u5931\u8d25: {e}"
+        out["error_code"] = "PIP_FILTER_FAILED"
+        return out
+    if filtered_path == req_path:
+        out["filtered_path"] = None
+        return out
+    out["filtered_path"] = filtered_path
+    retry_cmd = list(original_cmd)
+    for i, c in enumerate(retry_cmd):
+        if c == str(req_path):
+            retry_cmd[i] = str(filtered_path)
+            break
+    logger.info(
+        "\u8df3\u8fc7\u955c\u50cf\u5c1a\u672a\u540c\u6b65\u7684\u5305\uff0c\u5b89\u88c5\u5176\u4f59\u4f9d\u8d56: %s",
+        ", ".join(missing),
+    )
+    if on_progress:
+        retry_result = _run_pip_streaming(retry_cmd, logger, on_progress)
+    else:
+        retry_result = run_hidden(retry_cmd, capture_output=True, text=True)
+    if retry_result.returncode == 0:
+        out["success"] = True
+        out["partial"] = True
+        out["updated"] = True
+        out["up_to_date"] = False
+        retry_stdout = getattr(retry_result, "stdout", "") or ""
+        try:
+            import re as _re_retry
+            for line in retry_stdout.splitlines():
+                if "Successfully installed" in line:
+                    tail = line.split("Successfully installed", 1)[1].strip()
+                    for t in tail.split():
+                        m = _re_retry.match(
+                            r"^([A-Za-z0-9_.\-]+)-([0-9][A-Za-z0-9_.+\-]*)$",
+                            t,
+                        )
+                        if m:
+                            out["installed"].append(f"{m.group(1)}-{m.group(2)}")
+                        else:
+                            out["installed"].append(t)
+                elif "Requirement already satisfied" in line:
+                    m = _re_retry.search(
+                        r"Requirement already satisfied:\s*"
+                        r"([A-Za-z0-9_.\-]+).*?"
+                        r"\(.*?version\s+([A-Za-z0-9_.+\-]+)",
+                        line,
+                    )
+                    if m:
+                        out["satisfied"].append(
+                            f"{m.group(1)}-{m.group(2)}"
+                        )
+        except Exception:
+            pass
+        logger.info(
+            "\u90e8\u5206\u4f9d\u8d56\u5b8c\u6210\u5b89\u88c5\uff08\u8df3\u8fc7\u7684\u5305: %s\uff09",
+            ", ".join(missing),
+        )
+    else:
+        retry_stderr = getattr(retry_result, "stderr", "") or ""
+        out["error"] = (
+            f"\u8df3\u8fc7\u672a\u540c\u6b65\u5305\u540e\u91cd\u8bd5\u4ecd\u5931\u8d25: {retry_stderr[:200]}"
+        )
+        out["error_code"] = "PIP_REQUIREMENTS_COMMAND_FAILED"
+        logger.error(out["error"])
+    return out
+
+
+
 def install_requirements_file(
     requirements_file: Union[str, Path],
     python_exec: Union[str, Path],
@@ -444,57 +548,35 @@ def install_requirements_file(
                     "pip 未找到版本: %s",
                     ", ".join(missing),
                 )
+                # 尝试跳过这些包，尽可能地安装其余依赖
+                retry = _retry_install_remaining(
+                    req_path, list(missing), cmd, logger, on_progress
+                )
                 try:
-                    filtered_path = _filter_requirements(req_path, set(missing))
-                except Exception as e:
-                    logger.error("过滤 requirements 失败: %s", e)
-                    filtered_path = req_path
-                if filtered_path != req_path:
-                    retry_cmd = list(cmd)
-                    for i, c in enumerate(retry_cmd):
-                        if c == str(req_path):
-                            retry_cmd[i] = str(filtered_path)
-                            break
-                    logger.info("跳过镜像尚未同步的包，安装其余依赖: %s", ", ".join(missing))
-                    if on_progress:
-                        retry_result = _run_pip_streaming(retry_cmd, logger, on_progress)
-                    else:
-                        retry_result = run_hidden(retry_cmd, capture_output=True, text=True)
-                    if retry_result.returncode == 0:
-                        result["success"] = True
-                        result["partial"] = True
-                        result["updated"] = True
-                        result["up_to_date"] = False
-                        retry_stdout = getattr(retry_result, "stdout", "") or ""
-                        try:
-                            import re as _re_retry
-                            for line in retry_stdout.splitlines():
-                                if "Successfully installed" in line:
-                                    tail = line.split("Successfully installed", 1)[1].strip()
-                                    for t in tail.split():
-                                        m = _re_retry.match(
-                                            r"^([A-Za-z0-9_.\-]+)-([0-9][A-Za-z0-9_.+\-]*)$",
-                                            t,
-                                        )
-                                        if m:
-                                            result["installed"].append(f"{m.group(1)}-{m.group(2)}")
-                                        else:
-                                            result["installed"].append(t)
-                                elif "Requirement already satisfied" in line:
-                                    m = _re_retry.search(
-                                        r"Requirement already satisfied:\s*([A-Za-z0-9_.\-]+).*?\(.*?version\s+([A-Za-z0-9_.+\-]+)",
-                                        line,
-                                    )
-                                    if m:
-                                        result["satisfied"].append(f"{m.group(1)}-{m.group(2)}")
-                        except Exception:
-                            pass
-                        logger.info("部分依赖完成安装")
-                    else:
-                        retry_stderr = getattr(retry_result, "stderr", "") or ""
-                        logger.error("跳过未同步包后重试仍失败: %s", retry_stderr[:200])
+                    fp = retry.pop("filtered_path", None)
+                except Exception:
+                    fp = None
+                if retry.get("installed"):
+                    result["installed"].extend(retry["installed"])
+                if retry.get("satisfied"):
+                    result["satisfied"].extend(retry["satisfied"])
+                if retry.get("success"):
+                    result["success"] = True
+                    result["partial"] = True
+                    result["updated"] = True
+                    result["up_to_date"] = False
+                    # 部分成功\uff1a清除原始 error\uff0c让 summary 能根据 success 判断
+                    result["error"] = None
+                    result["error_code"] = "VERSION_NOT_FOUND"
+                elif retry.get("error"):
+                    # 重试仍失败\uff1a保留原 error\uff0c并记录 retry 的 stderr
+                    logger.error(
+                        "跳过包重试仍失败: %s",
+                        (retry["error"] or "")[:200],
+                    )
+                if fp:
                     try:
-                        filtered_path.unlink()
+                        fp.unlink()
                     except Exception:
                         pass
             logger.error(result["error"])

@@ -614,8 +614,8 @@ from ui_qt.widgets.custom import CircleAvatar, NoWheelComboBox
 def _format_update_summary(core_res, req_res):
     """Format the update result into a user-facing summary.
 
-    Surfaces pip VERSION_NOT_FOUND by listing the missing packages and
-    adding a mirror-sync hint so users know what to try next.
+    Always surfaces three counts: 安装成功 / 已满足 / 失败，
+    and explains the failure reason (mirror not synced vs. other error).
     """
     lines = []
     if isinstance(core_res, dict):
@@ -641,47 +641,49 @@ def _format_update_summary(core_res, req_res):
                 lines.append(f"内核：更新流程完成{suffix}")
     if isinstance(req_res, dict):
         missing = req_res.get("missing") or []
-        if req_res.get("error"):
-            err = str(req_res.get("error") or "")
-            err = err.strip().replace("\r", " ").replace("\n", " ")
-            if len(err) > 200:
-                err = err[:200] + "…"
-            if missing:
-                hint_pkg = "，".join(missing[:3]) + (" 等" if len(missing) > 3 else "")
+        installed = req_res.get("installed") or []
+        satisfied = req_res.get("satisfied") or []
+        is_success = req_res.get("success") is True
+        err = str(req_res.get("error") or "").strip().replace("\r", " ").replace("\n", " ")
+        if len(err) > 200:
+            err = err[:200] + "…"
+
+        if missing:
+            hint_pkg = "，".join(missing[:3]) + (" 等" if len(missing) > 3 else "")
+            if is_success or installed or satisfied:
+                # 部分成功：明示成功/已满足/未同步三项计数
                 lines.append(
-                    f"依赖：镜像源尚未同步 {len(missing)} 个包（{hint_pkg}）"
+                    f"依赖：安装成功 {len(installed)} 项，已满足 {len(satisfied)} 项，"
+                    f"{len(missing)} 个未同步（{hint_pkg}）"
                 )
                 lines.append(
-                    "提示：可能是 PyPI 镜像未及时同步，可在 设置 → PyPI 镜像 中切换官方源后重试。"
-                )
-                installed = req_res.get("installed") or []
-                satisfied = req_res.get("satisfied") or []
-                if installed or satisfied:
-                    lines.append(
-                        f"其余依赖已完成（变更 {len(installed)} 项，已满足 {len(satisfied)} 项）"
-                    )
-            else:
-                lines.append(
-                    f"依赖：更新失败（{err}）"
-                    if err
-                    else "依赖：更新失败"
-                )
-        elif req_res.get("updated") is True:
-            installed = req_res.get("installed") or []
-            satisfied = req_res.get("satisfied") or []
-            if missing:
-                hint_pkg = "，".join(missing[:3]) + (" 等" if len(missing) > 3 else "")
-                lines.append(
-                    f"依赖：部分同步（变更 {len(installed)} 项，已满足 {len(satisfied)} 项，镜像未同步 {len(missing)} 个：{hint_pkg}）"
-                )
-                lines.append(
-                    "提示：未同步的包可稍后重试，或在设置中切换 PyPI 镜像源。"
+                    "提示：未同步的包可能 PyPI 镜像未及时同步，可稍后重试或"
+                    "在 设置 → PyPI 镜像 中切换 PyPI 官方源。"
                 )
             else:
+                # 整体失败，但能定位到镜像未同步
                 lines.append(
-                    f"依赖：已同步（变更 {len(installed)} 项，已满足 {len(satisfied)} 项）"
+                    f"依赖：{len(missing)} 个未同步（{hint_pkg}）"
                 )
-        elif req_res.get("updated") is False and req_res.get("summary"):
+                if err:
+                    lines.append(f"原因：{err}")
+                lines.append(
+                    "提示：可能是 PyPI 镜像未及时同步，"
+                    "可在 设置 → PyPI 镜像 中切换官方源后重试。"
+                )
+        elif is_success:
+            # 全部成功
+            lines.append(
+                f"依赖：安装成功 {len(installed)} 项，已满足 {len(satisfied)} 项"
+            )
+        elif err:
+            # 失败原因未知（如网络问题），不是镜像未同步
+            lines.append(
+                f"依赖：安装成功 0 项，已满足 0 项，失败 1 项"
+            )
+            lines.append(f"原因：{err}")
+        elif req_res.get("summary"):
+            # 没有 requirements 需要更新
             lines.append("依赖：已是最新")
     return "\n".join(lines).strip() or "更新流程完成"
 
