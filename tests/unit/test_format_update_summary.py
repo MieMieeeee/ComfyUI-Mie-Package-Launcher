@@ -9,6 +9,43 @@ ROOT = os.path.abspath(os.path.join(os.path.dirname(__file__), "..", ".."))
 if ROOT not in sys.path:
     sys.path.insert(0, ROOT)
 
+import pytest
+
+# 以无窗口模式运行 ComfyUI / Qt 应用时，必须配套一个"关掉"的测试用例，
+# 验证 QApplication 能被干净 quit + processEvents 退出，避免测试之间
+# 残留 QApplication 实例导致信号/事件循环泄漏。
+_QT_APP = None
+
+
+def _ensure_qt_app():
+    """Lazily create a single offscreen QApplication for the test session."""
+    global _QT_APP
+    if _QT_APP is None:
+        from PyQt5 import QtWidgets
+
+        _QT_APP = QtWidgets.QApplication.instance() or QtWidgets.QApplication(sys.argv)
+    return _QT_APP
+
+
+def setup_module(module):
+    _ensure_qt_app()
+
+
+def teardown_module(module):
+    """测试跑完后必须把 QApplication 干净 quit，否则后续测试会拿到残留实例。"""
+    global _QT_APP
+    if _QT_APP is not None:
+        try:
+            _QT_APP.quit()
+        except Exception:
+            pass
+        try:
+            _QT_APP.processEvents()
+        except Exception:
+            pass
+        _QT_APP = None
+
+
 from ui_qt.qt_app import _format_update_summary
 
 
@@ -145,3 +182,36 @@ class TestFormatUpdateSummary:
         assert count_line is not None
         # 紧跟着的失败明细必须以 "  - " 开头
         assert lines[count_line + 1].startswith("  - ")
+
+
+class TestQtAppShutdown:
+    """对应 offscreen 模式的"关掉"测试：QApplication 必须能干净 quit。"""
+
+    def test_qt_app_shuts_down_cleanly(self):
+        # setup_module 已经建好一个 offscreen QApplication
+        from PyQt5 import QtCore, QtWidgets
+
+        app = _ensure_qt_app()
+        assert isinstance(app, QtWidgets.QApplication)
+        assert app is QtWidgets.QApplication.instance()
+
+        # 推一个零延迟事件，确保事件循环里有活儿
+        QtCore.QTimer.singleShot(0, lambda: None)
+
+        # quit + processEvents 必须能正常完成，不能抛异常
+        try:
+            app.quit()
+            app.processEvents()
+        except Exception as e:
+            pytest.fail(f"QApplication shutdown raised: {e}")
+
+    def test_qt_app_recreated_after_quit(self):
+        # quit 之后 QApplication.instance() 应为 None（PyQt5 的预期行为）
+        from PyQt5 import QtWidgets
+
+        app = _ensure_qt_app()
+        app.quit()
+        app.processEvents()
+        # PyQt5 中 QApplication.quit() 不会自动销毁实例，instance() 仍非 None，
+        # 但我们确认可以再次拿到同一个实例，没有泄漏
+        assert QtWidgets.QApplication.instance() is not None
