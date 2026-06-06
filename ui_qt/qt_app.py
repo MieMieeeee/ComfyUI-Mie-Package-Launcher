@@ -700,6 +700,34 @@ def _format_update_summary(core_res, req_res):
             lines.append("依赖：已是最新")
     return "\n".join(lines).strip() or "更新流程完成"
 
+def _confirm_deps_or_warn(parent, auto_update_deps_var) -> bool:
+    """点击更新时检查用户是否勾选了“同时更新依赖库”。
+    如果没勾，弹出提醒，让用户选择是否继续。返回 True 代表继续，False 代表取消。
+
+    仅更新内核不更新依赖库可能造成 ComfyUI 启动后闪退或界面问题，所以这里加上一道确认。
+    """
+    try:
+        deps_enabled = bool(auto_update_deps_var.get())
+    except Exception:
+        # 读不出来时默认以“勾选了依赖”看待，不该拦住用户
+        return True
+    if deps_enabled:
+        return True
+    try:
+        from ui_qt.widgets.dialog_helper import DialogHelper
+        return DialogHelper.show_confirmation(
+            parent,
+            "未勾选“同时更新依赖库”",
+            "如果仅更新 ComfyUI 内核，可能会导致闪退或界面问题，"
+            "建议勾选“同时更新依赖库”。\n\n是否仍要继续？",
+            yes_text="继续更新",
+            no_text="取消",
+        )
+    except Exception:
+        # 对话框出问题不能拦住用户，让他们能继续点“更新”
+        return True
+
+
 class PyQtLauncher(QtWidgets.QMainWindow, process_events.ProcessCallback):
     def __init__(self):
         # 高分屏适配已在 comfyui_launcher_pyqt.py 中完成（必须在 QApplication 创建之前）
@@ -2812,6 +2840,26 @@ class PyQtLauncher(QtWidgets.QMainWindow, process_events.ProcessCallback):
             self._update_running = True
         except Exception:
             pass
+
+        # 如果用户没有勾选“同时更新依赖库”，提醒他一下并让他决定是否继续。
+        # 他选择取消时要恢复按钮状态并返回，不走下面的流程。
+        try:
+            deps_var = getattr(self, "auto_update_deps_var", None)
+            if deps_var is not None and not _confirm_deps_or_warn(self, deps_var):
+                try:
+                    self._update_running = False
+                except Exception:
+                    pass
+                if on_done:
+                    try:
+                        on_done()
+                    except Exception:
+                        pass
+                return
+        except Exception:
+            # 检查本身出问题不能拦住用户
+            pass
+
         try:
             import threading
         except Exception:
