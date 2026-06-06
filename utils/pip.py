@@ -580,8 +580,8 @@ def install_requirements_file(
                 status = f"正在更新依赖 {_idx}/{_total}：{_spec}{tail}".strip()
                 on_progress(status, _pct)
 
-            # 每进入一个包，先报一次“开始处理”，确保进度不会卡在某个包里
-            _pkg_progress("准备安装包代理检查…")
+            # 每进入一个包，先报一次“开始安装”，确保进度不会卡在某个包里
+            _pkg_progress("开始安装…")
 
             try:
                 pkg_result = install_or_update_package(
