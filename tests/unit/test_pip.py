@@ -803,6 +803,174 @@ class TestInstallRequirementsFileFrozen:
         assert any(f["name"] == "triton" for f in result["frozen"])
 
 
+class TestInstallRequirementsFileUnversioned:
+    """install_requirements_file must short-circuit unversioned specs that
+    are already installed.
+
+    Rationale: for a bare spec like ``scipy`` (no ``==X.Y.Z``), the user has
+    not pinned a version, so the only thing the launcher can do is
+    ``pip install -U`` to chase the latest.  That is rarely what we want:
+    it forces a network round-trip and may break other packages.  When
+    scipy is already on the system, treating it as satisfied is the right
+    default.
+
+    Version-pinned specs (``==X.Y.Z``) must keep the existing behavior:
+    we still call pip so the pin is enforced.
+    """
+
+    def test_unversioned_already_installed_skips_pip(self, tmp_path):
+        """scipy is on the system -> satisfied, no pip install -U."""
+        from utils.pip import install_requirements_file
+
+        req_file = tmp_path / "requirements.txt"
+        req_file.write_text("scipy\n", encoding="utf-8")
+
+        with patch(
+            "utils.pip.get_package_version", return_value="1.11.4"
+        ) as mock_show, patch(
+            "utils.pip.install_or_update_package"
+        ) as mock_install:
+            result = install_requirements_file(str(req_file), "python")
+
+        # pip show was called once for scipy; pip install was NOT called.
+        mock_show.assert_called_once()
+        args, _ = mock_show.call_args
+        assert args[0] == "scipy"
+        mock_install.assert_not_called()
+
+        # The package lands in satisfied with the actual installed version.
+        assert result["success"] is True
+        assert result["up_to_date"] is True
+        assert result["installed"] == []
+        assert "scipy-1.11.4" in result["satisfied"]
+        assert result["missing"] == []
+        assert result["failed"] == []
+        assert result["frozen"] == []
+
+    def test_unversioned_missing_falls_through_to_pip(self, tmp_path):
+        """Unversioned + not installed -> still call pip install."""
+        from utils.pip import install_requirements_file
+
+        req_file = tmp_path / "requirements.txt"
+        req_file.write_text("scipy\n", encoding="utf-8")
+
+        with patch(
+            "utils.pip.get_package_version", return_value=None
+        ) as mock_show, patch(
+            "utils.pip.install_or_update_package"
+        ) as mock_install:
+            mock_install.return_value = {
+                "success": True,
+                "updated": True,
+                "up_to_date": False,
+                "version": "1.13.0",
+                "error": None,
+                "error_code": None,
+            }
+            result = install_requirements_file(str(req_file), "python")
+
+        mock_show.assert_called_once()
+        mock_install.assert_called_once()
+        # It was installed, not skipped.
+        assert "scipy-1.13.0" in result["installed"]
+
+    def test_versioned_spec_still_calls_pip_even_if_installed(self, tmp_path):
+        """A pinned spec must always call pip - we cannot assume
+        the installed version matches the pin."""
+        from utils.pip import install_requirements_file
+
+        req_file = tmp_path / "requirements.txt"
+        req_file.write_text("scipy==1.11.4\n", encoding="utf-8")
+
+        with patch(
+            "utils.pip.get_package_version", return_value="1.11.0"
+        ) as mock_show, patch(
+            "utils.pip.install_or_update_package"
+        ) as mock_install:
+            mock_install.return_value = {
+                "success": True,
+                "updated": True,
+                "up_to_date": False,
+                "version": "1.11.4",
+                "error": None,
+                "error_code": None,
+            }
+            result = install_requirements_file(str(req_file), "python")
+
+        # pip show is NOT consulted for a versioned spec.
+        mock_show.assert_not_called()
+        # pip install IS called so the pin is enforced.
+        mock_install.assert_called_once()
+        assert "scipy-1.11.4" in result["installed"]
+
+    def test_unversioned_with_frozen_takes_frozen_path(self, tmp_path):
+        """Frozen has priority over the unversioned short-circuit."""
+        from utils.pip import install_requirements_file
+
+        req_file = tmp_path / "requirements.txt"
+        req_file.write_text("torch\n", encoding="utf-8")
+
+        with patch(
+            "utils.pip.get_package_version", return_value="2.1.0"
+        ) as mock_show, patch(
+            "utils.pip.install_or_update_package"
+        ) as mock_install:
+            result = install_requirements_file(
+                str(req_file),
+                "python",
+                ignore_pkgs=("torch",),
+            )
+
+        # Neither pip show nor pip install was called: torch went into
+        # the frozen bucket before either short-circuit could run.
+        mock_show.assert_not_called()
+        mock_install.assert_not_called()
+        assert any(f["name"] == "torch" for f in result["frozen"])
+        # Not in satisfied - frozen is its own bucket.
+        assert not any(s.startswith("torch-") for s in result["satisfied"])
+
+    def test_mixed_versioned_and_unversioned_specs(self, tmp_path):
+        """A file mixing pinned and bare specs: only the bare ones get
+        the short-circuit when they are already installed."""
+        from utils.pip import install_requirements_file
+
+        req_file = tmp_path / "requirements.txt"
+        req_file.write_text(
+            "scipy\n"
+            "requests==2.28.0\n"
+            "flask\n",
+            encoding="utf-8",
+        )
+
+        def fake_show(name, python_exec, *args, **kwargs):
+            return {"scipy": "1.11.4", "flask": "3.0.0"}.get(name)
+
+        with patch(
+            "utils.pip.get_package_version", side_effect=fake_show
+        ) as mock_show, patch(
+            "utils.pip.install_or_update_package"
+        ) as mock_install:
+            mock_install.return_value = {
+                "success": True,
+                "updated": True,
+                "up_to_date": False,
+                "version": "2.28.0",
+                "error": None,
+                "error_code": None,
+            }
+            result = install_requirements_file(str(req_file), "python")
+
+        # pip show was called for the two unversioned specs only.
+        queried = sorted(call.args[0] for call in mock_show.call_args_list)
+        assert queried == ["flask", "scipy"]
+        # pip install was called for the version-pinned spec only.
+        called_specs = [c.args[0] for c in mock_install.call_args_list]
+        assert called_specs == ["requests==2.28.0"]
+        # scipy + flask land in satisfied; requests lands in installed.
+        assert "scipy-1.11.4" in result["satisfied"]
+        assert "flask-3.0.0" in result["satisfied"]
+        assert "requests-2.28.0" in result["installed"]
+        assert result["success"] is True
 class TestParseMissingPackagesFromStderr:
     """_parse_missing_packages should pull 'version not found' packages out of pip stderr."""
 

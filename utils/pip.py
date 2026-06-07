@@ -622,6 +622,28 @@ def install_requirements_file(
                 status = f"正在更新依赖 {_idx}/{_total}：{_spec}{tail}".strip()
                 on_progress(status, _pct)
 
+            # 无版本要求的 spec（如 scipy）：本地已安装就直接记入 satisfied，
+            # 不再走 pip install -U。这能省掉一次 pip 解析 / 下载 / 构建开销。
+            # 有版本锁定（==X.Y.Z）的 spec 仍按原逻辑走，避免覆盖用户预期。
+            if not _ver:
+                try:
+                    current_ver = get_package_version(name, python_exec, logger)
+                except Exception:
+                    current_ver = None
+                if current_ver:
+                    _pkg_progress(f"已安装 {current_ver}，跳过安装")
+                    result["satisfied"].append(f"{name}-{current_ver}")
+                    try:
+                        logger.info(
+                            "跳过无版本要求的依赖 %s（本地已安装 %s）",
+                            name,
+                            current_ver,
+                        )
+                    except Exception:
+                        pass
+                    continue
+                # 本地没有该包，下面继续走正常安装流程
+
             # 每进入一个包，先报一次“开始安装”，确保进度不会卡在某个包里
             _pkg_progress("开始安装…")
 
