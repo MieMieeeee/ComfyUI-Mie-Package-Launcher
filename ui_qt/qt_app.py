@@ -665,12 +665,18 @@ def _format_update_summary(core_res, req_res):
                 f"跳过 {len(frozen)} 项"
             )
             lines.append(counts)
-            # 黑名单明细：缩进子项挂在计数行下，只列名字不列原因（跳过是预期行为）
-            for item in frozen[:5]:
-                name = item.get("name") if isinstance(item, dict) else str(item)
-                lines.append(f"  - {name} (已跳过，需手动管理)")
-            if len(frozen) > 5:
-                lines.append(f"  - ... 等 {len(frozen)} 个")
+            # 黑名单明细：单行紧凑呈现。每条一行 "- name (已跳过)" 占太多竖向空间，
+            # 改为 "自动跳过（无需操作）：name1, name2, ..."。超过 6 个则折叠为“等 N 项”。
+            if frozen:
+                names = [
+                    item.get("name") if isinstance(item, dict) else str(item)
+                    for item in frozen
+                ]
+                if len(names) <= 6:
+                    lines.append(f"  自动跳过（无需操作）：{", ".join(names)}")
+                else:
+                    head = ", ".join(names[:6])
+                    lines.append(f"  自动跳过（无需操作）：{head} 等 {len(names)} 项")
             # 失败明细：作为子项缩进挂在计数行下
             # 镜像未同步在前，其他错误在后，每条都带自己的原因
             detail_lines = []
@@ -681,9 +687,10 @@ def _format_update_summary(core_res, req_res):
                 reason = (item.get("reason") if isinstance(item, dict) else None) or generic_err or "未知原因"
                 detail_lines.append(f"  - {spec}（{reason}）")
             lines.extend(detail_lines)
-            remaining = total_failures - len(detail_lines)
-            if remaining > 0:
-                lines.append(f"  - ... 等 {total_failures} 个")
+            # 修复原本的“等 N 个”数学 bug：用剩余数而不是总数
+            remaining_failures = total_failures - len(detail_lines)
+            if remaining_failures > 0:
+                lines.append(f"  - ... 等 {remaining_failures} 个")
             # 提示：仅在有失败时出现，且只挑出与失败原因匹配的指引
             if is_mirror_issue:
                 lines.append(
@@ -3069,10 +3076,12 @@ class PyQtLauncher(QtWidgets.QMainWindow, process_events.ProcessCallback):
                     try:
                         from ui_qt.widgets.dialog_helper import DialogHelper
 
+                        # 更新摘要可能包含黑名单 / 失败 / 提示，
+                        # 需要足够宽度让“自动跳过”单行能容下多个包名。
                         if isinstance(core_res, dict) and core_res.get("error"):
-                            DialogHelper.show_warning(self, "更新失败", summary)
+                            DialogHelper.show_warning(self, "更新失败", summary, min_width=600)
                         else:
-                            DialogHelper.show_info(self, "更新完成", summary)
+                            DialogHelper.show_info(self, "更新完成", summary, min_width=600)
                     except Exception:
                         pass
                     try:

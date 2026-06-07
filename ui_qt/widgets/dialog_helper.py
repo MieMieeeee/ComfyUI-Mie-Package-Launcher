@@ -12,29 +12,35 @@ class DialogHelper:
         return getattr(parent, "theme_manager", None)
 
     @staticmethod
-    def show_info(parent, title, content):
+    def show_info(parent, title, content, min_width=None):
         """Show an information dialog with a single OK button"""
-        dialog = CustomConfirmDialog(
-            parent,
-            title=title,
-            content=content,
-            buttons=[{"text": "确定", "role": "primary"}],
-            default_index=0,
-            theme_manager=DialogHelper._get_theme_manager(parent)
-        )
+        dialog_kwargs = {
+            "parent": parent,
+            "title": title,
+            "content": content,
+            "buttons": [{"text": "确定", "role": "primary"}],
+            "default_index": 0,
+            "theme_manager": DialogHelper._get_theme_manager(parent),
+        }
+        if min_width is not None:
+            dialog_kwargs["min_width"] = min_width
+        dialog = CustomConfirmDialog(**dialog_kwargs)
         dialog.exec_()
         
     @staticmethod
-    def show_warning(parent, title, content):
+    def show_warning(parent, title, content, min_width=None):
         """Show a warning dialog with a single OK button"""
-        dialog = CustomConfirmDialog(
-            parent,
-            title=title,
-            content=content,
-            buttons=[{"text": "确定", "role": "primary"}],
-            default_index=0,
-            theme_manager=DialogHelper._get_theme_manager(parent)
-        )
+        dialog_kwargs = {
+            "parent": parent,
+            "title": title,
+            "content": content,
+            "buttons": [{"text": "确定", "role": "primary"}],
+            "default_index": 0,
+            "theme_manager": DialogHelper._get_theme_manager(parent),
+        }
+        if min_width is not None:
+            dialog_kwargs["min_width"] = min_width
+        dialog = CustomConfirmDialog(**dialog_kwargs)
         dialog.exec_()
         
     @staticmethod

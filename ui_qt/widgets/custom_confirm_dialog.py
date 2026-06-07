@@ -6,7 +6,7 @@ class CustomConfirmDialog(QtWidgets.QDialog):
     """
     一个美观的确认弹窗，支持自定义标题、内容和多个操作按钮
     """
-    def __init__(self, parent=None, title="确认", content="", buttons=None, default_index=0, theme_manager=None):
+    def __init__(self, parent=None, title="确认", content="", buttons=None, default_index=0, theme_manager=None, min_width=480):
         super().__init__(parent)
         self.setWindowFlags(QtCore.Qt.Dialog | QtCore.Qt.FramelessWindowHint | QtCore.Qt.WindowStaysOnTopHint)
         self.setAttribute(QtCore.Qt.WA_TranslucentBackground)
@@ -131,8 +131,8 @@ class CustomConfirmDialog(QtWidgets.QDialog):
         
         layout.addWidget(self.container)
         
-        # 根据内容自适应大小，限制最大宽度
-        self.setFixedWidth(480)
+        # 根据内容自适应大小，使用调用方指定的最小宽度
+        self.setMinimumWidth(int(min_width))
         
     def _on_btn_clicked(self, index):
         self._result = index

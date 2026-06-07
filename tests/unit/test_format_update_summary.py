@@ -129,8 +129,8 @@ class TestFormatUpdateSummary:
         # 前 5 个包名出现
         for i in range(5):
             assert f"pkg{i}==1.0" in summary
-        # 后面的折叠为 ... 等 N 个
-        assert "... 等 8 个" in summary
+        # 后面的折叠为 ... 等 N 个（剩余数，不是总数）
+        assert "... 等 3 个" in summary
 
     def test_non_mirror_failure_includes_error(self):
         # 非镜像失败（pip 报网络错之类）：失败项用一个等价的 generic 错误原因
@@ -352,10 +352,8 @@ class TestFormatUpdateSummaryHintMentionsCancel:
         )
         # 三项计数保持原样，黑名单不并入失败数
         assert "依赖：已满足 1 项，已更新 1 项，失败 0 项，跳过 3 项" in summary
-        # 黑名单作为缩进子项挂在计数行下
-        assert "  - torch (已跳过，需手动管理)" in summary
-        assert "  - numpy (已跳过，需手动管理)" in summary
-        assert "  - comfyui-frontend-package (已跳过，需手动管理)" in summary
+        # 黑名单作为单行紧凑呈现，列出所有名字
+        assert "  自动跳过（无需操作）：torch, numpy, comfyui-frontend-package" in summary
 
     def test_frozen_overflow_collapses_to_etc_marker(self):
         """When there are more than 5 frozen items, summarize as "等 N 个"."""
@@ -374,14 +372,10 @@ class TestFormatUpdateSummaryHintMentionsCancel:
                 "frozen": frozen,
             },
         )
-        # 前 5 个逐项列出
-        for i in range(5):
-            assert f"  - pkg{i} (已跳过，需手动管理)" in summary
-        # 第 6 个开始折叠
-        assert "  - ... 等 7 个" in summary
-        # 后面的不展开
-        assert "pkg5 (已跳过" not in summary
-        assert "pkg6 (已跳过" not in summary
+        # 7 个黑名单：前 6 个逐项呈现，多出的 1 个折叠为 “等 7 项”
+        assert "  自动跳过（无需操作）：pkg0, pkg1, pkg2, pkg3, pkg4, pkg5 等 7 项" in summary
+        # 未列出的 pkg6 不应出现
+        assert "pkg6" not in summary
 
     def test_only_frozen_does_not_count_as_failure(self):
         """An all-frozen file must not introduce a non-zero failure count."""
@@ -401,5 +395,6 @@ class TestFormatUpdateSummaryHintMentionsCancel:
             },
         )
         assert "依赖：已满足 0 项，已更新 0 项，失败 0 项，跳过 2 项" in summary
-        assert "  - torch (已跳过，需手动管理)" in summary
-        assert "  - xformers (已跳过，需手动管理)" in summary
+        assert "  自动跳过（无需操作）：torch, xformers" in summary
+        # 另外验证不应有老格式的 "- 包名 (已跳过…)" 子项
+        assert "(已跳过，需手动管理)" not in summary
