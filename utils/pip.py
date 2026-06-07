@@ -32,6 +32,10 @@ def get_package_version(
 ) -> Optional[str]:
     if logger is None:
         logger = logging.getLogger(__name__)
+    # pip show 不接受 specifier（如 transformers>=4.50.3），会返回 rc=1。
+    # 调用方传入的可能是从 requirements.txt 读出的 spec，
+    # 这里先裁到包名再走 pip show，避免被当作包名查。
+    pkg_name, _ver = _split_name_version(package_name or "")
     try:
         python_path = Path(python_exec).resolve()
         if not python_path.exists():
@@ -49,8 +53,10 @@ def get_package_version(
                 logger.info("操作pip: 仅查询 %s 版本（python -m pip）", package_name)
             except Exception:
                 pass
+        # 下面的 pip show 实际使用裁后的 pkg_name，但日志仍然输出原 spec
+        # 以便人能看出为什么查这个包。
         r = run_hidden(
-            [str(python_path), "-m", "pip", "show", package_name],
+            [str(python_path), "-m", "pip", "show", pkg_name],
             capture_output=True,
             text=True,
             timeout=timeout,
@@ -69,7 +75,7 @@ def get_package_version(
                 except Exception:
                     pass
             r2 = run_hidden(
-                [str(pip_exe), "show", package_name],
+                [str(pip_exe), "show", pkg_name],
                 capture_output=True,
                 text=True,
                 timeout=timeout,

@@ -89,6 +89,62 @@ class TestGetPackageVersion:
                     result = get_package_version("requests", "python")
                     assert result == "2.28.0"
 
+    def test_strips_version_specifier_before_pip_show(self):
+        """传入 spec（如 transformers>=4.50.3）应裁到包名再查。
+
+        pip show 不接受 specifier，会返回 rc=1。本测试保证
+        get_package_version 能把 spec 剩余的部分剩掉，
+        最后用干净的包名去问 pip show。
+        """
+        from utils.pip import get_package_version
+
+        mock_result = MagicMock()
+        mock_result.returncode = 0
+        mock_result.stdout = "Name: transformers\nVersion: 4.56.2\nSummary: x"
+
+        captured_cmd = []
+        def fake_run_hidden(cmd, **kwargs):
+            captured_cmd.append(cmd)
+            return mock_result
+
+        with patch("utils.pip.run_hidden", side_effect=fake_run_hidden):
+            with patch("utils.pip.compute_pip_executable") as mock_pip:
+                with patch("utils.pip.Path") as mock_path_cls:
+                    mock_path_cls.return_value = self._mock_python_path()
+                    mock_pip.return_value = MagicMock(exists=False)
+                    result = get_package_version("transformers>=4.50.3", "python")
+
+        assert result == "4.56.2", f"Should parse 4.56.2 from pip show, got {result!r}"
+        assert len(captured_cmd) == 1
+        cmd = captured_cmd[0]
+        assert "transformers" in cmd, f"cmd should contain transformers, got {cmd!r}"
+        for token in cmd:
+            assert ">=" not in token, f"cmd should not contain specifier token, got {cmd!r}"
+
+    def test_spec_with_no_version_part_works(self):
+        """没有 spec 的情况（仅包名，如 requests）仍能正常查。"""
+        from utils.pip import get_package_version
+
+        mock_result = MagicMock()
+        mock_result.returncode = 0
+        mock_result.stdout = "Name: requests\nVersion: 2.31.0\nSummary: x"
+
+        captured_cmd = []
+        def fake_run_hidden(cmd, **kwargs):
+            captured_cmd.append(cmd)
+            return mock_result
+
+        with patch("utils.pip.run_hidden", side_effect=fake_run_hidden):
+            with patch("utils.pip.compute_pip_executable") as mock_pip:
+                with patch("utils.pip.Path") as mock_path_cls:
+                    mock_path_cls.return_value = self._mock_python_path()
+                    mock_pip.return_value = MagicMock(exists=False)
+                    result = get_package_version("requests", "python")
+
+        assert result == "2.31.0"
+        assert len(captured_cmd) == 1
+        assert captured_cmd[0][-1] == "requests"
+
     def test_returns_none_when_package_not_found(self):
         """Should return None when pip show returns non-zero."""
         from utils.pip import get_package_version
