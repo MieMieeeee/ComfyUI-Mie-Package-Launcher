@@ -345,12 +345,13 @@ class UpdateService:
         any_partial = False
         for rf in req_files:
             try:
-                # 使用 upgrade=True 来升级所有依赖（包括前端包和模板库）
+                # 不加 -U：pip 默认只有本地不满足 spec 时才装。
+                # 加 -U 会强行追新到最新版，对 transformers / tokenizers 这类库很危险。
                 res = PIPUTILS.install_requirements_file(
                     rf,
                     self._resolve_python_exec(),
                     index_url=idx,
-                    upgrade=True,
+                    upgrade=False,
                     logger=self.app.logger,
                     on_progress=on_progress,
                     ignore_pkgs=FROZEN_PKGS,

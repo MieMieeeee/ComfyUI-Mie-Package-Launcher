@@ -316,6 +316,13 @@ class TestSyncRequirementsFilesFrozenPropagation(unittest.TestCase):
         kwargs = mock_install.call_args.kwargs
         self.assertIn("ignore_pkgs", kwargs)
         self.assertIs(kwargs["ignore_pkgs"], svc_mod.FROZEN_PKGS)
+        # upgrade=False: pip must NOT be forced into -U mode.  For libraries
+        # like transformers / tokenizers that break on every major bump,
+        # the user only wants the requirements.txt pin enforced, not the
+        # latest release.  pip itself short-circuits when the spec is
+        # already satisfied, so this also avoids redundant network work.
+        self.assertIn("upgrade", kwargs)
+        self.assertIs(kwargs["upgrade"], False)
 
         # The 'frozen' list is propagated through to the aggregated result.
         self.assertIn("frozen", result)
