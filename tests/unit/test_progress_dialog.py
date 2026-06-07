@@ -73,24 +73,3 @@ class TestProgressDialogAutoSize:
         assert dlg.width() <= 600, (
             f"Dialog width should be <= 600, got {dlg.width()}"
         )
-
-
-class TestPkgProgressTailTruncation:
-    """utils.pip._pkg_progress tail should be truncated to a sane length."""
-
-    def test_long_tail_is_truncated_to_under_30_chars(self):
-        """Reproduce _pkg_progress tail truncation logic and verify."""
-        # The _pkg_progress closure is hard to call directly, so we
-        # reproduce its core judgement: tails >30 chars get clipped
-        # to 27 + ellipsis.
-        long_text = "collecting deps: " + ("x" * 80)
-        text = long_text
-        if text and len(text) > 30:
-            text = text[:27] + "..."
-        tail = f"  {text}" if text else ""
-        assert len(tail) < 35, (
-            f"Tail after truncation should be < 35 chars, got {tail!r}"
-        )
-        assert tail.endswith("..."), (
-            f"Long tail should end with ellipsis, got {tail!r}"
-        )

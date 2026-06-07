@@ -623,13 +623,16 @@ def install_requirements_file(
             def _pkg_progress(text, percent=None, _spec=spec, _idx=idx, _total=total, _pct=overall_pct):
                 if on_progress is None:
                     return
-                # 底层 pip 会输出“正在下载 X/Y MB”类的子状态，贴到包名后面
-                # 但一些子状态会很长（比如“正在收集依赖: comfyui-workflow-templates-media-other”），
-                # 会把进度框状态文字出彩。超过 30 字符的 tail 裁到 27 + 省略号。
-                if text and len(text) > 30:
-                    text = text[:27] + "…"
-                tail = f"  {text}" if text else ""
-                status = f"正在更新依赖 {_idx}/{_total}：{_spec}{tail}".strip()
+                # 底层 pip 会输出“正在下载 X/Y MB”类的子状态（tail）。
+                # 之前用“双空格拼接 + 30 字符截断”，会把长 pkg 名（如
+                # comfyui-workflow-templates-media-other）隐藏到省略号里。
+                # 现在改为：tail 换行、不裁断。对应弹窗 setWordWrap(True)
+                # 会自动水平叠加；多行不够也会自动绕到下一行。
+                head = f"正在更新依赖 {_idx}/{_total}：{_spec}"
+                if text:
+                    status = f"{head}\n{text}"
+                else:
+                    status = head
                 on_progress(status, _pct)
 
             # 无版本要求的 spec（如 scipy）：本地已安装就直接记入 satisfied，

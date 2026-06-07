@@ -1206,6 +1206,72 @@ class TestInstallRequirementsFileProgress:
         assert events[2][1] == 66
         assert events[4][1] == 100
 
+    def test_progress_tail_goes_to_new_line_never_truncated(self, tmp_path):
+        """Verify that long pip sub-status text goes to a new line and
+        is never truncated.
+
+        Reproduces user feedback: "把 正在下载 comfyui-workflow-template
+        到下面一行去，不要缩略".
+        """
+        from utils.pip import install_requirements_file
+
+        req_file = tmp_path / "requirements.txt"
+        req_file.write_text(
+            "comfyui-workflow-templates==0.9.98\n",
+            encoding="utf-8",
+        )
+
+        def fake_install(spec, python_exec, **kwargs):
+            inner = kwargs.get("on_progress")
+            if inner is not None:
+                # simulate a long pip sub-status
+                inner(
+                    "downloading comfyui-workflow-templates-media-other"
+                )
+            return {
+                "success": True,
+                "updated": True,
+                "up_to_date": False,
+                "version": "0.9.98",
+                "error": None,
+                "error_code": None,
+            }
+
+        events = []
+
+        def my_progress(text, percent=None):
+            events.append((text, percent))
+
+        with patch(
+            "utils.pip.install_or_update_package", side_effect=fake_install
+        ):
+            install_requirements_file(
+                str(req_file), "python", on_progress=my_progress
+            )
+
+        long_events = [e for e in events if "downloading" in e[0]]
+        assert long_events, (
+            f"no on_progress event carries the long sub-status, all events={events!r}"
+        )
+        status = long_events[0][0]
+        # tail should be on a new line, not inline-truncated
+        assert "\n" in status, (
+            f"tail should be on a new line, got {status!r}"
+        )
+        lines = status.split("\n")
+        assert len(lines) >= 2, (
+            f"status should have >= 2 lines, got {lines!r}"
+        )
+        assert "comfyui-workflow-templates==0.9.98" in lines[0]
+        assert (
+            "downloading comfyui-workflow-templates-media-other"
+            in lines[-1]
+        )
+        # never truncate
+        assert "\u2026" not in status, (
+            f"should not truncate tail, got {status!r}"
+        )
+
     def test_progress_callback_optional(self, tmp_path):
         """不传 on_progress 也能跑通，向后兼容。"""
         from utils.pip import install_requirements_file
