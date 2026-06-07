@@ -646,22 +646,30 @@ def _format_update_summary(core_res, req_res):
         failed = req_res.get("failed") or []
         installed = req_res.get("installed") or []
         satisfied = req_res.get("satisfied") or []
+        frozen = req_res.get("frozen") or []
         # missing = 镜像未同步（VERSION_NOT_FOUND）类
         # failed  = 其他错误（网络、权限、冲突...）类，每条自带 reason
+        # frozen  = 黑名单跳过（torch / numpy / frontend / templates）类
         is_mirror_issue = req_res.get("error_code") == "VERSION_NOT_FOUND" and bool(missing)
         generic_err = str(req_res.get("error") or "").strip().replace("\r", " ").replace("\n", " ")
         if len(generic_err) > 200:
             generic_err = generic_err[:200] + "…"
         total_failures = len(missing) + len(failed)
 
-        if installed or satisfied or total_failures:
-            # 一行三项计数
+        if installed or satisfied or total_failures or frozen:
+            # 一行三项计数（黑名单独立呈现，不加入失败）
             counts = (
                 f"依赖：已满足 {len(satisfied)} 项，"
                 f"已更新 {len(installed)} 项，"
                 f"失败 {total_failures} 项"
             )
             lines.append(counts)
+            # 黑名单明细：缩进子项挂在计数行下，只列名字不列原因（跳过是预期行为）
+            for item in frozen[:5]:
+                name = item.get("name") if isinstance(item, dict) else str(item)
+                lines.append(f"  - {name} (已跳过，需手动管理)")
+            if len(frozen) > 5:
+                lines.append(f"  - ... 等 {len(frozen)} 个")
             # 失败明细：作为子项缩进挂在计数行下
             # 镜像未同步在前，其他错误在后，每条都带自己的原因
             detail_lines = []

@@ -5,7 +5,7 @@ pip 工具模块
 
 import logging
 from pathlib import Path, PurePosixPath
-from typing import Optional, Union, Dict, Any, List
+from typing import Optional, Union, Dict, Any, Iterable, List
 from utils.common import run_hidden
 import os
 import sys
@@ -505,6 +505,7 @@ def install_requirements_file(
     upgrade: bool = False,
     logger: Optional[logging.Logger] = None,
     on_progress=None,
+    ignore_pkgs: Optional[Iterable[str]] = None,
 ) -> Dict[str, Any]:
     """Install each package in the requirements file individually.
 
@@ -514,12 +515,18 @@ def install_requirements_file(
     package, then aggregate the per-package results. One failure does not
     block the others.
 
+    ``ignore_pkgs`` is an optional iterable of package names (case-insensitive)
+    that should be left untouched — e.g. ``{"torch", "numpy"}``.  Frozen
+    specs are not pip-installed and do not appear in installed/satisfied/
+    missing/failed.  They are returned in ``frozen`` as a list of
+    ``{name, spec}`` dicts so the caller can surface them.
+
     Returns a result dict with the same top-level shape as before plus a
     ``failed`` list of ``{spec, reason, stderr}`` for non-mirror errors::
 
         {
-            "success": bool,            # all packages installed ok
-            "partial": bool,            # at least one package installed
+            "success": bool,            # all non-frozen packages installed ok
+            "partial": bool,            # at least one non-frozen installed
             "updated": bool,            # at least one was actually new
             "up_to_date": bool,         # everything was already satisfied
             "error": str | None,
@@ -528,6 +535,7 @@ def install_requirements_file(
             "satisfied": ["name-version", ...],
             "missing": ["pkg==1.0", ...],          # 镜像未同步
             "failed": [{"spec": ..., "reason": ..., "stderr": ...}, ...],
+            "frozen": [{"name": ..., "spec": ...}, ...],  # 黑名单跳过
         }
     """
     if logger is None:
@@ -543,7 +551,15 @@ def install_requirements_file(
         "satisfied": [],
         "missing": [],
         "failed": [],
+        "frozen": [],
     }
+    frozen_names: set = set()
+    if ignore_pkgs:
+        for n in ignore_pkgs:
+            try:
+                frozen_names.add(str(n).strip().lower())
+            except Exception:
+                pass
     try:
         req_path = Path(requirements_file).resolve()
         if not req_path.exists():
@@ -558,15 +574,41 @@ def install_requirements_file(
             result["success"] = True
             return result
 
+        # 黑名单过滤：需要升级的 specs 与 frozen 名单交集为空时才进入主循环
+        active_specs: List[str] = []
+        for spec in specs:
+            name, _ver = _split_name_version(spec)
+            if name and name.strip().lower() in frozen_names:
+                result["frozen"].append({"name": name, "spec": spec})
+                continue
+            active_specs.append(spec)
+        skipped = len(specs) - len(active_specs)
+        if skipped:
+            try:
+                logger.info(
+                    "跳过黑名单依赖 %d 项：%s",
+                    skipped,
+                    ", ".join(item["name"] for item in result["frozen"]),
+                )
+            except Exception:
+                pass
+
+        if not active_specs:
+            # 全部都在黑名单里，认为“已最新”，不报错
+            result["up_to_date"] = True
+            result["success"] = True
+            return result
+
         logger.info(
-            "开始逐个安装 requirements: %s（共 %d 项）",
+            "开始逐个安装 requirements: %s（共 %d 项，跳过 %d 项）",
             req_path.name,
-            len(specs),
+            len(active_specs),
+            skipped,
         )
 
         any_new_install = False
-        total = len(specs)
-        for idx, spec in enumerate(specs, start=1):
+        total = len(active_specs)
+        for idx, spec in enumerate(active_specs, start=1):
             name, _ver = _split_name_version(spec)
             # 每个包都给调用方报上“正在更新 idx/total: spec”作为背景状态，
             # 让进度对话框能看到当前是哪个包、剩什么。

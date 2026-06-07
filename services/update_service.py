@@ -1,9 +1,33 @@
-from typing import List, Dict, Any, Tuple
+from typing import List, Dict, Any, Iterable, Optional, Tuple
 from pathlib import Path
 import subprocess
 from utils import paths as PATHS
 from utils import pip as PIPUTILS
 import re
+
+
+# 依赖升级黑名单。这些包不在“同时更新依赖库”的递式安装里被动，原因各不相同：
+#
+# - torch / torchvision / torchaudio / triton / xformers
+#   强依赖本地 CUDA 版本与驱动。随手给它们跑 pip install -U 非常容易担到与现有 CUDA 不匹配的新版，轻者引入错误，重者整套 GPU 环境坏掉。ComfyUI Manager 默认就是这么定义的。
+#
+# - numpy
+#   大版本跳会影响 opencv / torch 等的 ABI 兼容性，不走伪装环境下应避免自动跳。
+#
+# - comfyui-frontend-package / comfyui-workflow-templates
+#   这两个包含含在 requirements.txt 里，但启动器采用独立的 update_frontend / update_templates 路径管理
+#   （取决于“更新前端包”「“更新模板库”复选框）。这里跳过不仅避免重复升级，
+#   还能避免两路径同时跳出不同版本。
+FROZEN_PKGS = frozenset({
+    "torch",
+    "torchvision",
+    "torchaudio",
+    "triton",
+    "xformers",
+    "numpy",
+    "comfyui-frontend-package",
+    "comfyui-workflow-templates",
+})
 
 
 class UpdateService:
@@ -313,6 +337,7 @@ class UpdateService:
         satisfied_all = []
         missing_all = []
         failed_all = []
+        frozen_all = []
         error_parts = []
         # 依赖错误码：多个 requirements 文件间优先保留镜像类（VERSION_NOT_FOUND），否则取最后一个非空码。
         error_code = None
@@ -328,6 +353,7 @@ class UpdateService:
                     upgrade=True,
                     logger=self.app.logger,
                     on_progress=on_progress,
+                    ignore_pkgs=FROZEN_PKGS,
                 )
                 ok = res.get("success") and not res.get("error")
                 sync_summary.append(f"{rf.name}: {'OK' if ok else 'FAIL'}")
@@ -339,6 +365,8 @@ class UpdateService:
                     missing_all.append(item)
                 for item in res.get("failed") or []:
                     failed_all.append(item)
+                for item in res.get("frozen") or []:
+                    frozen_all.append(item)
                 if res.get("error"):
                     err = str(res.get("error"))
                     if len(err) > 200:
@@ -365,6 +393,7 @@ class UpdateService:
             "satisfied": satisfied_all,
             "missing": missing_all,
             "failed": failed_all,
+            "frozen": frozen_all,
             "error_code": error_code,
             "error": "; ".join(error_parts) if error_parts else None,
         }

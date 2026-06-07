@@ -330,3 +330,76 @@ class TestFormatUpdateSummaryHintMentionsCancel:
         )
         assert "提示" in summary
         assert "取消" in summary
+    def test_frozen_items_render_as_subdetail_under_counts(self):
+        """Frozen packages must be listed under the count line, each with a
+        "skipped, needs manual management" hint, so the user can see exactly
+        what we deliberately did NOT touch."""
+        summary = _format_update_summary(
+            {"updated": True, "tag": "v0.24.1"},
+            {
+                "success": True,
+                "updated": True,
+                "installed": ["requests-2.28.0"],
+                "satisfied": ["flask-2.0.0"],
+                "missing": [],
+                "failed": [],
+                "frozen": [
+                    {"name": "torch", "spec": "torch==2.1.0"},
+                    {"name": "numpy", "spec": "numpy==1.26.0"},
+                    {"name": "comfyui-frontend-package", "spec": "comfyui-frontend-package==1.45.15"},
+                ],
+            },
+        )
+        # 三项计数保持原样，黑名单不并入失败数
+        assert "依赖：已满足 1 项，已更新 1 项，失败 0 项" in summary
+        # 黑名单作为缩进子项挂在计数行下
+        assert "  - torch (已跳过，需手动管理)" in summary
+        assert "  - numpy (已跳过，需手动管理)" in summary
+        assert "  - comfyui-frontend-package (已跳过，需手动管理)" in summary
+
+    def test_frozen_overflow_collapses_to_etc_marker(self):
+        """When there are more than 5 frozen items, summarize as "等 N 个"."""
+        frozen = [
+            {"name": f"pkg{i}", "spec": f"pkg{i}==1.0"}
+            for i in range(7)
+        ]
+        summary = _format_update_summary(
+            None,
+            {
+                "success": True,
+                "installed": [],
+                "satisfied": [],
+                "missing": [],
+                "failed": [],
+                "frozen": frozen,
+            },
+        )
+        # 前 5 个逐项列出
+        for i in range(5):
+            assert f"  - pkg{i} (已跳过，需手动管理)" in summary
+        # 第 6 个开始折叠
+        assert "  - ... 等 7 个" in summary
+        # 后面的不展开
+        assert "pkg5 (已跳过" not in summary
+        assert "pkg6 (已跳过" not in summary
+
+    def test_only_frozen_does_not_count_as_failure(self):
+        """An all-frozen file must not introduce a non-zero failure count."""
+        summary = _format_update_summary(
+            None,
+            {
+                "success": True,
+                "up_to_date": True,
+                "installed": [],
+                "satisfied": [],
+                "missing": [],
+                "failed": [],
+                "frozen": [
+                    {"name": "torch", "spec": "torch==2.1.0"},
+                    {"name": "xformers", "spec": "xformers==0.0.22"},
+                ],
+            },
+        )
+        assert "依赖：已满足 0 项，已更新 0 项，失败 0 项" in summary
+        assert "  - torch (已跳过，需手动管理)" in summary
+        assert "  - xformers (已跳过，需手动管理)" in summary

@@ -258,3 +258,83 @@ class TestSyncRequirementsFilesPropagatesErrorCode(unittest.TestCase):
         self.assertEqual(result.get("error_code"), "VERSION_NOT_FOUND")
         # missing and failed are both aggregated
         self.assertIn("a==1", result.get("missing") or [])
+class TestSyncRequirementsFilesFrozenPropagation(unittest.TestCase):
+    """sync_requirements_files must forward FROZEN_PKGS to install_requirements_file
+    and aggregate the returned 'frozen' list so the UI can surface it.
+
+    This guards the contract that CUDA-coupled / launcher-managed deps
+    (torch, torchvision, triton, xformers, numpy, comfyui-frontend-package,
+    comfyui-workflow-templates) are never handed to pip install -U.
+    """
+
+    def setUp(self):
+        from services.update_service import UpdateService
+
+        self.app = MagicMock()
+        self.app.logger = MagicMock()
+        self.app.config.get.return_value = {}
+        self.app.pypi_proxy_mode.get.return_value = "none"
+        self.app.pypi_proxy_url.get.return_value = ""
+        self.app.auto_update_deps_var.get.return_value = True
+        self.svc = UpdateService(self.app)
+
+    def test_forwards_frozen_pkgs_and_aggregates_result(self):
+        """ignore_pkgs is set to FROZEN_PKGS, and the 'frozen' bucket is forwarded."""
+        from services import update_service as svc_mod
+
+        fake_res = {
+            "success": True,
+            "partial": False,
+            "updated": True,
+            "up_to_date": False,
+            "error": None,
+            "error_code": None,
+            "installed": ["requests-2.28.0"],
+            "satisfied": [],
+            "missing": [],
+            "failed": [],
+            "frozen": [
+                {"name": "torch", "spec": "torch==2.1.0"},
+                {"name": "numpy", "spec": "numpy==1.26.0"},
+                {"name": "comfyui-frontend-package", "spec": "comfyui-frontend-package==1.45.15"},
+            ],
+        }
+        with tempfile.TemporaryDirectory() as tmp:
+            req_file = Path(tmp) / "requirements.txt"
+            req_file.write_text("torch==2.1.0\nrequests==2.28.0\n", encoding="utf-8")
+            with patch.object(self.svc, "_resolve_comfy_root", return_value=Path(tmp)), \
+                 patch.object(self.svc, "_collect_requirement_files", return_value=[req_file]), \
+                 patch.object(self.svc, "_resolve_python_exec", return_value="python"), \
+                 patch(
+                     "services.update_service.PIPUTILS.install_requirements_file",
+                     return_value=fake_res,
+                 ) as mock_install:
+                result = self.svc.sync_requirements_files()
+
+        # ignore_pkgs is wired to FROZEN_PKGS (the constant, not a copy).
+        self.assertEqual(mock_install.call_count, 1)
+        kwargs = mock_install.call_args.kwargs
+        self.assertIn("ignore_pkgs", kwargs)
+        self.assertIs(kwargs["ignore_pkgs"], svc_mod.FROZEN_PKGS)
+
+        # The 'frozen' list is propagated through to the aggregated result.
+        self.assertIn("frozen", result)
+        frozen_names = [f["name"] for f in result["frozen"]]
+        self.assertIn("torch", frozen_names)
+        self.assertIn("numpy", frozen_names)
+        self.assertIn("comfyui-frontend-package", frozen_names)
+
+        # Sanity: FROZEN_PKGS covers exactly the policy list.
+        self.assertEqual(
+            set(svc_mod.FROZEN_PKGS),
+            {
+                "torch",
+                "torchvision",
+                "torchaudio",
+                "triton",
+                "xformers",
+                "numpy",
+                "comfyui-frontend-package",
+                "comfyui-workflow-templates",
+            },
+        )

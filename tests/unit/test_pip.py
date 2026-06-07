@@ -628,6 +628,181 @@ class TestInstallRequirementsFile:
         assert specs == ["torch>=2.0", "requests==2.28.0"]
 
 
+class TestInstallRequirementsFileFrozen:
+    """install_requirements_file must skip packages listed in ignore_pkgs.
+
+    Following ComfyUI Manager's policy, certain deps (CUDA-coupled or
+    launcher-managed) must not be auto-upgraded by the requirements sweep.
+    These tests pin the contract:
+      - frozen specs are NOT handed to install_or_update_package,
+      - they are returned in result['frozen'] as {name, spec},
+      - result['installed'/'satisfied'/'missing'/'failed'] exclude them,
+      - an all-frozen file is treated as up_to_date / success (no error),
+      - matching is case-insensitive.
+    """
+
+    def test_frozen_specs_are_not_installed(self, tmp_path):
+        """torch / numpy / frontend / templates must be left untouched."""
+        from utils.pip import install_requirements_file
+
+        req_file = tmp_path / "requirements.txt"
+        req_file.write_text(
+            "torch==2.1.0\n"
+            "numpy==1.26.0\n"
+            "comfyui-frontend-package==1.45.15\n"
+            "comfyui-workflow-templates==0.9.98\n"
+            "requests==2.28.0\n",
+            encoding="utf-8",
+        )
+
+        with patch("utils.pip.install_or_update_package") as mock_install:
+            mock_install.return_value = {
+                "success": True,
+                "updated": True,
+                "up_to_date": False,
+                "version": "2.28.0",
+                "error": None,
+                "error_code": None,
+            }
+            result = install_requirements_file(
+                str(req_file),
+                "python",
+                ignore_pkgs=(
+                    "torch",
+                    "numpy",
+                    "comfyui-frontend-package",
+                    "comfyui-workflow-templates",
+                ),
+            )
+
+        # Only the non-frozen package was handed to pip.
+        called_specs = [c.args[0] for c in mock_install.call_args_list]
+        assert called_specs == ["requests==2.28.0"]
+
+        # Frozen packages are surfaced in result['frozen'] with {name, spec}.
+        frozen_names = [f["name"] for f in result["frozen"]]
+        assert "torch" in frozen_names
+        assert "numpy" in frozen_names
+        assert "comfyui-frontend-package" in frozen_names
+        assert "comfyui-workflow-templates" in frozen_names
+        # The exact spec line is preserved for traceability.
+        assert any(
+            f["spec"] == "torch==2.1.0" for f in result["frozen"]
+        )
+        assert any(
+            f["spec"] == "numpy==1.26.0" for f in result["frozen"]
+        )
+
+        # installed / satisfied / missing / failed do NOT contain frozen names.
+        for bucket in ("installed", "satisfied", "missing", "failed"):
+            for item in result[bucket]:
+                text = item if isinstance(item, str) else (item.get("spec") or "")
+                assert "torch" not in text
+                assert "numpy" not in text
+                assert "comfyui-frontend-package" not in text
+                assert "comfyui-workflow-templates" not in text
+
+        # The single non-frozen package still installs fine.
+        assert "requests-2.28.0" in result["installed"]
+        assert result["success"] is True
+
+    def test_all_frozen_file_is_up_to_date_without_installing(self, tmp_path):
+        """When every spec is frozen, the result is up_to_date / success
+        and install_or_update_package is never called."""
+        from utils.pip import install_requirements_file
+
+        req_file = tmp_path / "requirements.txt"
+        req_file.write_text(
+            "torch==2.1.0\n"
+            "torchvision==0.16.0\n"
+            "xformers==0.0.22\n",
+            encoding="utf-8",
+        )
+
+        with patch("utils.pip.install_or_update_package") as mock_install:
+            result = install_requirements_file(
+                str(req_file),
+                "python",
+                ignore_pkgs=("torch", "torchvision", "xformers"),
+            )
+
+        mock_install.assert_not_called()
+        assert result["success"] is True
+        assert result["up_to_date"] is True
+        assert result["error"] is None
+        assert len(result["frozen"]) == 3
+        assert {f["name"] for f in result["frozen"]} == {
+            "torch",
+            "torchvision",
+            "xformers",
+        }
+        # Counts in other buckets stay empty.
+        assert result["installed"] == []
+        assert result["satisfied"] == []
+        assert result["missing"] == []
+        assert result["failed"] == []
+
+    def test_frozen_match_is_case_insensitive(self, tmp_path):
+        """Spec written as 'Torch==2.1.0' must still match ignore_pkgs='torch'."""
+        from utils.pip import install_requirements_file
+
+        req_file = tmp_path / "requirements.txt"
+        req_file.write_text("Torch==2.1.0\nrequests==2.28.0\n", encoding="utf-8")
+
+        with patch("utils.pip.install_or_update_package") as mock_install:
+            mock_install.return_value = {
+                "success": True,
+                "updated": True,
+                "up_to_date": False,
+                "version": "2.28.0",
+                "error": None,
+                "error_code": None,
+            }
+            result = install_requirements_file(
+                str(req_file),
+                "python",
+                ignore_pkgs=("torch",),
+            )
+
+        called_specs = [c.args[0] for c in mock_install.call_args_list]
+        assert called_specs == ["requests==2.28.0"]
+        # Frozen name is preserved using the spec's original casing so
+        # the UI displays the user-visible name faithfully.
+        assert any(f["name"] == "Torch" for f in result["frozen"])
+        assert any(f["spec"] == "Torch==2.1.0" for f in result["frozen"])
+
+    def test_ignore_pkgs_accepts_a_list(self, tmp_path):
+        """ignore_pkgs must accept any Iterable, not just a set/tuple."""
+        from utils.pip import install_requirements_file
+
+        req_file = tmp_path / "requirements.txt"
+        req_file.write_text(
+            "triton==2.1.0\n"
+            "flask==2.0.0\n",
+            encoding="utf-8",
+        )
+
+        with patch("utils.pip.install_or_update_package") as mock_install:
+            mock_install.return_value = {
+                "success": True,
+                "updated": True,
+                "up_to_date": False,
+                "version": "2.0.0",
+                "error": None,
+                "error_code": None,
+            }
+            # Pass as a list to make sure the param type is honored.
+            result = install_requirements_file(
+                str(req_file),
+                "python",
+                ignore_pkgs=["triton"],
+            )
+
+        called_specs = [c.args[0] for c in mock_install.call_args_list]
+        assert called_specs == ["flask==2.0.0"]
+        assert any(f["name"] == "triton" for f in result["frozen"])
+
+
 class TestParseMissingPackagesFromStderr:
     """_parse_missing_packages should pull 'version not found' packages out of pip stderr."""
 
