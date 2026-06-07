@@ -17,6 +17,8 @@ class ProgressDialog(QtWidgets.QDialog):
         self.theme_manager = theme_manager
         self._cancelled = False
         self._on_cancel_callback = None
+        # 拖拽支持：无边框弹窗用鼠标任意位置拖动（除取消按钮外）。
+        self._drag_pos = None
 
         # UI Setup
         layout = QtWidgets.QVBoxLayout(self)
@@ -157,6 +159,56 @@ class ProgressDialog(QtWidgets.QDialog):
         # 按布局 minimumSizeHint 重设 size，受 setMaximumWidth 限制。
         self.adjustSize()
         QtWidgets.QApplication.processEvents()
+
+    def mousePressEvent(self, event):
+        """按下左键时记录拖拽起点。
+
+        FramelessWindowHint 没标题栏拖不了。借 mousePress/mouseMove/
+        mouseRelease 把整个弹窗做成可拖（取消按钮自己处理点击，
+        不会冒泡到这里）。
+        """
+        if event.button() == QtCore.Qt.LeftButton:
+            self._drag_pos = (
+                event.globalPos() - self.frameGeometry().topLeft()
+            )
+            event.accept()
+        else:
+            super().mousePressEvent(event)
+
+    def mouseMoveEvent(self, event):
+        """按住左键移动时，把弹窗搬到鼠标当前位置。"""
+        if (
+            self._drag_pos is not None
+            and event.buttons() & QtCore.Qt.LeftButton
+        ):
+            self.move(event.globalPos() - self._drag_pos)
+            event.accept()
+        else:
+            super().mouseMoveEvent(event)
+
+    def mouseReleaseEvent(self, event):
+        """松开左键时清掉拖拽状态。"""
+        if event.button() == QtCore.Qt.LeftButton:
+            self._drag_pos = None
+            event.accept()
+        else:
+            super().mouseReleaseEvent(event)
+
+    def enterEvent(self, event):
+        """鼠标进入时给 SizeAll cursor，暗示这里可以拖。"""
+        try:
+            self.setCursor(QtCore.Qt.SizeAllCursor)
+        except Exception:
+            pass
+        super().enterEvent(event)
+
+    def leaveEvent(self, event):
+        """鼠标离开时还原 cursor。"""
+        try:
+            self.unsetCursor()
+        except Exception:
+            pass
+        super().leaveEvent(event)
 
     def set_progress(self, value, maximum=100):
         """设置进度条。value 为 None 表示息式 (脉冲)模式。"""
