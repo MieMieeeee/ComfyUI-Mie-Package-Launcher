@@ -62,7 +62,7 @@ class TestFormatUpdateSummary:
             },
         )
         assert "内核：已更新（v0.24.1）" in summary
-        assert "依赖：已满足 1 项，已更新 2 项，失败 0 项" in summary
+        assert "依赖：已满足 1 项，已更新 2 项，失败 0 项，跳过 0 项" in summary
         # 没有失败明细
         assert "  - " not in summary
         # 没有提示
@@ -85,7 +85,7 @@ class TestFormatUpdateSummary:
             },
         )
         # 三项计数
-        assert "依赖：已满足 0 项，已更新 0 项，失败 1 项" in summary
+        assert "依赖：已满足 0 项，已更新 0 项，失败 1 项，跳过 0 项" in summary
         # 失败明细缩进挂在计数行下
         assert "  - comfyui-workflow-templates==0.9.98（镜像源未同步）" in summary
         # 提示行
@@ -109,7 +109,7 @@ class TestFormatUpdateSummary:
             },
         )
         # 三项计数 - 已满足 / 已更新 / 失败
-        assert "依赖：已满足 1 项，已更新 2 项，失败 2 项" in summary
+        assert "依赖：已满足 1 项，已更新 2 项，失败 2 项，跳过 0 项" in summary
         # 失败明细：每条都缩进，且带原因
         assert "  - comfyui-frontend-package==1.45.15（镜像源未同步）" in summary
         assert "  - comfyui-workflow-templates==0.9.98（镜像源未同步）" in summary
@@ -142,7 +142,7 @@ class TestFormatUpdateSummary:
                 "missing": [],
             },
         )
-        assert "依赖：已满足 0 项，已更新 0 项，失败 1 项" in summary
+        assert "依赖：已满足 0 项，已更新 0 项，失败 1 项，跳过 0 项" in summary
         assert "<全部>（Could not connect to proxy）" in summary
 
     def test_already_up_to_date(self):
@@ -209,7 +209,7 @@ class TestFormatUpdateSummary:
             },
         )
         # 计数行：1 项更新 + 2 项失败
-        assert "依赖：已满足 0 项，已更新 1 项，失败 2 项" in summary
+        assert "依赖：已满足 0 项，已更新 1 项，失败 2 项，跳过 0 项" in summary
         # 每条 failed 都带自己的 reason
         assert "  - pkg-a==1.0（ERROR: No matching distribution）" in summary
         assert "  - pkg-b==2.0（Network is unreachable）" in summary
@@ -236,7 +236,7 @@ class TestFormatUpdateSummary:
                 ],
             },
         )
-        assert "依赖：已满足 1 项，已更新 1 项，失败 2 项" in summary
+        assert "依赖：已满足 1 项，已更新 1 项，失败 2 项，跳过 0 项" in summary
         # missing 在前，failed 在后
         missing_idx = summary.find("comfyui-frontend-package==1.45.15")
         failed_idx = summary.find("broken-pkg==0.1")
@@ -263,7 +263,7 @@ class TestFormatUpdateSummary:
                 ],
             },
         )
-        assert "依赖：已满足 0 项，已更新 0 项，失败 1 项" in summary
+        assert "依赖：已满足 0 项，已更新 0 项，失败 1 项，跳过 0 项" in summary
         assert "  - x==1（Could not connect to proxy）" in summary
         # 不出现镜像提示
         assert "PyPI 镜像未及时同步" not in summary
@@ -351,7 +351,7 @@ class TestFormatUpdateSummaryHintMentionsCancel:
             },
         )
         # 三项计数保持原样，黑名单不并入失败数
-        assert "依赖：已满足 1 项，已更新 1 项，失败 0 项" in summary
+        assert "依赖：已满足 1 项，已更新 1 项，失败 0 项，跳过 3 项" in summary
         # 黑名单作为缩进子项挂在计数行下
         assert "  - torch (已跳过，需手动管理)" in summary
         assert "  - numpy (已跳过，需手动管理)" in summary
@@ -400,6 +400,6 @@ class TestFormatUpdateSummaryHintMentionsCancel:
                 ],
             },
         )
-        assert "依赖：已满足 0 项，已更新 0 项，失败 0 项" in summary
+        assert "依赖：已满足 0 项，已更新 0 项，失败 0 项，跳过 2 项" in summary
         assert "  - torch (已跳过，需手动管理)" in summary
         assert "  - xformers (已跳过，需手动管理)" in summary

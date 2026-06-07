@@ -657,11 +657,12 @@ def _format_update_summary(core_res, req_res):
         total_failures = len(missing) + len(failed)
 
         if installed or satisfied or total_failures or frozen:
-            # 一行三项计数（黑名单独立呈现，不加入失败）
+            # 一行四项计数：黑名单独立呈现，不加入失败
             counts = (
                 f"依赖：已满足 {len(satisfied)} 项，"
                 f"已更新 {len(installed)} 项，"
-                f"失败 {total_failures} 项"
+                f"失败 {total_failures} 项，"
+                f"跳过 {len(frozen)} 项"
             )
             lines.append(counts)
             # 黑名单明细：缩进子项挂在计数行下，只列名字不列原因（跳过是预期行为）
@@ -701,7 +702,7 @@ def _format_update_summary(core_res, req_res):
         elif generic_err:
             # 既没有 installed/satisfied 也没有 missing/failed，但有 error
             lines.append(
-                f"依赖：已满足 0 项，已更新 0 项，失败 1 项"
+                f"依赖：已满足 0 项，已更新 0 项，失败 1 项，跳过 0 项"
             )
             lines.append(f"  - <全部>（{generic_err}）")
         elif req_res.get("summary"):
