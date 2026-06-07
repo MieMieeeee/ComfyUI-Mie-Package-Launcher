@@ -262,9 +262,13 @@ class TestSyncRequirementsFilesFrozenPropagation(unittest.TestCase):
     """sync_requirements_files must forward FROZEN_PKGS to install_requirements_file
     and aggregate the returned 'frozen' list so the UI can surface it.
 
-    This guards the contract that CUDA-coupled / launcher-managed deps
-    (torch, torchvision, triton, xformers, numpy, comfyui-frontend-package,
-    comfyui-workflow-templates) are never handed to pip install -U.
+    This guards the contract that CUDA-coupled / ABI-coupled deps
+    (torch, torchvision, torchaudio, triton, xformers, numpy) are never
+    handed to pip install -U.  comfyui-frontend-package and
+    comfyui-workflow-templates are intentionally NOT frozen any more:
+    they are pinned in ComfyUI's own requirements.txt and ComfyUI
+    Manager lets pip install them, so we mirror that policy so that
+    "update kernel" also keeps the templates/frontend versions in sync.
     """
 
     def setUp(self):
@@ -296,7 +300,6 @@ class TestSyncRequirementsFilesFrozenPropagation(unittest.TestCase):
             "frozen": [
                 {"name": "torch", "spec": "torch==2.1.0"},
                 {"name": "numpy", "spec": "numpy==1.26.0"},
-                {"name": "comfyui-frontend-package", "spec": "comfyui-frontend-package==1.45.15"},
             ],
         }
         with tempfile.TemporaryDirectory() as tmp:
@@ -329,9 +332,11 @@ class TestSyncRequirementsFilesFrozenPropagation(unittest.TestCase):
         frozen_names = [f["name"] for f in result["frozen"]]
         self.assertIn("torch", frozen_names)
         self.assertIn("numpy", frozen_names)
-        self.assertIn("comfyui-frontend-package", frozen_names)
 
-        # Sanity: FROZEN_PKGS covers exactly the policy list.
+        # Sanity: FROZEN_PKGS covers exactly the CUDA / ABI policy list.
+        # comfyui-frontend-package and comfyui-workflow-templates are
+        # intentionally NOT here -- they follow ComfyUI's requirements.txt
+        # pin via pip install, same as ComfyUI Manager does.
         self.assertEqual(
             set(svc_mod.FROZEN_PKGS),
             {
@@ -341,7 +346,5 @@ class TestSyncRequirementsFilesFrozenPropagation(unittest.TestCase):
                 "triton",
                 "xformers",
                 "numpy",
-                "comfyui-frontend-package",
-                "comfyui-workflow-templates",
             },
         )

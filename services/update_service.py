@@ -6,18 +6,22 @@ from utils import pip as PIPUTILS
 import re
 
 
-# 依赖升级黑名单。这些包不在“同时更新依赖库”的递式安装里被动，原因各不相同：
+# 依赖升级黑名单。“同时更新依赖库”的递式安装中跳过这些包，原因各异：
 #
 # - torch / torchvision / torchaudio / triton / xformers
-#   强依赖本地 CUDA 版本与驱动。随手给它们跑 pip install -U 非常容易担到与现有 CUDA 不匹配的新版，轻者引入错误，重者整套 GPU 环境坏掉。ComfyUI Manager 默认就是这么定义的。
+#   强依赖本地 CUDA 版本与驱动。随手给它们跑 pip install -U 非常容易装到与现有 CUDA
+#   不匹配的新版，轻者引入错误，重者整套 GPU 环境坏掉。ComfyUI Manager 也是先让 pip
+#   装、装完不对再 torch_rollback() 回滚，意图与我们一致。
 #
 # - numpy
-#   大版本跳会影响 opencv / torch 等的 ABI 兼容性，不走伪装环境下应避免自动跳。
+#   大版本跳会影响 opencv / torch 等的 ABI 兼容性，在未验证环境下应避免自动跳。
+#   ComfyUI Manager 改为用 pip_overrides.json 强制 numpy==1.26.4，本启动器走黑名单
+#   跳过更安全（不联网不下载）。
 #
-# - comfyui-frontend-package / comfyui-workflow-templates
-#   这两个包含含在 requirements.txt 里，但启动器采用独立的 update_frontend / update_templates 路径管理
-#   （取决于“更新前端包”「“更新模板库”复选框）。这里跳过不仅避免重复升级，
-#   还能避免两路径同时跳出不同版本。
+# 不再冻结 comfyui-frontend-package / comfyui-workflow-templates：它们是 ComfyUI
+# 官方 requirements.txt 里 pin 死的包，ComfyUI Manager 也是直接交给 pip 按 pin 版本
+# 装。启动器 “更新内核” 应该顺带把它们一起同步到 requirements.txt 里要求的版本，
+# 与官方 ComfyUI Manager 行为一致。
 FROZEN_PKGS = frozenset({
     "torch",
     "torchvision",
@@ -25,8 +29,6 @@ FROZEN_PKGS = frozenset({
     "triton",
     "xformers",
     "numpy",
-    "comfyui-frontend-package",
-    "comfyui-workflow-templates",
 })
 
 
