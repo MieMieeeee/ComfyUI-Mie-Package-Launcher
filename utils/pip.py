@@ -150,7 +150,7 @@ def install_or_update_package(
             ) and not result["updated"]
             result["version"] = get_package_version(package_name, python_exec, logger)
             logger.info(
-                f"pip 操作完成: {package_name}, 更新={result['updated']}, 已满足（更新）={result['up_to_date']}"
+                f"pip 操作完成: {package_name}, 更新={result['updated']}, 已满足={result['up_to_date']}"
             )
         else:
             stderr = getattr(pip_result, "stderr", "") or ""
