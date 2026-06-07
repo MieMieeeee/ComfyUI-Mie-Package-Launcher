@@ -618,6 +618,10 @@ def install_requirements_file(
                 if on_progress is None:
                     return
                 # 底层 pip 会输出“正在下载 X/Y MB”类的子状态，贴到包名后面
+                # 但一些子状态会很长（比如“正在收集依赖: comfyui-workflow-templates-media-other”），
+                # 会把进度框状态文字出彩。超过 30 字符的 tail 裁到 27 + 省略号。
+                if text and len(text) > 30:
+                    text = text[:27] + "…"
                 tail = f"  {text}" if text else ""
                 status = f"正在更新依赖 {_idx}/{_total}：{_spec}{tail}".strip()
                 on_progress(status, _pct)

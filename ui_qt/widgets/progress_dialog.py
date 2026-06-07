@@ -8,9 +8,12 @@ class ProgressDialog(QtWidgets.QDialog):
     """
     def __init__(self, parent=None, title="处理中", theme_manager=None, show_cancel=True):
         super().__init__(parent)
-        self.setWindowFlags(QtCore.Qt.Dialog | QtCore.Qt.FramelessWindowHint | QtCore.Qt.WindowStaysOnTopHint)
+        # 之前是 Qt.Dialog + setModal(True)，会拦住主窗口所有点击。
+        # 改成 Qt.Tool + setModal(False)：浮在主窗口上、不抢焦点、不进任务栏，
+        # 用户在更新时仍可点快捷目录 / 一键启动等。
+        self.setWindowFlags(QtCore.Qt.Tool | QtCore.Qt.FramelessWindowHint | QtCore.Qt.WindowStaysOnTopHint)
         self.setAttribute(QtCore.Qt.WA_TranslucentBackground)
-        self.setModal(True)
+        self.setModal(False)
         self.theme_manager = theme_manager
         self._cancelled = False
         self._on_cancel_callback = None
@@ -111,9 +114,17 @@ class ProgressDialog(QtWidgets.QDialog):
             btn_layout.addWidget(self.btn_cancel)
             btn_layout.addStretch()
             inner_layout.addLayout(btn_layout)
-            self.setFixedSize(350, 190)
-        else:
-            self.setFixedSize(350, 160)
+
+        # 之前是 setFixedSize(350, 190)，状态文字换行后底部被切。改成
+        # setMinimumSize + setMaximumWidth：宽度范围 350-500，高度跟
+        # 状态文字走。set_status 里再调 adjustSize() 让弹窗随文字增长。
+        self.setMinimumSize(350, 160)
+        self.setMaximumWidth(500)
+        self.resize(350, 190 if show_cancel else 160)
+        self.setSizePolicy(
+            QtWidgets.QSizePolicy.Preferred,
+            QtWidgets.QSizePolicy.Preferred,
+        )
 
         layout.addWidget(self.container)
 
@@ -142,6 +153,9 @@ class ProgressDialog(QtWidgets.QDialog):
 
     def set_status(self, text):
         self.lbl_status.setText(text)
+        # 状态文字换行后弹窗高度要跟着变，避免文字被切。adjustSize() 会
+        # 按布局 minimumSizeHint 重设 size，受 setMaximumWidth 限制。
+        self.adjustSize()
         QtWidgets.QApplication.processEvents()
 
     def set_progress(self, value, maximum=100):
