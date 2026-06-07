@@ -1,16 +1,15 @@
 
 from PyQt5 import QtWidgets, QtCore, QtGui
 from ui_qt.theme_manager import ThemeManager
+from ui_qt.widgets.frameless_draggable_dialog import FramelessDraggableDialog
 
-class CustomConfirmDialog(QtWidgets.QDialog):
+class CustomConfirmDialog(FramelessDraggableDialog):
     """
     一个美观的确认弹窗，支持自定义标题、内容和多个操作按钮
     """
     def __init__(self, parent=None, title="确认", content="", buttons=None, default_index=0, theme_manager=None, min_width=480):
-        super().__init__(parent)
-        self.setWindowFlags(QtCore.Qt.Dialog | QtCore.Qt.FramelessWindowHint | QtCore.Qt.WindowStaysOnTopHint)
-        self.setAttribute(QtCore.Qt.WA_TranslucentBackground)
-        self.setModal(True)
+        # 默认 modal=True, window_type=Qt.Dialog，flags / 透明背景 / 拖拽 都在基类
+        super().__init__(parent=parent)
         self.theme_manager = theme_manager
         self._result = None
         

@@ -4,9 +4,10 @@
 
 from PyQt5 import QtWidgets, QtCore, QtGui
 from ui_qt.theme_manager import ThemeManager
+from ui_qt.widgets.frameless_draggable_dialog import FramelessDraggableDialog
 
 
-class UpdateDialog(QtWidgets.QDialog):
+class UpdateDialog(FramelessDraggableDialog):
     """启动器更新对话框"""
 
     # 信号：请求下载
@@ -15,10 +16,8 @@ class UpdateDialog(QtWidgets.QDialog):
     laterRequested = QtCore.pyqtSignal()
 
     def __init__(self, parent=None, update_info: dict = None, theme_manager=None):
-        super().__init__(parent)
-        self.setWindowFlags(QtCore.Qt.Dialog | QtCore.Qt.FramelessWindowHint | QtCore.Qt.WindowStaysOnTopHint)
-        self.setAttribute(QtCore.Qt.WA_TranslucentBackground)
-        self.setModal(True)
+        # 默认 modal=True, window_type=Qt.Dialog，flags / 透明背景 / 拖拽 都在基类
+        super().__init__(parent=parent)
         self.theme_manager = theme_manager
         self._update_info = update_info or {}
 
