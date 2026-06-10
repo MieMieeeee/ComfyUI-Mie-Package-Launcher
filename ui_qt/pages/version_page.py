@@ -546,12 +546,12 @@ class VersionPage(BasePage):
 
     def _fetch_all_commits(self, root, git):
         """从本地 git 仓库获取全部提交记录"""
-        import subprocess
-        # 优先用远端分支，确保能看到当前版本之后的提交
+        # 使用 run_hidden 启动子进程，自动隐藏 Windows 控制台窗口
+        # (utils.common.run_hidden 内部会设置 STARTUPINFO + CREATE_NO_WINDOW)
         target = None
         for candidate in ["origin/HEAD", "origin/master", "origin/main"]:
             try:
-                r = subprocess.run(
+                r = run_hidden(
                     [git, "rev-parse", "--verify", candidate],
                     capture_output=True, timeout=3, cwd=str(root)
                 )
@@ -580,13 +580,14 @@ class VersionPage(BasePage):
         commits = []
         try:
             # --first-parent 保证单线历史，避免合并带来的图遍历乱序
-            r = subprocess.run(
+            # 同样使用 run_hidden 隐藏 Windows 控制台窗口
+            r = run_hidden(
                 [git, "log", "--first-parent", "--date-order", "--date=short",
                  "--pretty=format:%h|%ad|%an|%s", target],
                 capture_output=True, timeout=15, cwd=str(root)
             )
             # 直接读 bytes 用 UTF-8 解码，避免 Windows GBK 解码中文失败
-            stdout = r.stdout.decode("utf-8", errors="replace")
+            stdout = r.stdout.decode("utf-8", errors="replace") if r.stdout else ""
             if r.returncode == 0 and stdout:
                 for line in stdout.splitlines():
                     parts = line.split("|", 3)
