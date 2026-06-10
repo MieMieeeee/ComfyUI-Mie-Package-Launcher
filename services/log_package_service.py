@@ -46,9 +46,27 @@ def _resolve_launcher_log(app) -> Optional[Path]:
 
 def _resolve_config(app) -> Optional[Path]:
     try:
-        for cand in (Path("config.json"), Path.cwd() / "config.json"):
-            if cand.exists():
-                return cand
+        # Match the canonical path used by the rest of the app
+        # (services/di.py, headless_app.py, ui_qt/qt_app.py):
+        # <cwd>/launcher/config.json. Fall back to the live config_manager
+        # path first, then the CWD root for unusual layouts.
+        candidates: List[Path] = []
+        try:
+            cm = getattr(app, "config_manager", None)
+            cfg = getattr(cm, "config_file", None) if cm else None
+            if cfg:
+                candidates.append(Path(cfg))
+        except Exception:
+            pass
+        candidates.append(Path.cwd() / "launcher" / "config.json")
+        candidates.append(Path.cwd() / "config.json")
+        candidates.append(Path("config.json"))
+        for cand in candidates:
+            try:
+                if cand and cand.exists():
+                    return cand
+            except Exception:
+                continue
         return None
     except Exception:
         return None

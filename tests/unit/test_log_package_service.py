@@ -25,12 +25,12 @@ class TestCreateLogPackage:
         comfy_log.parent.mkdir(parents=True)
         comfy_log.write_text("comfy ui log content", encoding="utf-8")
 
-        # Launcher log + config
+        # Launcher log + config (mirrors the real layout: <cwd>/launcher/)
         launcher_dir = tmp_path / "launcher"
         launcher_dir.mkdir()
         launcher_log = launcher_dir / "launcher.log"
         launcher_log.write_text("launcher log content", encoding="utf-8")
-        config = tmp_path / "config.json"
+        config = launcher_dir / "config.json"
         config.write_text('{"paths": {"comfyui_root": "."}}', encoding="utf-8")
 
         app = _make_app(tmp_path)
@@ -137,3 +137,38 @@ class TestResolveHelpers:
         from services.log_package_service import _resolve_config
         monkeypatch.chdir(tmp_path)
         assert _resolve_config(MagicMock()) is None
+
+    def test_config_prefers_app_config_manager_path(self, tmp_path, monkeypatch):
+        """When the app exposes a config_manager, its path wins over
+        the CWD-based fallback. This mirrors what services/di.py does
+        when building the ConfigService."""
+        from services.log_package_service import _resolve_config
+
+        # Create a config at a non-default location and wire it through
+        # a mock app.config_manager.
+        custom = tmp_path / "custom" / "config.json"
+        custom.parent.mkdir()
+        custom.write_text("{}", encoding="utf-8")
+
+        # A different config at the canonical location must NOT win.
+        launcher_cfg = tmp_path / "launcher" / "config.json"
+        launcher_cfg.parent.mkdir()
+        launcher_cfg.write_text("{}", encoding="utf-8")
+
+        monkeypatch.chdir(tmp_path)
+
+        app = MagicMock()
+        app.config_manager.config_file = str(custom)
+        assert _resolve_config(app) == custom
+
+    def test_config_falls_back_to_launcher_layout(self, tmp_path, monkeypatch):
+        """Without a config_manager attribute, look under launcher/."""
+        from services.log_package_service import _resolve_config
+
+        launcher_cfg = tmp_path / "launcher" / "config.json"
+        launcher_cfg.parent.mkdir()
+        launcher_cfg.write_text("{}", encoding="utf-8")
+        monkeypatch.chdir(tmp_path)
+
+        app = MagicMock(spec=[])  # no config_manager attribute
+        assert _resolve_config(app) == launcher_cfg
