@@ -3,6 +3,7 @@ from pathlib import Path
 import subprocess
 from utils import paths as PATHS
 from utils import pip as PIPUTILS
+from utils import net as NETUTILS
 import re
 
 
@@ -405,9 +406,12 @@ class UpdateService:
         idx = None
         try:
             mode = self.app.pypi_proxy_mode.get()
-            if mode == "aliyun":
-                idx = "https://mirrors.aliyun.com/pypi/simple/"
-            elif mode == "custom":
+            # Built-in mirrors (aliyun / tsinghua / huaweicloud) all carry
+            # their own URL via the shared helper. ``custom`` falls back to
+            # the user-supplied URL, and ``none`` forces the official PyPI
+            # index so a stale pip.ini never silently wins.
+            idx = NETUTILS.get_pypi_index_url_for_mode(mode)
+            if mode == "custom":
                 u = (self.app.pypi_proxy_url.get() or "").strip()
                 if u:
                     idx = u

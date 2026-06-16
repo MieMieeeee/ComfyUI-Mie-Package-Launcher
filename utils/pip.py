@@ -188,15 +188,23 @@ def batch_install_packages(
 
 
 def _run_pip_streaming(cmd, logger, on_progress):
-    """Run pip with streaming stdout, reporting download progress via on_progress.
+    """Run pip with streaming stdout/stderr, reporting progress via on_progress.
 
-    Reads stdout treating both \\r and \\n as line delimiters, so pip's
-    progress-bar updates are captured in real time.  Returns a
-    CompletedProcess with full stdout/stderr for downstream parsing.
+    pip 的进度和阶段信息会同时写到 stdout 和 stderr：下载阶段基本
+    走 stdout，但安装阶段的关键消息（"Installing collected packages"、
+    "Uninstalling"、"Installing"、"Successfully installed"、
+    "Running setup.py install for" 等）大多走 stderr。原来只解析
+    stdout 会导致进入安装阶段后 UI 卡在最后一条 Downloading 消息，
+    看起来像死锁。
+
+    现在把两个流共用一个行解析器；它们会并发地写"当前包"到同一个
+    pkg_state，用轻量锁保护；on_progress 自身经 ui_post 投递到 UI
+    线程，可以从任意线程调用。
     """
     import re as _re
     import subprocess
     import threading
+    import time
 
     si = None
     cf = 0
@@ -216,69 +224,205 @@ def _run_pip_streaming(cmd, logger, on_progress):
         creationflags=cf,
     )
 
-    # Drain stderr in background to avoid pipe deadlock
-    stderr_parts = []
+    # 两个线程（主线程读 stdout，后台线程读 stderr）会同时改"当前包"，
+    # 用锁保护。on_progress 的最终接收者是 UI 线程，不需要再保护。
+    pkg_lock = threading.Lock()
+    pkg_state = {"pkg": None}
+    # 最近一次解析出真实行的时间。心跳线程据此判断要不要覆盖 UI。
+    last_event_lock = threading.Lock()
+    last_event_at = {"t": time.monotonic()}
 
-    def _drain():
+    def _set_pkg(name):
+        with pkg_lock:
+            pkg_state["pkg"] = name
+
+    def _get_pkg():
+        with pkg_lock:
+            return pkg_state["pkg"]
+
+    def _mark_event():
+        with last_event_lock:
+            last_event_at["t"] = time.monotonic()
+
+    def _handle_line(raw):
+        """把一行 pip 输出翻译成 UI 进度消息。stdout 和 stderr 共用。"""
+        try:
+            if raw.startswith("Collecting "):
+                token = raw[len("Collecting "):].split()[0]
+                name = _re.split(r"[><=!]", token)[0].split("[")[0]
+                _set_pkg(name)
+                on_progress(f"正在收集依赖: {name}")
+                return
+
+            if raw.startswith("Downloading "):
+                sm = _re.search(r"\(([^)]+)\)", raw)
+                size = sm.group(1).strip() if sm else ""
+                if not _get_pkg():
+                    url = raw.split("Downloading ", 1)[1].split("(")[0].strip()
+                    _set_pkg(url.split("/")[-1].split("-")[0])
+                p = _get_pkg()
+                on_progress(f"正在下载 {p} ({size})" if size else f"正在下载 {p}")
+                return
+
+            if raw.startswith("Installing collected packages"):
+                tail = raw.split(":", 1)[-1].strip() if ":" in raw else ""
+                on_progress(
+                    "正在安装依赖包" + (f": {tail}" if tail else "")
+                )
+                return
+
+            if raw.startswith("Attempting uninstall:"):
+                m = _re.search(r"Attempting uninstall:\s*(\S+)", raw)
+                if m:
+                    _set_pkg(m.group(1))
+                    on_progress(f"正在清理旧版: {m.group(1)}")
+                return
+
+            if raw.startswith("Uninstalling "):
+                # "Uninstalling comfyui-foo-1.2.3:" — pkg 是 "-<数字>" 之前的部分
+                m = _re.search(r"Uninstalling\s+([A-Za-z0-9_.\-]+)-\d", raw)
+                if m:
+                    _set_pkg(m.group(1))
+                    on_progress(f"正在卸载: {m.group(1)}")
+                return
+
+            if raw.startswith("Installing ") and not raw.startswith(
+                "Installing collected"
+            ):
+                # "Installing comfyui-foo-1.2.3" — pkg 名是 "-<数字>" 之前的部分
+                m = _re.search(
+                    r"Installing\s+([A-Za-z0-9_.\-]+)-\d", raw
+                )
+                if m:
+                    _set_pkg(m.group(1))
+                    on_progress(f"正在安装: {m.group(1)}")
+                return
+
+            if raw.startswith("Successfully installed "):
+                tail = raw[len("Successfully installed "):].strip()
+                on_progress(f"已安装: {tail}")
+                return
+
+            if raw.startswith("Successfully uninstalled "):
+                tail = raw[len("Successfully uninstalled "):].strip()
+                on_progress(f"已卸载: {tail}")
+                return
+
+            if raw.startswith("Running setup.py install for "):
+                # "Running setup.py install for legacy-pkg: started"
+                m = _re.search(
+                    r"Running setup\.py install for\s+(\S+)", raw
+                )
+                if m:
+                    name = m.group(1).rstrip(":")
+                    on_progress(
+                        f"正在编译: {name}（首次安装需要编译，请稍候）"
+                    )
+                return
+
+            if raw.startswith("Found existing installation:"):
+                # "Found existing installation: bar 1.0" 或 "bar-1.0"
+                m = _re.search(
+                    r"Found existing installation:\s+([A-Za-z0-9_.\-]+?)(?:[\s-]\d|$)",
+                    raw,
+                )
+                if m:
+                    _set_pkg(m.group(1))
+                return
+
+            # pip progress bar: "11.1/22.2 MB" or "2.2M/22.2M"
+            pm = _re.search(
+                r"([\d.]+)\s*/\s*([\d.]+)\s*([kKmMgG][bB]?)\b", raw
+            )
+            if pm and _get_pkg():
+                cur, tot, unit = pm.group(1), pm.group(2), pm.group(3)
+                on_progress(
+                    f"正在下载 {_get_pkg()}  {cur} {unit} / {tot} {unit}"
+                )
+        except Exception:
+            # 解析异常不能拖垮后台线程
+            pass
+        else:
+            # 没抛异常就算一次"真实事件"，告诉心跳线程：刚有活干。
+            _mark_event()
+
+    def _drain(stream, line_sink, byte_sink):
+        """按行把 stream 抽干：line_sink 收解码后的行（stdout 用），
+        byte_sink 收原始字节（stderr 用，保持 CompletedProcess.stderr
+        原始内容）；每解析出一行就调一次 _handle_line 推 UI。"""
+        buf = b""
         try:
             while True:
-                c = proc.stderr.read(8192)
-                if not c:
+                chunk = stream.read(512)
+                if not chunk:
                     break
-                stderr_parts.append(c)
+                if byte_sink is not None:
+                    byte_sink.append(chunk)
+                buf += chunk
+                while True:
+                    cr = buf.find(b"\r")
+                    lf = buf.find(b"\n")
+                    if cr < 0 and lf < 0:
+                        break
+                    pos = min(p for p in (cr, lf) if p >= 0)
+                    raw = buf[:pos].decode("utf-8", errors="ignore").strip()
+                    buf = buf[pos + 1:]
+                    if raw:
+                        line_sink.append(raw)
+                        _handle_line(raw)
         except Exception:
             pass
+        if buf:
+            raw = buf.decode("utf-8", errors="ignore").strip()
+            if raw:
+                line_sink.append(raw)
+                _handle_line(raw)
 
-    stderr_thread = threading.Thread(target=_drain, daemon=True)
+    stderr_parts = []
+    stderr_thread = threading.Thread(
+        target=_drain,
+        args=(proc.stderr, [], stderr_parts),
+        daemon=True,
+    )
     stderr_thread.start()
 
-    stdout_lines = []
-    buf = b""
-    pkg = None
+    # 心跳线程：pip 在解析依赖/排队下载阶段可能 5~30s 都不打任何 stdout/stderr，
+    # 不打任何东西 UI 就一直卡在"开始安装…"。每 5s 看一下距上次"真实行"
+    # 多久了，超过 5s 就推一条"正在解析/下载中…（已等待 Ns）"覆盖 UI，
+    # 让用户知道 pip 还在跑。pip 一打新行就由 on_progress 立刻覆盖。
+    heartbeat_start = time.monotonic()
+    heartbeat_stop = threading.Event()
 
-    while True:
-        chunk = proc.stdout.read(512)
-        if not chunk:
-            break
-        buf += chunk
-        # Process complete lines (delimited by \r or \n)
-        while True:
-            cr = buf.find(b"\r")
-            lf = buf.find(b"\n")
-            if cr < 0 and lf < 0:
+    def _heartbeat():
+        while not heartbeat_stop.is_set():
+            # 5s 检查一次；用 Event.wait 让 stop 立刻响应
+            if heartbeat_stop.wait(5.0):
                 break
-            pos = min(p for p in (cr, lf) if p >= 0)
-            raw = buf[:pos].decode("utf-8", errors="ignore").strip()
-            buf = buf[pos + 1 :]
-            if not raw:
+            with last_event_lock:
+                since_last = time.monotonic() - last_event_at["t"]
+            # 5s 内有真实行 → 不打扰 pip 的进度显示
+            if since_last < 5.0:
                 continue
-            stdout_lines.append(raw)
+            elapsed = int(time.monotonic() - heartbeat_start)
             try:
-                if raw.startswith("Collecting "):
-                    token = raw[len("Collecting ") :].split()[0]
-                    pkg = _re.split(r"[><=!]", token)[0].split("[")[0]
-                    on_progress(f"正在收集依赖: {pkg}")
-                elif raw.startswith("Downloading "):
-                    sm = _re.search(r"\(([^)]+)\)", raw)
-                    size = sm.group(1).strip() if sm else ""
-                    if not pkg:
-                        url = raw.split("Downloading ", 1)[1].split("(")[0].strip()
-                        pkg = url.split("/")[-1].split("-")[0]
-                    on_progress(
-                        f"正在下载 {pkg} ({size})" if size else f"正在下载 {pkg}"
-                    )
-                elif "Installing collected packages" in raw:
-                    on_progress("正在安装依赖包...")
-                else:
-                    # pip progress bar: "11.1/22.2 MB" or "2.2M/22.2M"
-                    pm = _re.search(
-                        r"([\d.]+)\s*/\s*([\d.]+)\s*([kKmMgG][bB]?)\b", raw
-                    )
-                    if pm and pkg:
-                        cur, tot, unit = pm.group(1), pm.group(2), pm.group(3)
-                        on_progress(f"正在下载 {pkg}  {cur} {unit} / {tot} {unit}")
+                on_progress(
+                    f"正在解析依赖/下载中…（已等待 {elapsed}s，"
+                    f"如长时间停留请检查网络）"
+                )
             except Exception:
+                # on_progress 自身出问题不能拖垮后台线程
                 pass
+
+    heartbeat_thread = threading.Thread(target=_heartbeat, daemon=True)
+    heartbeat_thread.start()
+
+    stdout_lines = []
+    try:
+        _drain(proc.stdout, stdout_lines, None)
+    finally:
+        # 退出前一定要停心跳，否则它会一直打 on_progress
+        heartbeat_stop.set()
+        heartbeat_thread.join(timeout=2)
 
     proc.wait()
     stderr_thread.join(timeout=5)

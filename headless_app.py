@@ -146,6 +146,11 @@ class HeadlessAppContext:
             launch_opts.get("browser_open_mode", "default")
         )
         self.show_console = BoolVar(launch_opts.get("show_console", True))
+        # -1 = 自动（不传 --cuda-device）；>=0 = --cuda-device N
+        try:
+            self.gpu_device = StringVar(str(launch_opts.get("gpu_device", -1)))
+        except Exception:
+            self.gpu_device = StringVar("-1")
 
         # HF mirror settings
         proxy_settings = self.config.get("proxy_settings", {})

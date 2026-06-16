@@ -1,9 +1,38 @@
 from pathlib import Path
 from urllib.parse import urlparse
 
+# PyPI mirror URLs. These are well-known, stable endpoints that mirror the
+# official Python Package Index. They are used both for writing pip.ini and
+# for explicit ``pip install -i <url>`` invocations from the launcher.
 PYPI_ALIYUN_URL = 'https://mirrors.aliyun.com/pypi/simple/'
+PYPI_TSINGHUA_URL = 'https://pypi.tuna.tsinghua.edu.cn/simple/'
+PYPI_HUAWEICLOUD_URL = 'https://repo.huaweicloud.com/repository/pypi/simple/'
+
 HF_MIRROR_URL_DEFAULT = 'https://hf-mirror.com'
 GITHUB_PROXY_DEFAULT_URL = 'https://gh-proxy.com/'
+
+
+# Mode values used by the launcher UI / config. Keep these in sync with
+# ``ui_qt/pages/launch/environment_section.py`` and the combo box options.
+PYPI_MODE_NONE = 'none'
+PYPI_MODE_ALIYUN = 'aliyun'
+PYPI_MODE_TSINGHUA = 'tsinghua'
+PYPI_MODE_HUAWEICLOUD = 'huaweicloud'
+PYPI_MODE_CUSTOM = 'custom'
+
+
+# Single source of truth for ``mode -> index URL`` resolution. Unknown modes
+# and ``none`` / ``custom`` return ``None`` so callers can decide what to do
+# (e.g. fall back to pypi.org or to a user-supplied URL).
+def get_pypi_index_url_for_mode(mode: str) -> str | None:
+    mode = (mode or '').strip()
+    if mode == PYPI_MODE_ALIYUN:
+        return PYPI_ALIYUN_URL
+    if mode == PYPI_MODE_TSINGHUA:
+        return PYPI_TSINGHUA_URL
+    if mode == PYPI_MODE_HUAWEICLOUD:
+        return PYPI_HUAWEICLOUD_URL
+    return None
 
 
 def ensure_trailing_slash(url: str) -> str:
@@ -49,9 +78,17 @@ def update_pip_ini(python_exec_path: str, mode: str, index_url: str, pip_proxy: 
                         pass
             return
 
-        if mode == 'aliyun':
-            idx_url = PYPI_ALIYUN_URL
-            trusted_host = 'mirrors.aliyun.com'
+        # Built-in mirror modes (aliyun / tsinghua / huaweicloud) carry their
+        # own URL and trusted host. Everything else (``custom`` etc.) falls
+        # back to whatever the caller supplied in ``index_url``.
+        idx_url = get_pypi_index_url_for_mode(mode)
+        trusted_host = ''
+        if idx_url:
+            try:
+                parsed = urlparse(idx_url)
+                trusted_host = parsed.hostname or ''
+            except Exception:
+                trusted_host = ''
         else:
             idx_url = (index_url or '').strip()
             try:

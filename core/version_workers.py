@@ -365,5 +365,130 @@ except Exception as e:
                 self.retryNeeded.emit(self.attempt)
 
 
+class GpuEnumerateWorker(BaseVersionWorker):
+    """枚举所有可见 GPU（含索引、名称、显存），供启动器显卡下拉使用。"""
+
+    # 信号载荷：list[dict]，每项形如 {"index": 0, "name": "NVIDIA RTX 4090", "memory_mb": 24576}
+    inventoryReady = QtCore.pyqtSignal(list)
+
+    def run(self):
+        inventory = []
+        try:
+            self._log("info", "开始枚举 GPU ...")
+            inventory = self._enumerate_via_pynvml()
+            if not inventory:
+                inventory = self._enumerate_via_nvidia_smi()
+        except Exception as e:
+            self._log("warning", "GPU 枚举异常: %s", e)
+        self._log("info", "GPU 枚举完成，共 %d 张", len(inventory))
+        try:
+            summary = [(g.get("index"), g.get("name"), g.get("memory_mb")) for g in (inventory or [])]
+            self._log("info", "gpu: 枚举完成 共 %d 张 -> %s", len(inventory), summary)
+        except Exception:
+            pass
+        self.inventoryReady.emit(inventory)
+
+    def _enumerate_via_pynvml(self):
+        script = """
+import sys, os, warnings
+warnings.filterwarnings("ignore")
+try:
+    import pynvml
+    pynvml.nvmlInit()
+    count = pynvml.nvmlDeviceGetCount()
+    for i in range(count):
+        h = pynvml.nvmlDeviceGetHandleByIndex(i)
+        name = pynvml.nvmlDeviceGetName(h)
+        if isinstance(name, bytes):
+            name = name.decode("utf-8")
+        mem = pynvml.nvmlDeviceGetMemoryInfo(h).total // (1024 * 1024)
+        # 用 \\x1f 作为字段分隔，避免名称中含 |
+        print(f"{i}\\x1f{name}\\x1f{mem}", flush=True)
+    pynvml.nvmlShutdown()
+except Exception as e:
+    print(f"ERROR:{e}", flush=True)
+"""
+        try:
+            r = run_hidden(
+                [self.app.python_exec, "-c", script],
+                capture_output=True,
+                text=True,
+                timeout=30,
+            )
+        except Exception as e:
+            self._log("warning", "pynvml 枚举执行失败: %s", e)
+            return []
+        return self._parse_lines(r.stdout)
+
+    def _enumerate_via_nvidia_smi(self):
+        import shutil
+        nvidia_smi = shutil.which("nvidia-smi")
+        if not nvidia_smi:
+            return []
+        try:
+            r = run_hidden(
+                [
+                    nvidia_smi,
+                    "--query-gpu=index,name,memory.total",
+                    "--format=csv,noheader,nounits",
+                ],
+                capture_output=True,
+                text=True,
+                timeout=10,
+            )
+        except Exception as e:
+            self._log("warning", "nvidia-smi 枚举执行失败: %s", e)
+            return []
+        if r.returncode != 0 or not r.stdout.strip():
+            return []
+        out = []
+        for line in r.stdout.strip().splitlines():
+            parts = [p.strip() for p in line.split(",")]
+            if len(parts) < 2:
+                continue
+            try:
+                idx = int(parts[0])
+            except Exception:
+                continue
+            name = parts[1] if len(parts) >= 2 else ""
+            mem_mb = 0
+            if len(parts) >= 3:
+                try:
+                    mem_mb = int(float(parts[2]))
+                except Exception:
+                    mem_mb = 0
+            out.append({"index": idx, "name": name, "memory_mb": mem_mb})
+        return out
+
+    @staticmethod
+    def _parse_lines(stdout):
+        out = []
+        if not stdout:
+            return out
+        for line in stdout.splitlines():
+            line = line.strip()
+            if not line or line.startswith("ERROR:"):
+                continue
+            parts = line.split("\x1f")
+            if len(parts) < 3:
+                # 兜底：尝试 | 分隔
+                parts = line.split("|")
+            if len(parts) < 2:
+                continue
+            try:
+                idx = int(parts[0])
+            except Exception:
+                continue
+            name = parts[1].strip() if len(parts) >= 2 else ""
+            mem_mb = 0
+            if len(parts) >= 3:
+                try:
+                    mem_mb = int(parts[2])
+                except Exception:
+                    mem_mb = 0
+            out.append({"index": idx, "name": name, "memory_mb": mem_mb})
+        return out
+
+
 # Alias for backward compatibility
 CoreVersionWorker = ComfyUIVersionWorker

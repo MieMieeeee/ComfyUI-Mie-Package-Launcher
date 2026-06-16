@@ -193,6 +193,20 @@ class ProcessManager:
                 self.on_start_failed(str(_e))
                 return
             try:
+                _gd = getattr(self.app, "gpu_device", None)
+                _gdv = -1
+                if _gd is not None:
+                    try:
+                        _gdv = int(_gd.get())
+                    except Exception:
+                        _gdv = -1
+                self.app.logger.info(
+                    "gpu: 解析结果 gpu_device=%s (%s)",
+                    _gdv, ("不传 --cuda-device" if _gdv < 0 else f"将追加 --cuda-device {_gdv}"),
+                )
+            except Exception:
+                pass
+            try:
                 self.app.logger.info("启动命令: %s", " ".join(cmd))
             except Exception:
                 pass

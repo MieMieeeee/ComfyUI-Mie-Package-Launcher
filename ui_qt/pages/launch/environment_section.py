@@ -182,8 +182,19 @@ class EnvironmentSection(QtWidgets.QWidget):
         form_layout.addWidget(_add_gh_container, 1, 1)
 
         # ============== PyPI 代理 ==============
+        # Built-in PyPI mirror presets. ``text`` is what the combo box shows
+        # to the user; ``mode`` is the value persisted in config; ``url`` is
+        # what gets written to pip.ini / passed to ``pip -i``. Keep these in
+        # sync with ``utils.net.get_pypi_index_url_for_mode`` and the
+        # ``_pypi_mode_ui_text`` helper in ``qt_app.py``.
+        _pypi_builtin_options = [
+            ("阿里云", "aliyun", "https://mirrors.aliyun.com/pypi/simple/"),
+            ("清华", "tsinghua", "https://pypi.tuna.tsinghua.edu.cn/simple/"),
+            ("华为云", "huaweicloud", "https://repo.huaweicloud.com/repository/pypi/simple/"),
+        ]
+        _pypi_builtin_texts = [t for (t, _m, _u) in _pypi_builtin_options]
         env_pypi_combo = NoWheelComboBox()
-        env_pypi_combo.addItems(["不使用", "阿里云", "自定义"])
+        env_pypi_combo.addItems(["不使用"] + _pypi_builtin_texts + ["自定义"])
         env_pypi_combo.setMinimumWidth(120)
         env_pypi_combo.setStyleSheet(self._get_input_style())
 
@@ -204,10 +215,21 @@ class EnvironmentSection(QtWidgets.QWidget):
             env_pypi_entry.setReadOnly(not is_custom)
             env_pypi_entry.setVisible(not is_none)
 
-            mode = "none" if is_none else ("aliyun" if text == "阿里云" else "custom")
+            # Resolve the new text -> (mode, url). All built-in mirrors are
+            # read-only; only "自定义" lets the user type a URL.
+            builtin = next(
+                (item for item in _pypi_builtin_options if item[0] == text),
+                None,
+            )
+            if is_none:
+                mode = "none"
+            elif builtin is not None:
+                mode = builtin[1]
+            else:
+                mode = "custom"
 
-            if text == "阿里云":
-                url = "https://mirrors.aliyun.com/pypi/simple/"
+            if builtin is not None:
+                url = builtin[2]
                 env_pypi_entry.setText(url)
                 if hasattr(self.app, 'pypi_proxy_url'):
                     self.app.pypi_proxy_url.set(url)

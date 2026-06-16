@@ -66,6 +66,7 @@ class ConfigManager:
                 "browser_open_mode": "default",
                 "custom_browser_path": "",
                 "show_console": True,
+                "gpu_device": -1,
             },
             "ui_settings": {
                 "window_width": 800,
@@ -290,3 +291,5 @@ class ConfigManager:
     def get_config(self) -> Dict[str, Any]:
         """获取完整配置"""
         return self.config.copy()
+
+

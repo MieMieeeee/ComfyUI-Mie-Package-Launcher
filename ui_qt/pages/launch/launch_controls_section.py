@@ -165,6 +165,177 @@ class LaunchControlsSection(QtWidgets.QWidget):
         form_layout.addWidget(attn_label, 1, 2)
         form_layout.addWidget(attn_combo, 1, 3)
 
+        # ============== 显卡 ==============
+        gpu_label = QtWidgets.QLabel("显卡：")
+        gpu_label.setStyleSheet(lbl_style)
+
+        gpu_combo = NoWheelComboBox()
+        gpu_combo.setMinimumWidth(220)
+        gpu_combo.setSizePolicy(QtWidgets.QSizePolicy.Expanding, QtWidgets.QSizePolicy.Fixed)
+        # 让 popup 按最长项自适应宽度，避免下拉里 GPU 名称被裁
+        gpu_combo.setSizeAdjustPolicy(QtWidgets.QComboBox.AdjustToContents)
+        gpu_combo.setStyleSheet(self._get_input_style())
+        # data=-1 表示默认（不传 --cuda-device）；>=0 表示 --cuda-device N
+        gpu_combo.addItem("默认", -1)
+        gpu_combo.setToolTip("选择要使用的显卡索引；默认不传 --cuda-device 时由 ComfyUI 自行决定。")
+
+        def _refresh_gpu_combo(inventory=None):
+            """根据 GPU 库存刷新下拉项。inventory 为 None 时主动拉取。"""
+            try:
+                if inventory is None and hasattr(self.app, "get_gpu_inventory"):
+                    inventory = self.app.get_gpu_inventory()
+            except Exception:
+                inventory = []
+            current_data = -1
+            try:
+                current_data = int(self.app.gpu_device.get())
+            except Exception:
+                current_data = -1
+            try:
+                _summary = [(g.get("index"), g.get("name"), g.get("memory_mb")) for g in (inventory or [])]
+                if hasattr(self.app, "logger"):
+                    self.app.logger.info(
+                        "gpu: 刷新下拉 inventory=%d 项 %s current_data=%s",
+                        len(_summary), _summary, current_data,
+                    )
+            except Exception:
+                pass
+            # 阻断信号，避免重建时触发保存
+            try:
+                gpu_combo.blockSignals(True)
+            except Exception:
+                pass
+            gpu_combo.clear()
+            gpu_combo.addItem("默认", -1)
+            if not inventory:
+                # 没检测到卡：禁用下拉，保持默认项
+                gpu_combo.setEnabled(False)
+                if current_data != -1:
+                    try:
+                        self.app.gpu_device.set(-1)
+                    except Exception:
+                        pass
+                gpu_combo.setCurrentIndex(0)
+                try:
+                    gpu_combo.blockSignals(False)
+                except Exception:
+                    pass
+                return
+            # CPU 模式置灰，否则启用
+            try:
+                is_cpu = (self.app.compute_mode.get() == "cpu")
+            except Exception:
+                is_cpu = False
+            gpu_combo.setEnabled(not is_cpu)
+            available_indexes = set()
+            for gpu in inventory:
+                idx = gpu.get("index", -1)
+                if idx < 0:
+                    continue
+                name = (gpu.get("name") or "Unknown GPU").strip() or "Unknown GPU"
+                # 裁掉冗长的 vendor 前缀，让下拉能显示全名
+                for prefix in ("NVIDIA GeForce ", "NVIDIA ", "AMD Radeon ", "AMD ", "Intel "):
+                    if name.startswith(prefix):
+                        name = name[len(prefix):]
+                        break
+                mem_mb = int(gpu.get("memory_mb") or 0)
+                if mem_mb > 0:
+                    mem_gb = mem_mb / 1024.0
+                    if mem_gb >= 10:
+                        mem_text = f"{mem_gb:.0f} GB"
+                    else:
+                        mem_text = f"{mem_gb:.1f} GB"
+                    display = f"GPU {idx}: {name} ({mem_text})"
+                else:
+                    display = f"GPU {idx}: {name}"
+                # 把完整信息放到 tooltip，方便查看
+                raw_name = (gpu.get("name") or "").strip()
+                mem_part = mem_text if mem_mb > 0 else "未知显存"
+                full_info = f"GPU {idx}: {raw_name} ({mem_part})"
+                gpu_combo.addItem(display, idx)
+                # 设置 item 的 tooltip：取最后一个 item 即可，因为下拉关闭后能看到
+                item_idx = gpu_combo.count() - 1
+                try:
+                    gpu_combo.setItemData(item_idx, full_info, Qt.ToolTipRole)
+                except Exception:
+                    pass
+                available_indexes.add(idx)
+            # 选回当前值；若当前值不在库存中则回退 -1
+            if current_data in available_indexes:
+                for i in range(gpu_combo.count()):
+                    if gpu_combo.itemData(i) == current_data:
+                        gpu_combo.setCurrentIndex(i)
+                        break
+            else:
+                gpu_combo.setCurrentIndex(0)
+                if current_data != -1:
+                    try:
+                        self.app.gpu_device.set(-1)
+                    except Exception:
+                        pass
+            try:
+                _rows = [(i, gpu_combo.itemText(i), gpu_combo.itemData(i)) for i in range(gpu_combo.count())]
+                if hasattr(self.app, "logger"):
+                    self.app.logger.info(
+                        "gpu: 下拉框已重建 共 %d 行 %s; currentIndex=%d",
+                        len(_rows), _rows, gpu_combo.currentIndex(),
+                    )
+            except Exception:
+                pass
+            try:
+                gpu_combo.blockSignals(False)
+            except Exception:
+                pass
+
+        def _on_gpu_combo_changed(idx):
+            try:
+                data = gpu_combo.itemData(idx)
+                if data is None:
+                    data = -1
+                self.app.gpu_device.set(int(data))
+                self._save_config()
+                try:
+                    if hasattr(self.app, "logger"):
+                        self.app.logger.info(
+                            "gpu: 用户选择 row=%d text=%r userData=%s -> app.gpu_device=%s (已保存)",
+                            idx, gpu_combo.itemText(idx), data, self.app.gpu_device.get(),
+                        )
+                except Exception:
+                    pass
+            except Exception:
+                pass
+
+        gpu_combo.currentIndexChanged.connect(_on_gpu_combo_changed)
+        if hasattr(self.app, "register_gpu_inventory_listener"):
+            try:
+                self._gpu_unregister = self.app.register_gpu_inventory_listener(_refresh_gpu_combo)
+            except Exception:
+                pass
+        # 计算模式联动：CPU 模式下置灰
+        def _sync_gpu_enabled():
+            try:
+                is_cpu = (self.app.compute_mode.get() == "cpu")
+            except Exception:
+                is_cpu = False
+            try:
+                inv = self.app.get_gpu_inventory() if hasattr(self.app, "get_gpu_inventory") else []
+                gpu_combo.setEnabled(bool(inv) and not is_cpu)
+            except Exception:
+                pass
+        if hasattr(self.app, "compute_mode"):
+            try:
+                self.app.compute_mode.bind(_sync_gpu_enabled)
+            except Exception:
+                pass
+
+        # 初始化下拉（已有库存时立即生效）
+        _refresh_gpu_combo()
+
+        form_layout.addWidget(gpu_label, 2, 0)
+        form_layout.addWidget(gpu_combo, 2, 1)
+        self._gpu_label = gpu_label
+        self._gpu_combo = gpu_combo
+
         # ============== 自动打开浏览器 ==============
         open_label = QtWidgets.QLabel("自动打开浏览器：")
         open_label.setStyleSheet(lbl_style)
@@ -188,10 +359,16 @@ class LaunchControlsSection(QtWidgets.QWidget):
             open_combo.currentIndexChanged.connect(lambda i: (self.app.browser_open_mode.set(open_opts[i][1]), self._save_config()))
         open_combo.setToolTip("启动后自动打开浏览器访问Web界面")
 
-        cpath_btn = QtWidgets.QPushButton("选择浏览器…")
+        cpath_btn = QtWidgets.QPushButton()
         cpath_btn.setCursor(Qt.PointingHandCursor)
-        cpath_btn.setMinimumWidth(120)
+        cpath_btn.setFixedWidth(32)
         cpath_btn.setStyleSheet(self._get_input_style())
+        # 用一个紧凑的目录图标代替原来的"选择浏览器…"长文本按钮
+        try:
+            cpath_btn.setIcon(self.style().standardIcon(QtWidgets.QStyle.SP_DirOpenIcon))
+            cpath_btn.setIconSize(QtCore.QSize(14, 14))
+        except Exception:
+            cpath_btn.setText("…")
         initial_path = ""
         try:
             if hasattr(self.app, "custom_browser_path"):
@@ -199,15 +376,9 @@ class LaunchControlsSection(QtWidgets.QWidget):
         except Exception:
             initial_path = ""
         if initial_path:
-            try:
-                from pathlib import Path
-                name = Path(initial_path).name
-                cpath_btn.setText(f"已添加: {name}")
-            except Exception:
-                try:
-                    cpath_btn.setText("已添加浏览器")
-                except Exception:
-                    pass
+            cpath_btn.setToolTip(f"已选择: {initial_path}")
+        else:
+            cpath_btn.setToolTip("选择浏览器程序")
 
         def _select_browser():
             from PyQt5.QtWidgets import QFileDialog
@@ -222,12 +393,10 @@ class LaunchControlsSection(QtWidgets.QWidget):
             try:
                 if hasattr(self.app, "custom_browser_path"):
                     self.app.custom_browser_path.set(file_path)
-                from pathlib import Path
                 try:
-                    name = Path(file_path).name
-                    cpath_btn.setText(f"已添加: {name}")
+                    cpath_btn.setToolTip(f"已选择: {file_path}")
                 except Exception:
-                    cpath_btn.setText("已添加浏览器")
+                    pass
                 self._save_config()
             except Exception:
                 pass
@@ -267,8 +436,8 @@ class LaunchControlsSection(QtWidgets.QWidget):
             pass
         _update_cpath_vis()
 
-        form_layout.addWidget(open_label, 2, 0)
-        form_layout.addWidget(row2_container, 2, 1, 1, 3)
+        form_layout.addWidget(open_label, 2, 2)
+        form_layout.addWidget(row2_container, 2, 3)
 
         # ============== 复选框 ==============
         hbox_opts = QtWidgets.QHBoxLayout()
@@ -371,7 +540,7 @@ class LaunchControlsSection(QtWidgets.QWidget):
             # 跳过 GroupBox 的标题
             if label.parent() and isinstance(label.parent(), QtWidgets.QGroupBox):
                 parent_title = label.parent().title()
-                if parent_title == "启动控制" and label.text() in ["运行模式：", "端口号：", "显存策略：", "注意力优化：", "自动打开浏览器：", "额外选项："]:
+                if parent_title == "启动控制" and label.text() in ["运行模式：", "端口号：", "显存策略：", "注意力优化：", "显卡：", "自动打开浏览器：", "额外选项："]:
                     label.setStyleSheet(lbl_style)
         
         # 更新输入框样式

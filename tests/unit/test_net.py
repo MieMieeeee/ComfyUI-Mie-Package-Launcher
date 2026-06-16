@@ -12,12 +12,15 @@ import pytest
 
 from utils.net import (
     PYPI_ALIYUN_URL,
+    PYPI_TSINGHUA_URL,
+    PYPI_HUAWEICLOUD_URL,
     HF_MIRROR_URL_DEFAULT,
     GITHUB_PROXY_DEFAULT_URL,
     ensure_trailing_slash,
     build_github_endpoint,
     update_pip_ini,
     apply_pip_proxy_settings,
+    get_pypi_index_url_for_mode,
 )
 from services.network_service import NetworkService
 
@@ -390,3 +393,118 @@ class TestConstants:
         """GITHUB_PROXY_DEFAULT_URL should be a valid HTTPS URL."""
         assert GITHUB_PROXY_DEFAULT_URL.startswith("https://")
         assert GITHUB_PROXY_DEFAULT_URL.endswith("/")
+
+
+class TestGetPypiIndexUrlForMode:
+    """Tests for get_pypi_index_url_for_mode helper."""
+
+    def test_aliyun_returns_aliyun_url(self):
+        assert get_pypi_index_url_for_mode("aliyun") == PYPI_ALIYUN_URL
+
+    def test_tsinghua_returns_tsinghua_url(self):
+        assert get_pypi_index_url_for_mode("tsinghua") == PYPI_TSINGHUA_URL
+
+    def test_huaweicloud_returns_huaweicloud_url(self):
+        assert (
+            get_pypi_index_url_for_mode("huaweicloud") == PYPI_HUAWEICLOUD_URL
+        )
+
+    def test_none_returns_none(self):
+        """``none`` is resolved by the caller (forces pypi.org)."""
+        assert get_pypi_index_url_for_mode("none") is None
+
+    def test_custom_returns_none(self):
+        """``custom`` uses caller-supplied URL, not the helper."""
+        assert get_pypi_index_url_for_mode("custom") is None
+
+    def test_unknown_mode_returns_none(self):
+        assert get_pypi_index_url_for_mode("not-a-real-mirror") is None
+
+    def test_empty_string_returns_none(self):
+        assert get_pypi_index_url_for_mode("") is None
+
+    def test_none_input_returns_none(self):
+        assert get_pypi_index_url_for_mode(cast(str, None)) is None
+
+    def test_strips_whitespace(self):
+        assert (
+            get_pypi_index_url_for_mode("  aliyun  ") == PYPI_ALIYUN_URL
+        )
+
+
+class TestTsinghuaAndHuaweiConstants:
+    """Tests for the new mirror URL constants."""
+
+    def test_pypi_tsinghua_url_is_valid(self):
+        assert PYPI_TSINGHUA_URL.startswith("https://")
+        assert "tsinghua" in PYPI_TSINGHUA_URL.lower()
+        assert PYPI_TSINGHUA_URL.endswith("/")
+
+    def test_pypi_huaweicloud_url_is_valid(self):
+        assert PYPI_HUAWEICLOUD_URL.startswith("https://")
+        assert "huaweicloud" in PYPI_HUAWEICLOUD_URL.lower()
+        assert PYPI_HUAWEICLOUD_URL.endswith("/")
+
+
+class TestUpdatePipIniBuiltinMirrors:
+    """update_pip_ini should honor all built-in mirror modes."""
+
+    def test_mode_tsinghua_uses_tsinghua_mirror(self, tmp_path):
+        python_exe = tmp_path / "python.exe"
+        python_exe.touch()
+
+        update_pip_ini(str(python_exe), "tsinghua", "", "", None)
+
+        pip_ini = tmp_path / "pip.ini"
+        assert pip_ini.exists()
+        content = pip_ini.read_text(encoding="utf-8")
+        assert PYPI_TSINGHUA_URL in content
+        assert "pypi.tuna.tsinghua.edu.cn" in content
+
+    def test_mode_huaweicloud_uses_huaweicloud_mirror(self, tmp_path):
+        python_exe = tmp_path / "python.exe"
+        python_exe.touch()
+
+        update_pip_ini(str(python_exe), "huaweicloud", "", "", None)
+
+        pip_ini = tmp_path / "pip.ini"
+        assert pip_ini.exists()
+        content = pip_ini.read_text(encoding="utf-8")
+        assert PYPI_HUAWEICLOUD_URL in content
+        assert "repo.huaweicloud.com" in content
+
+    def test_builtin_mirror_overrides_index_url_param(self, tmp_path):
+        """The helper resolves the URL itself, ignoring index_url."""
+        python_exe = tmp_path / "python.exe"
+        python_exe.touch()
+
+        update_pip_ini(
+            str(python_exe),
+            "tsinghua",
+            "https://should-be-ignored.example.com/simple/",
+            "",
+            None,
+        )
+
+        pip_ini = tmp_path / "pip.ini"
+        assert pip_ini.exists()
+        content = pip_ini.read_text(encoding="utf-8")
+        assert PYPI_TSINGHUA_URL in content
+        assert "should-be-ignored" not in content
+
+    def test_builtin_mirror_includes_proxy_when_provided(self, tmp_path):
+        python_exe = tmp_path / "python.exe"
+        python_exe.touch()
+
+        update_pip_ini(
+            str(python_exe),
+            "huaweicloud",
+            "",
+            "http://proxy.local:8080",
+            None,
+        )
+
+        pip_ini = tmp_path / "pip.ini"
+        content = pip_ini.read_text(encoding="utf-8")
+        assert "proxy = http://proxy.local:8080" in content
+        assert PYPI_HUAWEICLOUD_URL in content

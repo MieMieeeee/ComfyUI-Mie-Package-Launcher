@@ -21,6 +21,7 @@ class AppState:
     attention_mode: str = ""
     listen_all: bool = True
     default_port: str = "8188"
+    gpu_device: int = -1
     
     def to_dict(self) -> dict:
         """Serialize state to dict.

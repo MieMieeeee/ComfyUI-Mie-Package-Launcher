@@ -20,6 +20,7 @@ from core.version_workers import (
     TemplateVersionWorker,
     GitStatusWorker,
     GpuCheckWorker,
+    GpuEnumerateWorker,
     BaseVersionWorker,
 )
 from core.app_state import AppState
@@ -810,6 +811,8 @@ class PyQtLauncher(QtWidgets.QMainWindow, process_events.ProcessCallback):
         self.browser_open_mode = Var("default")
         self.custom_browser_path = Var("")
         self.show_console = BoolVar(True)
+        # -1 = 不传 --cuda-device（使用全部可见卡）；>=0 = --cuda-device N
+        self.gpu_device = Var(-1)
         launch_cfg = (
             self.config.get("launch_options", {})
             if isinstance(self.config, dict)
@@ -859,6 +862,20 @@ class PyQtLauncher(QtWidgets.QMainWindow, process_events.ProcessCallback):
             self.show_console.set(
                 launch_cfg.get("show_console", True)
             )
+            try:
+                self.gpu_device.set(int(launch_cfg.get("gpu_device", -1)))
+                try:
+                    if hasattr(self, "logger"):
+                        self.logger.info("gpu: 加载配置 gpu_device=%s", self.gpu_device.get())
+                except Exception:
+                    pass
+            except Exception:
+                self.gpu_device.set(-1)
+                try:
+                    if hasattr(self, "logger"):
+                        self.logger.warning("gpu: 加载配置 gpu_device 失败, 回落 -1")
+                except Exception:
+                    pass
         except Exception:
             pass
         self.state = AppState(
@@ -872,6 +889,7 @@ class PyQtLauncher(QtWidgets.QMainWindow, process_events.ProcessCallback):
             attention_mode=self.attention_mode.get(),
             listen_all=self.listen_all.get(),
             default_port=self.custom_port.get(),
+            gpu_device=self.gpu_device.get(),
         )
         proxy_cfg = (
             self.config.get("proxy_settings", {})
@@ -884,11 +902,15 @@ class PyQtLauncher(QtWidgets.QMainWindow, process_events.ProcessCallback):
         )
 
         def _pypi_mode_ui_text(mode: str):
-            return (
-                "阿里云"
-                if mode == "aliyun"
-                else ("自定义" if mode == "custom" else "不使用")
-            )
+            if mode == "aliyun":
+                return "阿里云"
+            if mode == "tsinghua":
+                return "清华"
+            if mode == "huaweicloud":
+                return "华为云"
+            if mode == "custom":
+                return "自定义"
+            return "不使用"
 
         self.pypi_proxy_mode_ui = Var(_pypi_mode_ui_text(self.pypi_proxy_mode.get()))
         self.hf_mirror_url = Var(
@@ -2702,6 +2724,84 @@ class PyQtLauncher(QtWidgets.QMainWindow, process_events.ProcessCallback):
             except Exception:
                 pass
 
+    def _start_gpu_enumerate(self, attempt=1):
+        """启动 GPU 枚举 worker（用于启动控制区的显卡下拉）"""
+        try:
+            if not hasattr(self, "_gpu_enum_workers"):
+                self._gpu_enum_workers = {}
+
+            worker_id = f"gpu_enum_{attempt}"
+            worker = GpuEnumerateWorker(self, attempt)
+            worker.inventoryReady.connect(self._on_gpu_inventory_ready)
+
+            def on_retry(attempt_num):
+                QtCore.QTimer.singleShot(
+                    BaseVersionWorker.RETRY_DELAY_MS,
+                    lambda: self._start_gpu_enumerate(attempt_num + 1),
+                )
+
+            worker.retryNeeded.connect(on_retry)
+            worker.finished.connect(lambda: self._cleanup_worker("gpu_enum", attempt))
+            worker.finished.connect(worker.deleteLater)
+
+            self._gpu_enum_workers[worker_id] = worker
+            worker.start()
+        except Exception as e:
+            try:
+                if hasattr(self, "logger"):
+                    self.logger.warning("启动 GPU 枚举 worker 失败: %s", e)
+            except Exception:
+                pass
+
+    def _on_gpu_inventory_ready(self, inventory):
+        """保存枚举结果，并通知已注册的监听者（启动控制区下拉）刷新。"""
+        try:
+            self._gpu_inventory = list(inventory or [])
+            if hasattr(self, "logger"):
+                self.logger.info("GPU 库存更新: %d 张", len(self._gpu_inventory))
+        except Exception:
+            self._gpu_inventory = []
+        # 通知所有监听者（QList 是 Qt 安全的；使用 invokeMethod 风格）
+        try:
+            listeners = list(getattr(self, "_gpu_inventory_listeners", []) or [])
+            for fn in listeners:
+                try:
+                    fn(list(self._gpu_inventory))
+                except Exception as e:
+                    try:
+                        if hasattr(self, "logger"):
+                            self.logger.warning("GPU 库存监听回调失败: %s", e)
+                    except Exception:
+                        pass
+        except Exception:
+            pass
+
+    def get_gpu_inventory(self):
+        """供 UI 同步读取的当前 GPU 库存（无数据时返回空列表）。"""
+        try:
+            return list(getattr(self, "_gpu_inventory", []) or [])
+        except Exception:
+            return []
+
+    def register_gpu_inventory_listener(self, fn):
+        """注册 GPU 库存更新监听器；返回反注册函数。"""
+        try:
+            listeners = getattr(self, "_gpu_inventory_listeners", None)
+            if listeners is None:
+                listeners = []
+                self._gpu_inventory_listeners = listeners
+            if fn not in listeners:
+                listeners.append(fn)
+        except Exception:
+            pass
+        def _unregister():
+            try:
+                if fn in self._gpu_inventory_listeners:
+                    self._gpu_inventory_listeners.remove(fn)
+            except Exception:
+                pass
+        return _unregister
+
     def get_version_info(self, scope="all"):
         """获取版本信息 - 全异步实现，各检测项独立运行"""
         try:
@@ -2749,6 +2849,11 @@ class PyQtLauncher(QtWidgets.QMainWindow, process_events.ProcessCallback):
                 )
                 # GPU 检测
                 self._start_gpu_check()
+                # GPU 枚举（供启动控制区显卡下拉）
+                try:
+                    self._start_gpu_enumerate()
+                except Exception:
+                    pass
 
             if scope in ("all", "core_only", "selected"):
                 # 内核版本
@@ -2788,6 +2893,7 @@ class PyQtLauncher(QtWidgets.QMainWindow, process_events.ProcessCallback):
                 browser_open_mode=self.browser_open_mode.get() or "default",
                 custom_browser_path=self.custom_browser_path.get() or "",
                 show_console=self.show_console.get(),
+                gpu_device=int(self.gpu_device.get() if self.gpu_device.get() is not None else -1),
             )
             self.services.config.update_proxy_settings(
                 pypi_proxy_mode=self.pypi_proxy_mode.get(),

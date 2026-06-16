@@ -32,6 +32,20 @@ class TestResolveIndexUrl(unittest.TestCase):
             "https://mirrors.aliyun.com/pypi/simple/",
         )
 
+    def test_tsinghua_mode_returns_tsinghua_index(self):
+        self.app.pypi_proxy_mode.get.return_value = "tsinghua"
+        self.assertEqual(
+            self.svc._resolve_index_url(),
+            "https://pypi.tuna.tsinghua.edu.cn/simple/",
+        )
+
+    def test_huaweicloud_mode_returns_huaweicloud_index(self):
+        self.app.pypi_proxy_mode.get.return_value = "huaweicloud"
+        self.assertEqual(
+            self.svc._resolve_index_url(),
+            "https://repo.huaweicloud.com/repository/pypi/simple/",
+        )
+
     def test_custom_mode_returns_user_url(self):
         self.app.pypi_proxy_mode.get.return_value = "custom"
         self.app.pypi_proxy_url.get.return_value = "https://my-mirror.example.com/simple/"

@@ -24,6 +24,20 @@ def build_launch_params(app):
         if app.compute_mode.get() == "cpu":
             cmd.append("--cpu")
         else:
+            # GPU 设备选择（单选，-1 = 不传 --cuda-device，由 ComfyUI 使用全部可见卡）
+            try:
+                gpu_dev = getattr(app, "gpu_device", None)
+                gpu_idx = -1
+                if gpu_dev is not None:
+                    try:
+                        gpu_idx = int(gpu_dev.get())
+                    except Exception:
+                        gpu_idx = -1
+                if gpu_idx is not None and gpu_idx >= 0 and "--cuda-device" not in cmd:
+                    cmd.extend(["--cuda-device", str(gpu_idx)])
+            except Exception:
+                pass
+
             # GPU Mode: Add VRAM flags
             vram = getattr(app, 'vram_mode', None)
             if vram:
