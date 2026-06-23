@@ -53,6 +53,12 @@ python_embeded/pip.ini
 /_diag*.py
 /diag*.py
 
+# Release directory (Nuitka + Enigma 输出)
+release/
+
 # Build artifacts (Enigma Virtual Box / Nuitka)
 EnigmaVirtualBox/
 nuitka-crash-report.xml
+
+# Diagnostic leftover from manual CLI testing
+status_out.txt
