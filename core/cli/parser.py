@@ -26,6 +26,7 @@ SUBCOMMANDS: Final[List[str]] = [
     "info",
     "logs",
     "update",
+    "help",
 ]
 
 # logs 子命令的稳定目标清单。
@@ -131,6 +132,16 @@ Output schema (default human / --json):
   from_version (str)   - pre-update version; null if unknown
   to_version   (str)   - post-update version; null if unchanged
   log          (str)   - human-readable summary of what happened
+"""
+
+_HELP_EPILOG = """\
+Exit codes:
+  0  printed help
+  1  unknown subcommand name
+
+Output schema (default human / --json):
+  target    (str|null) - which subcommand's help; null = top-level
+  help_text (str)      - the help content (same as stdout in human mode)
 """
 
 
@@ -312,6 +323,22 @@ def build_parser() -> argparse.ArgumentParser:
         action=argparse.BooleanOptionalAction,
         default=True,
         help="持续跟踪新内容（默认开启，--no-follow 关闭）。",
+    )
+
+    # help
+    sp = _make_subparser(
+        sub, "help",
+        help="打印帮助（无参 = 顶层；带子命令名 = 该子命令的 help）",
+        description="cli help 看顶层；cli help <subcommand> 看子命令的 help / Exit codes / Output schema。",
+        epilog=_HELP_EPILOG,
+        formatter_class=argparse.RawDescriptionHelpFormatter,
+    )
+    sp.add_argument(
+        "help_target",
+        nargs="?",
+        default=None,
+        metavar="COMMAND",
+        help="要查看帮助的子命令名；不传则打印顶层 help。",
     )
 
     # update

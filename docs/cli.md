@@ -21,6 +21,7 @@ commands:
   info         打印当前生效的配置
   logs         tail 日志文件（launcher / comfyui 二选一）
   update       更新组件（当前仅 comfyui）
+  help         打印帮助（无参 = 顶层；带子命令名 = 该子命令的 help）
 ```
 
 每个子命令都有自己的 `--help`，会打印 *Exit codes* 与 *Output schema* 两段。
@@ -210,6 +211,42 @@ comfyui-launcher update TARGET [--yes] [--dry-run] [--json]
 - `from_version (str|null)` 更新前版本
 - `to_version (str|null)` 更新后版本（未变时为 null）
 - `log (str)` 人类可读的更新摘要
+
+### help
+
+打印帮助。和 `-h/--help` 等价，但是是可以拼接的：可以看任意子命令的 help。
+
+```
+comfyui-launcher help [COMMAND]
+```
+
+无参 → 顶层 usage；带子命令名 → 该子命令的 help / Exit codes / Output schema。
+未知子命令 → 退 1 + stderr 一行提示。
+
+| flag | 默认 | 说明 |
+|---|---|---|
+| `--json` | off | 把 help 文本包成 `{"target": ..., "help_text": ...}` 输出 |
+
+**Exit codes:**
+- `0` 打印了 help
+- `1` 未知子命令名
+
+**Output schema:**
+- `target (str|null)` 哪个子命令的 help；null = 顶层
+- `help_text (str)` help 内容（human 模式下走 stdout）
+
+**示例:**
+```bash
+$ comfyui-launcher help start | head -3
+usage: comfyui-launcher start [-h] [--json] [-v] [--no-wait] [--timeout SEC]
+
+在后台启动 ComfyUI。默认阻塞直到 HTTP 就绪或超时。
+
+$ comfyui-launcher help unknown_cmd
+unknown subcommand: 'unknown_cmd' (available: start, stop, status, restart, info, logs, update, help)
+$ echo $?
+1
+```
 
 ## 退出码一览
 

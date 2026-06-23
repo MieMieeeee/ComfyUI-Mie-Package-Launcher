@@ -79,6 +79,13 @@ class TestDispatch:
             rc = cli_main.dispatch(args)
         assert rc == EXIT_OK
 
+    def test_dispatches_to_help(self):
+        args = _ns("help", help_target=None)
+        with patch("core.cli.main._load_app", return_value=MagicMock()), patch("core.cli.cmd_help.run", return_value=EXIT_OK) as mock_run:
+            rc = cli_main.dispatch(args)
+        assert rc == EXIT_OK
+        assert mock_run.called
+
     def test_unknown_command_returns_exit_1(self, capsys):
         # 用一个 mock parser 解析不到 command 的情况
         from core.cli.parser import build_parser
