@@ -123,6 +123,23 @@ def build_exe():
         '--hidden-import=utils.common',
         '--hidden-import=ui.assets_helper',
         '--hidden-import=ui_qt.qt_app',
+
+        # CLI 子命令模块（headless 启动 / 停止 / 状态查询等）
+        '--hidden-import=core.cli',
+        '--hidden-import=core.cli.exitcodes',
+        '--hidden-import=core.cli.output',
+        '--hidden-import=core.cli.pidfile',
+        '--hidden-import=core.cli.parser',
+        '--hidden-import=core.cli.runner',
+        '--hidden-import=core.cli.main',
+        '--hidden-import=core.cli.cmd_status',
+        '--hidden-import=core.cli.cmd_start',
+        '--hidden-import=core.cli.cmd_stop',
+        '--hidden-import=core.cli.cmd_restart',
+        '--hidden-import=core.cli.cmd_info',
+        '--hidden-import=core.cli.cmd_logs',
+        '--hidden-import=core.cli.cmd_update',
+        '--hidden-import=core.cli.cmd_help',
         
         '--exclude-module=fcntl',
         '--exclude-module=posix',

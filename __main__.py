@@ -70,7 +70,14 @@ def main() -> int:
     # 尽早声明 Per-Monitor DPI V2 感知（必须在 QApplication / 任何窗口创建之前）
     _enable_per_monitor_dpi_awareness()
 
-    # Add project root to path for imports
+    import os
+    # 切到 exe 所在目录，让 launcher/config.json 永远能找到
+    # （PyInstaller 打包后 sys.executable 是 exe 路径；开发模式下也是脚本路径）
+    exe_dir = os.path.dirname(os.path.abspath(sys.executable))
+    try:
+        os.chdir(exe_dir)
+    except Exception:
+        pass
     sys.path.insert(0, ".")
 
     if _is_cli_invocation():
@@ -78,9 +85,6 @@ def main() -> int:
         return cli_main()
 
     # 无 CLI args - 启动 GUI
-    import os
-    exe_dir = os.path.dirname(os.path.abspath(sys.executable))
-    os.chdir(exe_dir)
     import comfyui_launcher_pyqt
     comfyui_launcher_pyqt.launch_gui()
     return 0
