@@ -7,7 +7,7 @@ class CustomConfirmDialog(FramelessDraggableDialog):
     """
     一个美观的确认弹窗，支持自定义标题、内容和多个操作按钮
     """
-    def __init__(self, parent=None, title="确认", content="", buttons=None, default_index=0, theme_manager=None, min_width=480):
+    def __init__(self, parent=None, title="确认", content="", buttons=None, default_index=0, theme_manager=None, min_width=480, remember_checkbox_text=None, remember_checked=False):
         # 默认 modal=True, window_type=Qt.Dialog，flags / 透明背景 / 拖拽 都在基类
         super().__init__(parent=parent)
         self.theme_manager = theme_manager
@@ -30,6 +30,8 @@ class CustomConfirmDialog(FramelessDraggableDialog):
         accent = "#6366F1"
         accent_hover = "#818CF8"
         
+        label_muted_color = '#9CA3AF'
+        input_bg = 'rgba(0, 0, 0, 0.3)'
         if self.theme_manager:
             c = self.theme_manager.colors
             bg = c.get('content_bg', bg)
@@ -40,7 +42,18 @@ class CustomConfirmDialog(FramelessDraggableDialog):
             btn_hover = c.get('btn_ghost_bg', btn_hover)
             accent = c.get('btn_primary_bg', accent)
             accent_hover = c.get('btn_primary_hover', accent_hover)
+            label_muted_color = c.get('label_muted', label_muted_color)
+            input_bg = c.get('input_bg', input_bg)
             
+        # 记住选择复选框的样式模板，在上面动态插入
+        REMEMBER_STYLESHEET = f'''
+QCheckBox {{ color: {label_muted_color}; font: 9pt "Microsoft YaHei UI"; background: transparent; spacing: 6px; padding: 2px; }}
+QCheckBox::indicator {{ width: 16px; height: 16px; border: 1px solid {border}; border-radius: 4px; background-color: {input_bg}; }}
+QCheckBox::indicator:hover {{ border: 1px solid {accent}; }}
+QCheckBox::indicator:checked {{ background-color: {accent}; border: 1px solid {accent}; image: none; }}
+QCheckBox::indicator:checked:hover {{ background-color: {accent_hover}; border: 1px solid {accent_hover}; }}
+'''
+
         self.container.setStyleSheet(f"""
             QFrame#ConfirmContainer {{
                 background-color: {bg};
@@ -94,6 +107,15 @@ class CustomConfirmDialog(FramelessDraggableDialog):
         self.lbl_content.setAlignment(QtCore.Qt.AlignLeft | QtCore.Qt.AlignTop)
         inner_layout.addWidget(self.lbl_content)
         
+        # 可选的「记住我的选择」复选框
+        self._remember_checkbox = None
+        if remember_checkbox_text:
+            self._remember_checkbox = QtWidgets.QCheckBox(remember_checkbox_text)
+            self._remember_checkbox.setChecked(bool(remember_checked))
+            self._remember_checkbox.setCursor(QtCore.Qt.PointingHandCursor)
+            self._remember_checkbox.setStyleSheet(REMEMBER_STYLESHEET)
+            inner_layout.addWidget(self._remember_checkbox)
+        
         inner_layout.addSpacing(10)
         
         # 按钮区域
@@ -139,3 +161,15 @@ class CustomConfirmDialog(FramelessDraggableDialog):
         
     def get_result(self):
         return self._result
+
+    def is_remember_checked(self) -> bool:
+        """返回「记住我的选择」复选框是否被勾选。
+
+        如果构造时未传入 remember_checkbox_text，一律返回 False。
+        """
+        if self._remember_checkbox is None:
+            return False
+        try:
+            return bool(self._remember_checkbox.isChecked())
+        except Exception:
+            return False

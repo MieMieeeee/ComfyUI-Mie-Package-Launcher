@@ -38,6 +38,8 @@ from ui_qt.pages.models_page import ModelsPage
 from ui_qt.pages.about_me_page import AboutMePage
 from ui_qt.pages.about_comfyui_page import AboutComfyUIPage
 from ui_qt.pages.about_launcher_page import AboutLauncherPage
+from ui_qt.pages.system_settings_page import SystemSettingsPage
+from ui_qt.widgets.tray_icon import LauncherTray
 
 
 class Var:
@@ -837,6 +839,11 @@ def _offer_force_update(launcher, core_res, summary, stable_only, on_done) -> bo
 class PyQtLauncher(QtWidgets.QMainWindow, process_events.ProcessCallback):
     def __init__(self):
         # 高分屏适配已在 comfyui_launcher_pyqt.py 中完成（必须在 QApplication 创建之前）
+        # 系统托盘与关闭行为相关状态
+        self._tray = None  # LauncherTray 实例，在 run() 中完成初始化
+        self._tray_quit_requested = False  # 从托盘菜单退出时为 True，跳过确认对话框
+        self._tray_quit_and_stop_requested = False  # 从托盘菜单选择"退出并关闭 ComfyUI"
+        self._tray_warned_unavailable = False  # 避免重复警告托盘不可用
         self.qt_app = QtWidgets.QApplication.instance() or QtWidgets.QApplication(
             sys.argv
         )
@@ -1934,9 +1941,14 @@ class PyQtLauncher(QtWidgets.QMainWindow, process_events.ProcessCallback):
         try:
             from PyQt5.QtGui import QIcon
 
-            icon_path = ASSETS.resolve_asset("rabbit.ico") or ASSETS.resolve_asset(
-                "rabbit.png"
-            )
+            # 优先用高分辨率 rabbit.png（任务栏/Alt-Tab 在 HiDPI 下更清晰），
+            # 退回 rabbit.ico；逐个检查存在性，避免 resolve_asset 返回不存在路径被误用
+            icon_path = None
+            for _icon_name in ("rabbit.png", "rabbit.ico"):
+                _candidate = ASSETS.resolve_asset(_icon_name)
+                if _candidate and _candidate.exists():
+                    icon_path = _candidate
+                    break
             if icon_path and icon_path.exists():
                 ic = QIcon(str(icon_path))
                 # 同时设置窗口与应用图标，以确保任务栏/Alt-Tab 使用头像
@@ -2073,6 +2085,7 @@ class PyQtLauncher(QtWidgets.QMainWindow, process_events.ProcessCallback):
             "launch": NavBtn("🚀 启动与更新"),
             "version": NavBtn("🧬 内核版本管理"),
             "models": NavBtn("📂 外置模型库管理"),
+            "settings": NavBtn("⚙️ 系统设置"),
             "about": NavBtn("👤 关于我"),
             "comfyui": NavBtn("📚 关于 ComfyUI"),
             "about_launcher": NavBtn("🧰 关于启动器"),
@@ -2084,6 +2097,8 @@ class PyQtLauncher(QtWidgets.QMainWindow, process_events.ProcessCallback):
         btns["version"].setProperty("full_text", "🧬 内核版本管理")
         btns["models"].setToolTip("管理外置模型库路径配置")
         btns["models"].setProperty("full_text", "📂 外置模型库管理")
+        btns["settings"].setToolTip("启动器本体的窗口、托盘等设置")
+        btns["settings"].setProperty("full_text", "⚙️ 系统设置")
         btns["about"].setToolTip("作者信息和相关链接")
         btns["about"].setProperty("full_text", "👤 关于我")
         btns["comfyui"].setToolTip("关于ComfyUI的介绍和官方链接")
@@ -2286,23 +2301,25 @@ class PyQtLauncher(QtWidgets.QMainWindow, process_events.ProcessCallback):
         except Exception:
             pass
 
-        # 定时检测 ComfyUI 运行状态并同步按钮（每 5 秒）
+        # 定时检测 ComfyUI 运行状态并同步按钮（每 5 秒）；同时与托盘菜单同步
         try:
+            def _refresh_and_push_to_tray():
+                try:
+                    if hasattr(self, "services") and hasattr(self.services, "process"):
+                        self.services.process.refresh_status()
+                except Exception:
+                    pass
+                try:
+                    if getattr(self, "_tray", None) and self._tray.available:
+                        self._tray.update_comfyui_status(bool(self._is_comfyui_running()))
+                except Exception:
+                    pass
+
             self._status_timer = QtCore.QTimer(self)
-            self._status_timer.timeout.connect(
-                lambda: (
-                    self.services.process.refresh_status()
-                    if hasattr(self, "services") and hasattr(self.services, "process")
-                    else None
-                )
-            )
+            self._status_timer.timeout.connect(_refresh_and_push_to_tray)
             self._status_timer.start(5000)
             # 首次立即检测一次
-            QtCore.QTimer.singleShot(500, lambda: (
-                self.services.process.refresh_status()
-                if hasattr(self, "services") and hasattr(self.services, "process")
-                else None
-            ))
+            QtCore.QTimer.singleShot(500, _refresh_and_push_to_tray)
         except Exception:
             pass
         page_version = VersionPage(app=self, theme_manager=self.theme_manager)
@@ -2312,12 +2329,16 @@ class PyQtLauncher(QtWidgets.QMainWindow, process_events.ProcessCallback):
         page_about_launcher = AboutLauncherPage(
             app=self, theme_manager=self.theme_manager
         )
+        page_settings = SystemSettingsPage(
+            app=self, theme_manager=self.theme_manager
+        )
 
         # Store references for theme updates
         self._new_pages = {
             "launch": page_launch,
             "version": page_version,
             "models": page_models,
+            "settings": page_settings,
             "about": page_about_me,
             "comfyui": page_about_comfyui,
             "about_launcher": page_about_launcher,
@@ -2390,6 +2411,7 @@ class PyQtLauncher(QtWidgets.QMainWindow, process_events.ProcessCallback):
         content.addWidget(wrap_in_scroll(page_launch))
         content.addWidget(wrap_in_scroll(page_version))
         content.addWidget(wrap_in_scroll(page_models))
+        content.addWidget(wrap_in_scroll(page_settings))
         content.addWidget(wrap_in_scroll(page_about_me))
         content.addWidget(wrap_in_scroll(page_about_comfyui))
         content.addWidget(wrap_in_scroll(page_about_launcher))
@@ -2398,6 +2420,7 @@ class PyQtLauncher(QtWidgets.QMainWindow, process_events.ProcessCallback):
             "launch": page_launch,
             "version": page_version,
             "models": page_models,
+            "settings": page_settings,
             "about": page_about_me,
             "comfyui": page_about_comfyui,
             "about_launcher": page_about_launcher,
@@ -3615,6 +3638,15 @@ class PyQtLauncher(QtWidgets.QMainWindow, process_events.ProcessCallback):
             return False
 
     def closeEvent(self, event):
+        """主窗口关闭事件。
+
+        分三种进入场景：
+        1. 从托盘菜单退出 -> 直接走完整退出流程（不弹对话框）
+        2. 从主窗口点 X -> 根据 ui_settings 中的选项：
+           a. 如果 ask_every_time=True，弹出“最小化到托盘 / 退出 / 取消”对话框（可记住）
+           b. 如果 ask_every_time=False，直接按 minimize_to_tray_on_close 执行
+        3. 选择“退出”且 ComfyUI 运行中 -> 弹出原有的 3 选项对话框
+        """
         logger = getattr(self, "logger", None)
         try:
             if logger:
@@ -3622,73 +3654,210 @@ class PyQtLauncher(QtWidgets.QMainWindow, process_events.ProcessCallback):
         except Exception:
             pass
 
-        running = False
-        try:
-            running = self._is_comfyui_running()
-        except Exception:
-            running = False
+        # ---- 场景 1a: 从托盘菜单退出（保留 ComfyUI）----
+        if getattr(self, "_tray_quit_requested", False):
+            self._perform_shutdown(event)
+            return
 
-        try:
-            if logger:
-                logger.info("ComfyUI 运行状态: %s", running)
-        except Exception:
-            pass
-        if running:
+        # ---- 场景 1b: 从托盘菜单退出并关闭 ComfyUI ----
+        if getattr(self, "_tray_quit_and_stop_requested", False):
             try:
-                from ui_qt.widgets.custom_confirm_dialog import CustomConfirmDialog
+                pm = getattr(self, "process_manager", None)
+                if pm and hasattr(pm, "stop_comfyui_sync"):
+                    pm.stop_comfyui_sync()
+            except Exception as e:
+                try:
+                    if getattr(self, "logger", None):
+                        self.logger.warning("从托盘退出时停止 ComfyUI 失败: %s", e)
+                except Exception:
+                    pass
+            self._perform_shutdown(event)
+            return
 
-                dialog = CustomConfirmDialog(
-                    self,
-                    title="退出确认",
-                    content=(
-                        "检测到 ComfyUI 仍在运行。\n\n"
-                        "您可以选择停止服务并退出，或者仅退出启动器（保持服务后台运行）。"
-                    ),
-                    buttons=[
-                        {"text": "取消", "role": "normal"},
-                        {"text": "仅退出启动器", "role": "normal"},
-                        {"text": "停止服务并退出", "role": "destructive"},
-                    ],
-                    default_index=2,
-                    theme_manager=getattr(self, "theme_manager", None),
-                )
-                if dialog.exec_() == QtWidgets.QDialog.Accepted:
-                    idx = dialog.get_result()
-                else:
-                    idx = 0  # Cancel
-            except Exception:
-                idx = 0  # Default to cancel on error
-
-            # 0: 取消
-            if idx == 0:
-                try:
-                    event.ignore()
-                except Exception:
-                    pass
-                return
-            # 2: 停止并退出
-            if idx == 2:
-                try:
-                    self._shutting_down = True
-                except Exception:
-                    pass
-                try:
-                    pm = getattr(self, "process_manager", None)
-                    if pm and hasattr(pm, "stop_comfyui_sync"):
-                        pm.stop_comfyui_sync()
-                except Exception:
-                    pass
-            else:
-                # 1: 仅退出启动器
-                try:
-                    self._shutting_down = True
-                except Exception:
-                    pass
-        else:
+        # ---- 场景 2: 从主窗口点 X ----
+        action = self._resolve_close_action()
+        if action == "minimize":
+            # 不退出，隐藏主窗口。进程保持运行，托盘接管。
             try:
-                self._shutting_down = True
+                event.ignore()
             except Exception:
                 pass
+            try:
+                self.hide()
+            except Exception:
+                pass
+            try:
+                if getattr(self, "_tray", None) and self._tray.available:
+                    self._tray.show_first_time_hint()
+            except Exception:
+                pass
+            try:
+                if logger:
+                    logger.info("主窗口已最小化到系统托盘")
+            except Exception:
+                pass
+            return
+        if action == "cancel":
+            try:
+                event.ignore()
+            except Exception:
+                pass
+            return
+
+        # ---- 场景 3: 退出，但 ComfyUI 运行中，需问你怎么退 ----
+        try:
+            if self._is_comfyui_running():
+                idx = self._prompt_comfyui_exit_mode()
+                if idx == 0:  # 取消
+                    try:
+                        event.ignore()
+                    except Exception:
+                        pass
+                    return
+                if idx == 2:  # 停止并退出
+                    try:
+                        pm = getattr(self, "process_manager", None)
+                        if pm and hasattr(pm, "stop_comfyui_sync"):
+                            pm.stop_comfyui_sync()
+                    except Exception:
+                        pass
+                # idx == 1 (仅退出启动器) 不停 ComfyUI
+        except Exception:
+            pass
+
+        self._perform_shutdown(event)
+
+    def _resolve_close_action(self):
+        """根据配置 + 交互得出“最小化 / 退出 / 取消”中的一个。"""
+        logger = getattr(self, "logger", None)
+        try:
+            ui = self.config.get("ui_settings", {}) if isinstance(self.config, dict) else {}
+        except Exception:
+            ui = {}
+        ask = bool(ui.get("minimize_to_tray_ask_every_time", True))
+        minimize_default = bool(ui.get("minimize_to_tray_on_close", False))
+        tray_available = bool(getattr(self, "_tray", None) and self._tray.available)
+
+        if not ask:
+            # 不弹对话框，直接按上次选择执行
+            if minimize_default and tray_available:
+                return "minimize"
+            return "quit"
+
+        # 交互式对话框
+        try:
+            from ui_qt.widgets.custom_confirm_dialog import CustomConfirmDialog
+        except Exception:
+            return "quit"
+
+        if not tray_available:
+            # 托盘不可用，只给退出选项
+            dlg = CustomConfirmDialog(
+                parent=self,
+                title="关闭主窗口",
+                content="本机不支持系统托盘，关闭主窗口将直接退出启动器。\n\n退出启动器后，如果 ComfyUI 仍在运行会继续后台运行。",
+                buttons=[
+                    {"text": "取消", "role": "normal"},
+                    {"text": "退出启动器", "role": "destructive"},
+                ],
+                default_index=1,
+                theme_manager=getattr(self, "theme_manager", None),
+            )
+            if dlg.exec_() == QtWidgets.QDialog.Accepted and dlg.get_result() == 1:
+                return "quit"
+            return "cancel"
+
+        # 托盘可用：三选项 + 记住勾选
+        dlg = CustomConfirmDialog(
+            parent=self,
+            title="关闭主窗口",
+            content=(
+                "选择如下一种方式关闭主窗口：\n\n"
+                "• 最小化到托盘：启动器后台继续运行，ComfyUI 如在运行也会保持。\n"
+                "• 退出启动器：完全退出，如果 ComfyUI 在运行会继续后台运行。"
+            ),
+            buttons=[
+                {"text": "取消", "role": "normal"},
+                {"text": "最小化到托盘", "role": "primary"},
+                {"text": "退出启动器", "role": "destructive"},
+            ],
+            # 弹窗 = 强制用户做一次明确选择：默认焦点放在「取消」上。
+            # 之前默认到 1/2 会让 Enter 直接最小化或退出启动器，违反「每次都提醒」的语义。
+            default_index=0,
+            theme_manager=getattr(self, "theme_manager", None),
+            remember_checkbox_text="记住我的选择，下次不再提醒",
+            remember_checked=minimize_default,
+        )
+        if dlg.exec_() != QtWidgets.QDialog.Accepted:
+            return "cancel"
+        idx = dlg.get_result()
+        if idx is None:
+            return "cancel"
+
+        remember = dlg.is_remember_checked()
+        try:
+            if logger:
+                logger.info(
+                    "关闭确认选项: idx=%s remember=%s", idx, remember
+                )
+        except Exception:
+            pass
+
+        if remember:
+            try:
+                if isinstance(self.config, dict):
+                    ui2 = self.config.setdefault("ui_settings", {})
+                else:
+                    self.config = {}
+                    ui2 = self.config.setdefault("ui_settings", {})
+                ui2["minimize_to_tray_ask_every_time"] = False
+                ui2["minimize_to_tray_on_close"] = (idx == 1)
+                if hasattr(self, "services") and getattr(self.services, "config", None):
+                    try:
+                        self.services.config.save(self.config)
+                    except Exception:
+                        pass
+            except Exception:
+                pass
+
+        if idx == 1:
+            return "minimize"
+        if idx == 2:
+            return "quit"
+        return "cancel"
+
+    def _prompt_comfyui_exit_mode(self):
+        """当选择退出但 ComfyUI 仍在运行时，弹原有的 3 选项对话框。返回 idx。"""
+        try:
+            from ui_qt.widgets.custom_confirm_dialog import CustomConfirmDialog
+
+            dlg = CustomConfirmDialog(
+                self,
+                title="退出确认",
+                content=(
+                    "检测到 ComfyUI 仍在运行。\n\n可选择停止服务后退出，或者仅退出启动器（保持服务后台运行）。"
+                ),
+                buttons=[
+                    {"text": "取消", "role": "normal"},
+                    {"text": "仅退出启动器", "role": "normal"},
+                    {"text": "停止服务并退出", "role": "destructive"},
+                ],
+                default_index=2,
+                theme_manager=getattr(self, "theme_manager", None),
+            )
+            if dlg.exec_() == QtWidgets.QDialog.Accepted:
+                return dlg.get_result() or 0
+        except Exception:
+            pass
+        return 0
+
+    def _perform_shutdown(self, event):
+        """真正退出的后续流程：站伏 workers、关窗口、QApplication.quit。与原 closeEvent 后半段一致。"""
+        logger = getattr(self, "logger", None)
+        try:
+            self._shutting_down = True
+        except Exception:
+            pass
 
         # 停止所有版本检测 workers
         try:
@@ -3703,6 +3872,13 @@ class PyQtLauncher(QtWidgets.QMainWindow, process_events.ProcessCallback):
             except Exception:
                 pass
 
+        # 托盘同步清理（不要在主窗口销毁后还在亮着）
+        try:
+            if getattr(self, "_tray", None):
+                self._tray.shutdown()
+        except Exception:
+            pass
+
         try:
             super().closeEvent(event)
         except Exception:
@@ -3711,7 +3887,6 @@ class PyQtLauncher(QtWidgets.QMainWindow, process_events.ProcessCallback):
             except Exception:
                 pass
 
-        # 确保应用完全退出
         try:
             if logger:
                 logger.info("调用 QApplication.quit()")
@@ -3726,6 +3901,60 @@ class PyQtLauncher(QtWidgets.QMainWindow, process_events.ProcessCallback):
                 logger.info("closeEvent 完成")
         except Exception:
             pass
+
+    def _show_from_tray(self):
+        """从托盘恢复主窗口：显示、窗口置顶、不启动最大化。"""
+        try:
+            if self.isMinimized():
+                self.showNormal()
+        except Exception:
+            pass
+        try:
+            self.show()
+        except Exception:
+            pass
+        try:
+            self.raise_()
+            self.activateWindow()
+        except Exception:
+            pass
+        try:
+            if getattr(self, "logger", None):
+                self.logger.info("从系统托盘恢复主窗口")
+        except Exception:
+            pass
+
+    def _quit_from_tray(self):
+        """从托盘菜单退出：设置标志位后调用 close()，走真正退出流程。"""
+        try:
+            if getattr(self, "logger", None):
+                self.logger.info("从系统托盘退出启动器")
+        except Exception:
+            pass
+        self._tray_quit_requested = True
+        try:
+            self.close()
+        except Exception:
+            try:
+                QtWidgets.QApplication.quit()
+            except Exception:
+                pass
+
+    def _quit_from_tray_and_stop(self):
+        """从托盘菜单退出并关闭 ComfyUI：走 closeEvent 场景 1b，先停服务再退出。"""
+        try:
+            if getattr(self, "logger", None):
+                self.logger.info("从系统托盘退出并关闭 ComfyUI")
+        except Exception:
+            pass
+        self._tray_quit_and_stop_requested = True
+        try:
+            self.close()
+        except Exception:
+            try:
+                QtWidgets.QApplication.quit()
+            except Exception:
+                pass
 
     def run(self):
         # 首先检查是否有待处理的启动器更新
@@ -3794,6 +4023,28 @@ class PyQtLauncher(QtWidgets.QMainWindow, process_events.ProcessCallback):
         except Exception:
             pass
         self.show()
+
+        # 初始化系统托盘（不可用时静默降级）
+        try:
+            self._tray = LauncherTray(
+                app=self, theme_manager=self.theme_manager, parent=self
+            )
+            if not self._tray.init():
+                if not self._tray_warned_unavailable:
+                    self._tray_warned_unavailable = True
+                    if getattr(self, "logger", None):
+                        self.logger.info("系统不可用托盘，关闭主窗口将直接退出启动器")
+        except Exception as e:
+            try:
+                if getattr(self, "logger", None):
+                    self.logger.warning("托盘初始化失败: %s", e)
+            except Exception:
+                pass
+        else:
+            # 连接信号：从托盘恢复主窗口 / 从托盘退出
+            self._tray.show_window_requested.connect(self._show_from_tray)
+            self._tray.quit_requested.connect(self._quit_from_tray)
+            self._tray.quit_and_stop_requested.connect(self._quit_from_tray_and_stop)
 
         # 延迟启动版本检测，让窗口先显示出来
         QtCore.QTimer.singleShot(0, lambda: self._start_version_detection())

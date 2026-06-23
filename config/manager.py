@@ -74,6 +74,8 @@ class ConfigManager:
                 "theme": "default",
                 "font_size": 9,
                 "log_max_lines": 1000,
+                "minimize_to_tray_on_close": False,
+                "minimize_to_tray_ask_every_time": True,
                 "window_size": "500x680",
             },
             "paths": {
@@ -154,6 +156,9 @@ class ConfigManager:
                     ann = self.config.setdefault("announcement", {})
                     for k, v in default_config.get("announcement", {}).items():
                         ann.setdefault(k, v)
+                    ui = self.config.setdefault("ui_settings", {})
+                    ui.setdefault("minimize_to_tray_on_close", False)
+                    ui.setdefault("minimize_to_tray_ask_every_time", True)
                     try:
                         self.save_config(self.config)
                     except Exception:
