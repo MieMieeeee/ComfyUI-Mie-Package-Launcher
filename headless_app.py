@@ -78,9 +78,22 @@ class _VersionManagerProxy:
         return {"component": "core", "updated": False}
 
 
-class _HeadlessProcessManager:
+class _NoOpBigBtn:
+    """core.runner_start.start() 会调用 app.big_btn.set_state / set_display。
+
+    CLI 模式没有 UI 按钮，给一个 no-op 替身即可。
+    """
     def __init__(self):
-        self.comfyui_process = None
+        self._state = "idle"
+
+    def set_state(self, state: str) -> None:
+        self._state = state
+
+    def set_display(self, text: str, hint: str = "") -> None:
+        pass
+
+
+class _HeadlessProcessManager:
 
     def toggle_comfyui(self):
         return None
@@ -168,6 +181,7 @@ class HeadlessAppContext:
         self.logger = _NoOpLogger()
 
         self.process_manager = _HeadlessProcessManager()
+        self.big_btn = _NoOpBigBtn()
 
         # Launching state flag
         self._launching = False
