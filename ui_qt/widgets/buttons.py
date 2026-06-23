@@ -63,25 +63,40 @@ class LinkButton(QtWidgets.QPushButton):
         self.setStyleSheet(self.theme_styles.link_button_style())
 
     def _setup_hover_effect(self):
-        """设置悬停效果"""
-        pass
+        """创建 hover effect 并挂上. 默认 disabled, enterEvent 翻 enabled.
+
+        旧实现: enterEvent 每次都 new 一个 QGraphicsDropShadowEffect, leaveEvent
+        又 setGraphicsEffect(None) 把它拆掉. 鼠标每 hover 一次就触发一次完整
+        重绘 + 内存分配 + 释放, 是界面卡顿的最大单一原因. 改成一次创建, 用
+        setEnabled 切换可见性, hover 期间 Qt 不必重新分配 effect 也不必重算
+        graphics scene 拓扑.
+        """
+        try:
+            effect = QtWidgets.QGraphicsDropShadowEffect(self)
+            effect.setBlurRadius(15)
+            effect.setOffset(0, 4)
+            alpha = 35 if getattr(self.theme_styles.c, "dark", True) else 60
+            effect.setColor(QtGui.QColor(99, 102, 241, alpha))
+            effect.setEnabled(False)
+            self.setGraphicsEffect(effect)
+        except Exception:
+            pass
 
     def update_theme(self, theme_styles: ThemeStyles):
         self.theme_styles = theme_styles
         self._apply_style()
 
     def _set_effect(self, show: bool):
-        """设置或取消阴影效果"""
+        """切换 hover effect 的启用状态.
+
+        effect 在 _setup_hover_effect 里已经创建好挂在 widget 上了, 这里只
+        翻 enabled. 不要再 setGraphicsEffect(None) —— 那会把刚创建的
+        effect 直接拆掉, 跟最初那种每 hover 一次就重建的 bug 一样慢.
+        """
         try:
-            if show:
-                effect = QtWidgets.QGraphicsDropShadowEffect(self)
-                effect.setBlurRadius(15)
-                effect.setOffset(0, 4)
-                alpha = 35 if getattr(self.theme_styles.c, "dark", True) else 60
-                effect.setColor(QtGui.QColor(99, 102, 241, alpha))
-                self.setGraphicsEffect(effect)
-            else:
-                self.setGraphicsEffect(None)
+            effect = self.graphicsEffect()
+            if effect is not None:
+                effect.setEnabled(bool(show))
         except Exception:
             pass
 

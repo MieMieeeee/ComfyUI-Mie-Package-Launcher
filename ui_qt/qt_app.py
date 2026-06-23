@@ -2428,7 +2428,16 @@ class PyQtLauncher(QtWidgets.QMainWindow, process_events.ProcessCallback):
 
         def _select_tab(name):
             idx = list(pages.keys()).index(name)
-            content.setCurrentIndex(idx)
+            # 临时关闭 update：setCurrentIndex 会触发一连串的 show / hide / layout
+            # / paint 事件，复杂页（特别是 launch page 上 3 个 QGraphicsDropShadowEffect
+            # 的 section panel）首次 paint 时的 offscreen 渲染 + blur 非常慢，体感就是
+            # "点了标签过了好一会才跳过去". 关掉 update 后，所有中间 paint 都被合并
+            # 到 finally 之后的下一帧, 大幅降低感知卡顿.
+            content.setUpdatesEnabled(False)
+            try:
+                content.setCurrentIndex(idx)
+            finally:
+                content.setUpdatesEnabled(True)
             for k, b in btns.items():
                 b.setChecked(k == name)
 
