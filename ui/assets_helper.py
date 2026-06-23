@@ -82,6 +82,31 @@ def resolve_asset_variants(filenames):
         return Path(filenames[0])
 
 
+def setup_qt_high_dpi() -> None:
+    """在 QApplication 构造之前启用 Qt 的高 DPI 缩放属性。
+
+    调用点必须在 QApplication 构造之前（不然 Qt 会忽略）。
+    和 __main__.子进程级 Per-Monitor DPI V2 声明配合使用：V2 让
+    多显示器独立缩放，AA_ 属性让 Qt 本身适配高 DPI 位图。
+
+    - 若 PyQt5 不可用或属性不存在（如后期 Qt6 移除），函数静默不抛异常。
+    - 函数是纯函数，可重复调用不产生副作用。
+    """
+    try:
+        from PyQt5 import QtCore, QtWidgets
+    except Exception:
+        return
+    for attr in (
+        getattr(QtCore.Qt, "AA_EnableHighDpiScaling", None),
+        getattr(QtCore.Qt, "AA_UseHighDpiPixmaps", None),
+    ):
+        if attr is None:
+            continue
+        try:
+            QtWidgets.QApplication.setAttribute(attr, True)
+        except Exception:
+            pass
+
 def _device_pixel_ratio() -> float:
     """返回当前 QApplication 的设备像素比；无 Qt 实例时回退 1.0。
 
@@ -106,10 +131,8 @@ def scaled_pixmap(pixmap, width, height, aspect_mode=None, transform_mode=None):
     """
     from PyQt5.QtCore import Qt
 
-    if aspect_mode is None:
-        aspect_mode = Qt.KeepAspectRatio
-    if transform_mode is None:
-        transform_mode = Qt.SmoothTransformation
+    aspect_mode = Qt.KeepAspectRatio if aspect_mode is None else aspect_mode
+    transform_mode = Qt.SmoothTransformation if transform_mode is None else transform_mode
     dpr = _device_pixel_ratio()
     phys_w = max(1, int(round(width * dpr)))
     phys_h = max(1, int(round(height * dpr)))

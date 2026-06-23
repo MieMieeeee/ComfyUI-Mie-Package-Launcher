@@ -84,17 +84,14 @@ def _show_single_instance_dialog():
     try:
         from ui_qt.widgets.custom_confirm_dialog import CustomConfirmDialog
 
-        # 设置高分屏支持（必须在 QApplication 创建之前）
-        app = QtWidgets.QApplication.instance()
-        if app is None:
-            try:
-                if hasattr(QtCore.Qt, 'AA_EnableHighDpiScaling'):
-                    QtWidgets.QApplication.setAttribute(QtCore.Qt.AA_EnableHighDpiScaling, True)
-                if hasattr(QtCore.Qt, 'AA_UseHighDpiPixmaps'):
-                    QtWidgets.QApplication.setAttribute(QtCore.Qt.AA_UseHighDpiPixmaps, True)
-            except Exception:
-                pass
+        from ui.assets_helper import setup_qt_high_dpi
+        # 进程级 Per-Monitor V2 感知已由 __main__ 在更早处通过 Win32 API 声明，
+        # 这里启用 Qt 的 AA_ 属性与之配合。必须在 QApplication 构造之前。
+        if QtWidgets.QApplication.instance() is None:
+            setup_qt_high_dpi()
             app = QtWidgets.QApplication(sys.argv)
+        else:
+            app = QtWidgets.QApplication.instance()
 
         dialog = CustomConfirmDialog(
             parent=None,
@@ -208,19 +205,14 @@ def launch_gui():
         sys.exit(0)
 
     try:
-        # 设置高分屏支持（必须在 QApplication 创建之前）
         # 进程级 Per-Monitor V2 感知已由 __main__ 在更早处通过 Win32 API 声明，
-        # 这里启用 Qt 的 AA_EnableHighDpiScaling/AA_UseHighDpiPixmaps 与之配合。
-        try:
-            if hasattr(QtCore.Qt, 'AA_EnableHighDpiScaling'):
-                QtWidgets.QApplication.setAttribute(QtCore.Qt.AA_EnableHighDpiScaling, True)
-            if hasattr(QtCore.Qt, 'AA_UseHighDpiPixmaps'):
-                QtWidgets.QApplication.setAttribute(QtCore.Qt.AA_UseHighDpiPixmaps, True)
-        except Exception:
-            pass
-
-        # 创建 QApplication
-        app = QtWidgets.QApplication(sys.argv)
+        # 这里启用 Qt 的 AA_ 属性与之配合。必须在 QApplication 构造之前。
+        from ui.assets_helper import setup_qt_high_dpi
+        if QtWidgets.QApplication.instance() is None:
+            setup_qt_high_dpi()
+            app = QtWidgets.QApplication(sys.argv)
+        else:
+            app = QtWidgets.QApplication.instance()
 
         # 显示启动画面
         splash = SplashScreen()

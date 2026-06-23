@@ -112,7 +112,7 @@ class AboutLauncherPage(BasePage):
             pix = QtGui.QPixmap(str(rabbit_path))
             if not pix.isNull():
                 # scaled_pixmap 已按 devicePixelRatio 放大到物理像素，显示尺寸仍为 180×180 逻辑
-                scaled = ASSETS.scaled_pixmap(pix, 180, 180, QtCore.Qt.KeepAspectRatio, QtCore.Qt.SmoothTransformation)
+                scaled = ASSETS.scaled_pixmap(pix, 180, 180, QtCore.Qt.IgnoreAspectRatio, QtCore.Qt.SmoothTransformation)  # logo must fill 180x180 square; KeepAspectRatio would letterbox
                 logo_label.setPixmap(scaled)
                 logo_label.setFixedSize(180, 180)
             else:
