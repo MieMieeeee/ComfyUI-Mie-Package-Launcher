@@ -745,6 +745,95 @@ def _confirm_deps_or_warn(parent, auto_update_deps_var) -> bool:
         return True
 
 
+def _offer_force_update(launcher, core_res, summary, stable_only, on_done) -> bool:
+    """内核更新失败且 error_code == LOCAL_MODIFICATIONS 时弹“强制更新”对话框。
+
+    - 点击“强制更新 (stash)”：调 launcher._force_update(...) 代替本次更新流程，返回 True。
+      调用方不再走普通“更新失败”提示，状态恢复也由 _force_update 负责。
+    - 点击“取消”或关闭对话框：返回 False，让调用方继续走普通“更新失败”提示。
+    - 对话框构造 / exec_() 抛出会被记日志后吞掉，返回 False。
+
+    该函数为模块级函数，以保证 _finish 里的裸名查找路径与测试 ns["_offer_force_update"] 拦截一致。
+    """
+    logger = getattr(launcher, "logger", None)
+    if logger:
+        try:
+            logger.info("LOCAL_MODIFICATIONS：弹强制更新对话框")
+        except Exception:
+            pass
+    try:
+        from PyQt5 import QtWidgets
+        from ui_qt.widgets.custom_confirm_dialog import CustomConfirmDialog
+    except Exception as e:
+        try:
+            if logger:
+                logger.error("导入对话框类失败: %s", e, exc_info=True)
+        except Exception:
+            pass
+        return False
+
+    error_text = ""
+    branch = "master"
+    try:
+        if isinstance(core_res, dict):
+            error_text = (core_res.get("error") or "").strip()
+            branch = core_res.get("branch") or "master"
+    except Exception:
+        pass
+
+    content = (
+        "ComfyUI 内核的 git 工作树上有未提交的修改，无法直接拉取最新代码。\n\n"
+        f"错误：{error_text}\n\n"
+        "可选操作：\n"
+        "  · 强制更新 (stash)：先把你的本地修改存到 stash，再重新执行更新。\n"
+        "    重要：不会自动 git stash pop。"
+        "因为 pop 可能因冲突失败，把工作树推到一个半合并状态反而更难修复。\n"
+        "    更新后你会看到带 stash 引用的提示，如需恢复修改请手动运行 git stash pop。\n"
+        "  · 取消：放弃这次强制更新，请手动处理本地修改后再试。\n\n"
+        "本操作只针对 ComfyUI 内核的 git 工作树，不会影响你存放在模型、输入、输出、"
+        "自定义节点等目录里的任何文件。"
+    )
+    try:
+        dlg = CustomConfirmDialog(
+            parent=launcher,
+            title="检测到本地有未提交的修改",
+            content=content,
+            buttons=[
+                {"text": "取消", "role": "normal"},
+                {"text": "强制更新 (stash)", "role": "primary"},
+            ],
+            # 默认高亮“取消”，避免误操作对你的修改做删除/覆盖
+            default_index=0,
+            theme_manager=getattr(launcher, "theme_manager", None),
+            min_width=620,
+        )
+        accepted = dlg.exec_()
+        # 强制更新按钮 index=1
+        if accepted == QtWidgets.QDialog.Accepted and dlg.get_result() == 1:
+            try:
+                if logger:
+                    logger.info("用户选择强制更新，调用 launcher._force_update")
+            except Exception:
+                pass
+            try:
+                launcher._force_update(core_res, summary, stable_only, on_done)
+            except Exception as e:
+                try:
+                    if logger:
+                        logger.error("调用 _force_update 失败: %s", e, exc_info=True)
+                except Exception:
+                    pass
+            return True
+        return False
+    except Exception as e:
+        try:
+            if logger:
+                logger.error("强制更新对话框失败: %s", e, exc_info=True)
+        except Exception:
+            pass
+        return False
+
+
 class PyQtLauncher(QtWidgets.QMainWindow, process_events.ProcessCallback):
     def __init__(self):
         # 高分屏适配已在 comfyui_launcher_pyqt.py 中完成（必须在 QApplication 创建之前）
@@ -3035,6 +3124,8 @@ class PyQtLauncher(QtWidgets.QMainWindow, process_events.ProcessCallback):
         def _worker():
             core_res = None
             req_res = None
+            # 内核更新失败（任何原因）时置 True，跳过 2-4 步。
+            skip_rest = False
 
             # 重置取消状态
             try:
@@ -3108,41 +3199,51 @@ class PyQtLauncher(QtWidgets.QMainWindow, process_events.ProcessCallback):
                         core_res = {"component": "core", "error": "用户取消"}
                     return
 
-                # 2. 更新依赖
-                on_progress("正在同步依赖库 (requirements)...")
-                try:
-                    if hasattr(self, "auto_update_deps_var") and bool(
+
+                # 内核更新失败（任何原因）：跳过依赖 / 前端 / 模板更新。
+                # 这些步骤要么共用同一棵 git 工作树，要么依赖同一个上游，
+                # core 失败时几乎一定跟着失败，继续跑只会浪费时间、
+                # 污染日志和摘要。只有 LOCAL_MODIFICATIONS 会在 _finish 里
+                # 额外弹一个带“强制更新”按钮的对话框。
+                if isinstance(core_res, dict) and core_res.get("error"):
+                    skip_rest = True
+
+                if not skip_rest:
+                    # 2. 更新依赖
+                    on_progress("正在同步依赖库 (requirements)...")
+                    try:
+                        if hasattr(self, "auto_update_deps_var") and bool(
+                            self.auto_update_deps_var.get()
+                        ):
+                            req_res = self.services.update.sync_requirements_files(on_progress=on_progress)
+                    except Exception as e:
+                        req_res = {"component": "requirements", "error": str(e)}
+
+                    # 检查是否已取消
+                    if pd and pd.is_cancelled():
+                        return
+
+                    # 3. 更新前端和模板库（仅当没有同步依赖库时才需要单独更新）
+                    # 如果同步了依赖库（upgrade=True），前端包和模板库已经随依赖一起更新了
+                    deps_synced = hasattr(self, "auto_update_deps_var") and bool(
                         self.auto_update_deps_var.get()
-                    ):
-                        req_res = self.services.update.sync_requirements_files(on_progress=on_progress)
-                except Exception as e:
-                    req_res = {"component": "requirements", "error": str(e)}
+                    )
+                    if not deps_synced:
+                        if self.update_frontend_var.get():
+                            on_progress("正在更新前端包 (comfyui-frontend)...")
+                            try:
+                                self.services.update.update_frontend(False)
+                            except Exception:
+                                pass
 
-                # 检查是否已取消
-                if pd and pd.is_cancelled():
-                    return
+                        if self.update_template_var.get():
+                            on_progress("正在更新模板库 (comfyui-workflow-templates)...")
+                            try:
+                                self.services.update.update_templates(False)
+                            except Exception:
+                                pass
 
-                # 3. 更新前端和模板库（仅当没有同步依赖库时才需要单独更新）
-                # 如果同步了依赖库（upgrade=True），前端包和模板库已经随依赖一起更新了
-                deps_synced = hasattr(self, "auto_update_deps_var") and bool(
-                    self.auto_update_deps_var.get()
-                )
-                if not deps_synced:
-                    if self.update_frontend_var.get():
-                        on_progress("正在更新前端包 (comfyui-frontend)...")
-                        try:
-                            self.services.update.update_frontend(False)
-                        except Exception:
-                            pass
-
-                    if self.update_template_var.get():
-                        on_progress("正在更新模板库 (comfyui-workflow-templates)...")
-                        try:
-                            self.services.update.update_templates(False)
-                        except Exception:
-                            pass
-
-                on_progress("更新完成")
+                    on_progress("更新完成")
 
                 try:
                     if getattr(self, "logger", None):
@@ -3168,10 +3269,21 @@ class PyQtLauncher(QtWidgets.QMainWindow, process_events.ProcessCallback):
                     pass
 
             def _finish():
+                # 强制更新接管后续流程时设为 True，跳过 finally 里的
+                # _update_running / on_done 恢复（由 _force_update 自己负责），
+                # 否则按钮会被提前恢复、用户可再次点“更新”导致并发。
+                offered_force_update = False
                 try:
                     # 关闭进度弹窗
-                    if pd:
-                        pd.close()
+                    try:
+                        if pd:
+                            pd.close()
+                    except Exception as e:
+                        try:
+                            if getattr(self, "logger", None):
+                                self.logger.warning("关闭进度弹窗失败: %s", e)
+                        except Exception:
+                            pass
 
                     summary = _format_update_summary(core_res, req_res)
                     try:
@@ -3179,31 +3291,82 @@ class PyQtLauncher(QtWidgets.QMainWindow, process_events.ProcessCallback):
                             self.logger.info("更新摘要:\n%s", summary)
                     except Exception:
                         pass
-                    try:
-                        from ui_qt.widgets.dialog_helper import DialogHelper
 
-                        # 更新摘要可能包含黑名单 / 失败 / 提示，
-                        # 需要足够宽度让“自动跳过”单行能容下多个包名。
-                        if isinstance(core_res, dict) and core_res.get("error"):
-                            DialogHelper.show_warning(self, "更新失败", summary, min_width=600)
-                        else:
-                            DialogHelper.show_info(self, "更新完成", summary, min_width=600)
-                    except Exception:
-                        pass
-                    try:
-                        self.get_version_info("all")
-                    except Exception:
-                        pass
-                finally:
-                    try:
-                        self._update_running = False
-                    except Exception:
-                        pass
-                    if on_done:
+                    # 把每个弹窗的 try/except 拆开，弹窗故障不能掩盖其他弹窗。
+                    if isinstance(core_res, dict) and core_res.get("error"):
+                        # 本地有未提交修改导致更新失败：先尝试弹带“强制更新”的对话框。
+                        if core_res.get("error_code") == "LOCAL_MODIFICATIONS":
+                            try:
+                                offered_force_update = bool(
+                                    _offer_force_update(
+                                        self, core_res, summary, stable_only, on_done
+                                    )
+                                )
+                            except Exception as e:
+                                try:
+                                    if getattr(self, "logger", None):
+                                        self.logger.error(
+                                            "强制更新对话框失败: %s", e, exc_info=True,
+                                        )
+                                except Exception:
+                                    pass
+                                offered_force_update = False
+                        # 不论强制更新弹窗结果如何（除非用户主动选），
+                        # 都额外弹一个普通“更新失败”提示，让用户看到具体原因。
+                        if not offered_force_update:
+                            try:
+                                from ui_qt.widgets.dialog_helper import DialogHelper
+                                # 更新摘要可能包含黑名单 / 失败 / 提示，
+                                # 需要足够宽度让“自动跳过”单行能容下多个包名。
+                                DialogHelper.show_warning(
+                                    self, "更新失败", summary, min_width=600,
+                                )
+                            except Exception as e:
+                                try:
+                                    if getattr(self, "logger", None):
+                                        self.logger.error(
+                                            "更新失败弹窗失败: %s", e, exc_info=True,
+                                        )
+                                except Exception:
+                                    pass
+                    else:
                         try:
-                            on_done()
+                            from ui_qt.widgets.dialog_helper import DialogHelper
+                            DialogHelper.show_info(
+                                self, "更新完成", summary, min_width=600,
+                            )
+                        except Exception as e:
+                            try:
+                                if getattr(self, "logger", None):
+                                    self.logger.error(
+                                        "更新完成弹窗失败: %s", e, exc_info=True,
+                                    )
+                            except Exception:
+                                pass
+
+                    # 强制更新走自己的 get_version_info 流程，本处跳过避免重复刷新。
+                    if not offered_force_update:
+                        try:
+                            self.get_version_info("all")
+                        except Exception as e:
+                            try:
+                                if getattr(self, "logger", None):
+                                    self.logger.warning(
+                                        "get_version_info 失败: %s", e,
+                                    )
+                            except Exception:
+                                pass
+                finally:
+                    if not offered_force_update:
+                        try:
+                            self._update_running = False
                         except Exception:
                             pass
+                        if on_done:
+                            try:
+                                on_done()
+                            except Exception:
+                                pass
 
             self.ui_post(_finish)
 
@@ -3217,6 +3380,176 @@ class PyQtLauncher(QtWidgets.QMainWindow, process_events.ProcessCallback):
                 self._update_running = False
             except Exception:
                 pass
+
+    def _force_update(self, core_res, summary, stable_only, on_done):
+        """强制更新：在用户于 _offer_force_update 弹窗选“强制更新 (stash)”后接管本次更新。
+
+        流程：弹进度 -> 工作线程跑 services.version.force_upgrade_latest(
+            abort rebase -> stash -> upgrade_latest -> pop stash
+        ) -> 关闭进度 -> 弹结果 -> 刷版本信息 -> 恢复按钮。
+
+        任何异常都记日志后吞掉，绝不让强制更新流程把按钮卡在“更新中...”。
+        """
+        logger = getattr(self, "logger", None)
+        pd = None
+        try:
+            from ui_qt.widgets.progress_dialog import ProgressDialog
+
+            pd = ProgressDialog(
+                self,
+                title="正在强制更新",
+                theme_manager=getattr(self, "theme_manager", None),
+                # 强制更新一旦开始不应被打断，否则 stash 可能处于中间态
+                show_cancel=False,
+            )
+            pd.set_status("正在准备强制更新...")
+
+            def _apply_progress(text, percent):
+                if pd is None:
+                    return
+                try:
+                    pd.set_status(text)
+                    pd.set_progress(percent if percent is not None else None)
+                except Exception:
+                    pass
+
+            def on_progress(status, percent=None):
+                try:
+                    self.ui_post(
+                        lambda s=status, p=percent: _apply_progress(s, p)
+                    )
+                except Exception:
+                    _apply_progress(status, percent)
+
+            pd.show()
+            try:
+                QtWidgets.QApplication.processEvents()
+            except Exception:
+                pass
+        except Exception as e:
+            try:
+                if logger:
+                    logger.warning("创建强制更新进度弹窗失败: %s", e)
+            except Exception:
+                pass
+            pd = None
+            # 进度弹窗建不出来也允许后续逻辑跑（on_progress 退化为 no-op）
+            def on_progress(status, percent=None):
+                return
+
+        def _show_result_on_ui(force_res):
+            """回到主线程关进度、弹结果、刷版本、恢复按钮。"""
+            try:
+                if pd:
+                    pd.close()
+            except Exception:
+                pass
+            try:
+                from ui_qt.widgets.dialog_helper import DialogHelper
+
+                if isinstance(force_res, dict) and force_res.get("error"):
+                    content_lines = [f"错误：{force_res.get('error')}"]
+                    if force_res.get("error_code"):
+                        content_lines.append(
+                            f"错误码：{force_res.get('error_code')}"
+                        )
+                    if force_res.get("stash_remaining"):
+                        stash_ref = force_res.get("stash_ref") or "stash@{0}"
+                        content_lines.append(
+                            f"你的本地修改保留在 {stash_ref}，"
+                            "请手动运行 git stash pop 恢复。"
+                        )
+                    try:
+                        DialogHelper.show_warning(
+                            self,
+                            "强制更新失败",
+                            "\n".join(content_lines),
+                            min_width=600,
+                        )
+                    except Exception as e:
+                        try:
+                            if logger:
+                                logger.error(
+                                    "强制更新失败弹窗失败: %s", e, exc_info=True,
+                                )
+                        except Exception:
+                            pass
+                else:
+                    content_lines = ["强制更新完成。"]
+                    if isinstance(force_res, dict) and force_res.get("stash_remaining"):
+                        stash_ref = force_res.get("stash_ref") or "stash@{0}"
+                        content_lines.append(
+                            f"你的本地修改保留在 {stash_ref}，"
+                            "如需恢复请手动运行 git stash pop。"
+                        )
+                    try:
+                        DialogHelper.show_info(
+                            self,
+                            "强制更新完成",
+                            "\n".join(content_lines),
+                            min_width=600,
+                        )
+                    except Exception as e:
+                        try:
+                            if logger:
+                                logger.error(
+                                    "强制更新完成弹窗失败: %s", e, exc_info=True,
+                                )
+                        except Exception:
+                            pass
+            except Exception as e:
+                try:
+                    if logger:
+                        logger.error("强制更新结果处理失败: %s", e, exc_info=True)
+                except Exception:
+                    pass
+            try:
+                self.get_version_info("all")
+            except Exception:
+                pass
+            try:
+                self._update_running = False
+            except Exception:
+                pass
+            if on_done:
+                try:
+                    on_done()
+                except Exception:
+                    pass
+
+        def _worker():
+            force_res = None
+            try:
+                force_res = self.services.version.force_upgrade_latest(
+                    stable_only=stable_only, on_progress=on_progress,
+                )
+            except Exception as e:
+                try:
+                    if logger:
+                        logger.error(
+                            "force_upgrade_latest 异常: %s", e, exc_info=True,
+                        )
+                except Exception:
+                    pass
+                force_res = {"component": "core", "error": str(e)}
+            try:
+                self.ui_post(lambda: _show_result_on_ui(force_res))
+            except Exception:
+                # ui_post 失败时退化为同步调用，避免按钮永远卡住
+                _show_result_on_ui(force_res)
+
+        try:
+            import threading
+            threading.Thread(target=_worker, daemon=True).start()
+        except Exception as e:
+            try:
+                if logger:
+                    logger.error(
+                        "启动强制更新线程失败，回退到同步执行: %s", e, exc_info=True,
+                    )
+            except Exception:
+                pass
+            _worker()
 
     def open_root_dir(self):
         from utils.ui_actions import open_root_dir as _a

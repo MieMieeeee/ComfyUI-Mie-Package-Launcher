@@ -908,6 +908,7 @@ class VersionService(IVersionService):
                             "component": "core",
                             "error": f"更新失败（本地有修改冲突）: {msg[:200]}",
                             "branch": br,
+                            "error_code": "LOCAL_MODIFICATIONS",
                             "hint": "请在终端中手动执行 git reset --hard 后重试",
                         }
 
@@ -1000,3 +1001,151 @@ class VersionService(IVersionService):
             return {"component": "core", "error": r.stderr if r else "checkout tag failed"}
         except Exception as e:
             return {"component": "core", "error": str(e)}
+
+    # --- 本地修改冲突 / 强制更新 ---
+
+    def is_rebase_in_progress(self) -> bool:
+        """检查当前仓库是否处于 rebase 进行中状态。"""
+        try:
+            repo = self._repo_root()
+            for marker in ("rebase-merge", "rebase-apply"):
+                if (Path(repo) / ".git" / marker).exists():
+                    return True
+        except Exception:
+            pass
+        return False
+
+    def abort_rebase(self) -> Dict[str, Any]:
+        """中断进行中的 rebase。失败时返回 error 字段。"""
+        if not self.is_rebase_in_progress():
+            return {"component": "core", "aborted": False, "noop": True}
+        try:
+            r = self._run_git(
+                ["git", "rebase", "--abort"],
+                capture_output=True,
+                text=True,
+                timeout=15,
+                cwd=self._repo_root(),
+            )
+            if r and r.returncode == 0:
+                return {"component": "core", "aborted": True}
+            return {
+                "component": "core",
+                "error": (r.stderr or r.stdout or "git rebase --abort failed").strip(),
+            }
+        except Exception as e:
+            return {"component": "core", "error": str(e)}
+
+    def stash_local_changes(self, message: str = "") -> Dict[str, Any]:
+        """将本地未提交的修改（含未跟踪文件）保存到 stash。"""
+        try:
+            repo = self._repo_root()
+            try:
+                rs = self._run_git(
+                    ["git", "status", "--porcelain"],
+                    capture_output=True,
+                    text=True,
+                    timeout=10,
+                    cwd=repo,
+                )
+                if rs and rs.returncode == 0 and not (rs.stdout or "").strip():
+                    return {"component": "core", "stashed": False, "noop": True}
+            except Exception:
+                pass
+            msg = (message or "Auto-stash before force update").strip()
+            r = self._run_git(
+                ["git", "stash", "push", "-u", "-m", msg],
+                capture_output=True,
+                text=True,
+                timeout=30,
+                cwd=repo,
+            )
+            if r and r.returncode == 0:
+                return {"component": "core", "stashed": True, "ref": "stash@{0}"}
+            return {
+                "component": "core",
+                "error": (r.stderr or r.stdout or "git stash failed").strip(),
+            }
+        except Exception as e:
+            return {"component": "core", "error": str(e)}
+
+    def pop_stash(self, ref: str = "stash@{0}") -> Dict[str, Any]:
+        """恢复 stash 中的内容。失败时返回 error，便于上层提示用户手动处理。"""
+        try:
+            repo = self._repo_root()
+            r = self._run_git(
+                ["git", "stash", "pop", ref],
+                capture_output=True,
+                text=True,
+                timeout=30,
+                cwd=repo,
+            )
+            if r and r.returncode == 0:
+                return {"component": "core", "popped": True}
+            return {
+                "component": "core",
+                "error": (r.stderr or r.stdout or "git stash pop failed").strip(),
+            }
+        except Exception as e:
+            return {"component": "core", "error": str(e)}
+
+    def force_upgrade_latest(
+        self,
+        stable_only: bool = True,
+        on_progress: Callable[[str], None] = None,
+    ) -> Dict[str, Any]:
+        """强制更新：先中断 rebase，再 stash 本地修改，然后执行升级。
+
+        不会自动 git stash pop。理由：pop 可能因为冲突失败（merge conflict、
+        fast-forward 失败等），把用户拖进半合并的工作树状态；升级失败时尤其
+        危险——工作树本身可能已经坏掉，再 pop 上去更乱。所以无论升级成功还是
+        失败，都把修改保留在 stash 里，由用户自己决定什么时候、怎么恢复。
+        调用方可以通过返回的 stash_ref 字段告诉用户去哪里取。
+        """
+        def report(status: str):
+            if on_progress:
+                try:
+                    on_progress(status)
+                except Exception:
+                    pass
+        # 1. 中断可能处于进行中的 rebase
+        try:
+            if self.is_rebase_in_progress():
+                report("检测到未完成的 rebase，正在中断...")
+                abort_res = self.abort_rebase()
+                if abort_res.get("error"):
+                    return {
+                        "component": "core",
+                        "error": f"无法中断 rebase: {abort_res['error']}",
+                        "error_code": "REBASE_ABORT_FAILED",
+                    }
+        except Exception as e:
+            return {
+                "component": "core",
+                "error": f"检测 rebase 状态失败: {e}",
+                "error_code": "REBASE_ABORT_FAILED",
+            }
+        # 2. stash 本地修改
+        report("正在保存本地修改 (git stash)...")
+        stash_res = self.stash_local_changes()
+        if stash_res.get("error"):
+            return {
+                "component": "core",
+                "error": f"无法保存本地修改: {stash_res['error']}",
+                "error_code": "STASH_FAILED",
+            }
+        stashed = bool(stash_res.get("stashed"))
+        stash_ref = stash_res.get("ref") or "stash@{0}"
+        # 3. 真正执行升级
+        report("正在重新执行更新...")
+        res = None
+        try:
+            res = self.upgrade_latest(stable_only=stable_only, on_progress=on_progress)
+        except Exception as e:
+            # 升级异常时，stash 保留不动（不让 pop_stash 把工作树搞得更乱）。
+            res = {"component": "core", "error": str(e)}
+        # 4. 任何分支都不再自动 pop。告诉调用方修改在哪里，让用户在合适的时机恢复。
+        if stashed and isinstance(res, dict):
+            res["stash_remaining"] = True
+            res["stash_ref"] = stash_ref
+        return res

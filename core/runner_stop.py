@@ -27,8 +27,9 @@ def _stop_tracked_process(app, pm) -> bool:
                 except Exception:
                     pass
 
-                # 等待进程结束（最多 3 秒）
-                for _ in range(30):
+                # 等待进程结束（最多 1 秒）。
+                # ComfyUI 没有优雅退出逻辑，1 秒够用；超时后立刻走 taskkill /F。
+                for _ in range(10):
                     if pm.comfyui_process.poll() is not None:
                         killed = True
                         break

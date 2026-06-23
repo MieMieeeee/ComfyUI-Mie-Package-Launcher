@@ -311,27 +311,27 @@ class ProcessManager:
                         pass
                     killed = run_stop(self.app, self)
 
-                    # 等待进程真正结束（最多等待 5 秒）
-                    for _ in range(50):
-                        still_running = False
+                    # 等待进程真正结束（最多 3 秒），只看 Popen.poll()。
+                    # 循环里不再探测 HTTP：进程已死时 urlopen 会卡在 socket
+                    # TIME_WAIT 上，单次 0.4–1.9s × 50 次能拖到 90s+ ——
+                    # 这正是之前「点完停止要等半天」的根因。
+                    # 端口是否真的释放，统一交给 on_process_ended 一次性探测。
+                    for _ in range(30):
                         try:
                             if (
                                 self.comfyui_process
                                 and self.comfyui_process.poll() is None
                             ):
-                                still_running = True
-                            else:
-                                from core.probe import is_http_reachable
-
-                                still_running = is_http_reachable(self.app)
+                                time.sleep(0.1)
+                                continue
                         except Exception:
                             pass
-                        if not still_running:
-                            break
-                        time.sleep(0.1)
+                        break
 
                     try:
-                        # 再次确认最终状态
+                        # 再次确认最终状态：仅看 Popen.poll()。
+                        # 删除原本在 else 分支里多余的 is_http_reachable 探测——
+                        # on_process_ended 内部还会再做一次，重复且无意义。
                         final_running = False
                         try:
                             if (
@@ -339,10 +339,6 @@ class ProcessManager:
                                 and self.comfyui_process.poll() is None
                             ):
                                 final_running = True
-                            else:
-                                from core.probe import is_http_reachable
-
-                                final_running = is_http_reachable(self.app)
                         except Exception:
                             pass
 
@@ -385,30 +381,22 @@ class ProcessManager:
         try:
             import time
 
-            for _ in range(20):
-                still = False
+            # 与 stop_comfyui 保持一致：循环里只看 Popen.poll()，
+            # 不做 HTTP 探测（端口是否释放由 on_process_ended 一次探测决定）。
+            for _ in range(30):
                 try:
                     if self.comfyui_process and self.comfyui_process.poll() is None:
-                        still = True
-                    else:
-                        from core.probe import is_http_reachable
-
-                        still = is_http_reachable(self.app)
+                        time.sleep(0.1)
+                        continue
                 except Exception:
-                    still = False
-                if not still:
-                    break
-                time.sleep(0.25)
+                    pass
+                break
         except Exception:
             pass
         running = False
         try:
             if self.comfyui_process and self.comfyui_process.poll() is None:
                 running = True
-            else:
-                from core.probe import is_http_reachable
-
-                running = is_http_reachable(self.app)
             if not running:
                 self.on_process_ended()
             else:
