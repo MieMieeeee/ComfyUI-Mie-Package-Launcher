@@ -122,7 +122,7 @@ def build_nuitka(is_test=False):
         python_exe, '-m', 'nuitka',
         '--standalone',
         '--enable-plugin=pyqt5',
-        '--windows-console-mode=disable',
+        '--windows-console-mode=attach',
         '--assume-yes-for-downloads',
 
         # 输出目录
@@ -238,3 +238,4 @@ def build_nuitka(is_test=False):
 if __name__ == "__main__":
     args = parse_args()
     build_nuitka(is_test=args.test)
+

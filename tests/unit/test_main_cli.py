@@ -111,15 +111,20 @@ class TestMainCLISubprocess(unittest.TestCase):
         self.assertIn("status", result.stdout)
 
     def test_status_subcommand_returns_3_when_not_running(self):
-        """未跑 ComfyUI 时 `cli status` 应返回 EXIT_NOT_RUNNING (3)。"""
+        """未跑 ComfyUI 时 `cli status` 应返回 EXIT_NOT_RUNNING (3)。
+
+        历史背景：早期测试用 `assertIn(rc, (0, 3))` 兜底是因为打包成
+        `--windows-console-mode=disable` 后 cmd.exe 抓不到 exit code
+        （GUI subsystem 进程）。修 build + 加 AttachConsole 后必须严格
+        断言 3，否则再退化也发现不了。
+        """
         result = self._run("status")
-        # 返回 3（未跑）— config 存在所以不应该是 1
-        self.assertIn(result.returncode, (0, 3))
+        self.assertEqual(result.returncode, 3)
         self.assertIn("running", result.stdout.lower())
 
     def test_status_json_output_is_valid_json(self):
         result = self._run("status", "--json")
-        self.assertIn(result.returncode, (0, 3))
+        self.assertEqual(result.returncode, 3)
         data = json.loads(result.stdout)
         self.assertIn("running", data)
         self.assertIn("pid", data)
@@ -136,6 +141,68 @@ class TestMainCLISubprocess(unittest.TestCase):
         # stop 未跑是 no-op，EXIT_OK
         self.assertEqual(result.returncode, 0)
 
+
+
+
+class TestAttachParentConsole(unittest.TestCase):
+    """__main__._attach_parent_console 行为约束。
+
+    设计目标：
+    - 在 dev 模式（python.exe 是 console subsystem）调用：不能抛异常，
+      不能破坏 sys.stdout（已被 Python 启动时绑好）。
+    - 在没父 console 的环境（service-like 进程）调用：静默返回。
+    - 非 Windows 平台：直接 no-op。
+    """
+
+    def _import_main(self):
+        import importlib.util as u
+        spec = u.spec_from_file_location(
+            "main_under_test",
+            Path(__file__).parent.parent.parent / "__main__.py",
+        )
+        mod = u.module_from_spec(spec)
+        spec.loader.exec_module(mod)
+        return mod
+
+    def test_returns_silently_on_non_windows(self):
+        """非 win32 平台直接 no-op，不依赖 ctypes。"""
+        mod = self._import_main()
+        old = sys.platform
+        try:
+            sys.platform = "linux"
+            old_out = sys.stdout
+            mod._attach_parent_console()
+            self.assertIs(sys.stdout, old_out)
+        finally:
+            sys.platform = old
+
+    def test_safe_to_call_in_dev_mode(self):
+        """dev 模式（python.exe 已有 console）调用不能挂、不应破坏 stdout。"""
+        if sys.platform != "win32":
+            self.skipTest("Win32-only behavior")
+        mod = self._import_main()
+        old_out = sys.stdout
+        old_err = sys.stderr
+        mod._attach_parent_console()
+        self.assertIs(sys.stdout, old_out)
+        self.assertIs(sys.stderr, old_err)
+
+    def test_attach_falls_back_silently_on_no_parent_console(self):
+        """没有父 console 时必须静默。
+
+        pytest 主进程有自己 console，所以这里 monkeypatch AttachConsole
+        模拟失败分支（return 0），验证不抛异常、且不替换 stdout。
+        """
+        if sys.platform != "win32":
+            self.skipTest("Win32-only behavior")
+        import ctypes
+        from unittest import mock
+
+        mod = self._import_main()
+        old_out = sys.stdout
+        with mock.patch.object(ctypes.windll.kernel32, "AttachConsole", return_value=0):
+            mod._attach_parent_console()
+        self.assertIs(sys.stdout, old_out)
 
 if __name__ == "__main__":
     unittest.main(verbosity=2)

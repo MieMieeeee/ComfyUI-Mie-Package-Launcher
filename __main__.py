@@ -1,7 +1,11 @@
-"""PyInstaller entry point.
+"""启动器入口（Nuitka / 开发模式共用）。
 
 CLI 子命令（start/stop/status/...）由 core.cli.main 接管。
 无 CLI 参数时启动 GUI。
+
+CLI 路径会在最开始尝试 AttachConsole(-1) 把 stdout / stderr 挂回父进程的
+console —— 这是 GUI subsystem 打包（Nuitka --windows-console-mode=disable
+或 --windows-console-mode=attach）下唯一的可移植方案。
 """
 import sys
 
@@ -38,6 +42,44 @@ def _enable_per_monitor_dpi_awareness() -> None:
     # 3) 最后退回系统级 DPI 感知（Vista+）
     try:
         ctypes.windll.user32.SetProcessDpiAware()
+    except Exception:
+        pass
+
+
+def _attach_parent_console() -> None:
+    r"""Win32: attach 当前进程到父进程的 console，让 stdout / stderr 可见。
+
+    背景：Nuitka 用 --windows-console-mode=disable 打包时是 GUI subsystem，
+    Python 的 stdout 指向 \\.\NUL 所以 PowerShell / cmd 看不到输出，cmd 的
+    %errorlevel% 也读不到正确的退出码。AttachConsole(-1) (ATTACH_PARENT_PROCESS)
+    会在父进程有 console 时挂上去；之后重新打开 CONOUT$ / CONERR$ 并替换
+    sys.stdout / sys.stderr，否则 Python 的 file buffer 还在原位。
+
+    - 仅在 sys.platform == "win32" 且父进程是命令行进程时真正起作用。
+    - AttachConsole 失败（没有父 console / 已 attach / 拒绝访问）一律静默。
+    - dev 模式（python.exe 是 console subsystem）调用也会"成功"但不需要重绑。
+    """
+    if sys.platform != 'win32':
+        return
+
+    import ctypes
+    from ctypes import wintypes
+
+    ATTACH_PARENT_PROCESS = wintypes.DWORD(-1)
+    kernel32 = ctypes.windll.kernel32
+    kernel32.AttachConsole.argtypes = [wintypes.DWORD]
+    kernel32.AttachConsole.restype = wintypes.BOOL
+
+    if not kernel32.AttachConsole(ATTACH_PARENT_PROCESS):
+        return
+
+    # Attach 成功：把 stdout / stderr 重新指向控制台。
+    try:
+        import os
+        conout_fd = os.open('CONOUT$', os.O_WRONLY | os.O_TEXT)
+        conerr_fd = os.open('CONERR$', os.O_WRONLY | os.O_TEXT)
+        sys.stdout = os.fdopen(conout_fd, 'w', buffering=1, encoding='utf-8', errors='replace')
+        sys.stderr = os.fdopen(conerr_fd, 'w', buffering=1, encoding='utf-8', errors='replace')
     except Exception:
         pass
 
@@ -80,6 +122,8 @@ def main() -> int:
         pass
     sys.path.insert(0, ".")
 
+    # CLI 模式：先把 stdout / stderr 挂到父 console（GUI subsystem 打包必备）
+    _attach_parent_console()
     if _is_cli_invocation():
         from core.cli.main import main as cli_main
         return cli_main()
