@@ -82,6 +82,54 @@ def resolve_asset_variants(filenames):
         return Path(filenames[0])
 
 
+def _device_pixel_ratio() -> float:
+    """返回当前 QApplication 的设备像素比；无 Qt 实例时回退 1.0。
+
+    惰性 import Qt，保持本模块在非 GUI 上下文下可被安全导入。
+    """
+    try:
+        from PyQt5.QtWidgets import QApplication
+
+        app = QApplication.instance()
+        if app is not None:
+            return float(app.devicePixelRatio())
+    except Exception:
+        pass
+    return 1.0
+
+
+def scaled_pixmap(pixmap, width, height, aspect_mode=None, transform_mode=None):
+    """按设备像素比缩放 pixmap，保证高 DPI 下不糊。
+
+    ``width``/``height`` 为逻辑像素（与 QLabel 显示尺寸一致）。内部先缩放到
+    物理（逻辑 × dpr）像素，再 ``setDevicePixelRatio(dpr)``，QLabel 显示尺寸不变。
+    """
+    from PyQt5.QtCore import Qt
+
+    if aspect_mode is None:
+        aspect_mode = Qt.KeepAspectRatio
+    if transform_mode is None:
+        transform_mode = Qt.SmoothTransformation
+    dpr = _device_pixel_ratio()
+    phys_w = max(1, int(round(width * dpr)))
+    phys_h = max(1, int(round(height * dpr)))
+    scaled = pixmap.scaled(phys_w, phys_h, aspect_mode, transform_mode)
+    scaled.setDevicePixelRatio(dpr)
+    return scaled
+
+
+def scaled_to_height(pixmap, height, transform_mode=None):
+    """按设备像素比缩放 pixmap 到指定逻辑高度，保证高 DPI 下不糊。"""
+    from PyQt5.QtCore import Qt
+
+    if transform_mode is None:
+        transform_mode = Qt.SmoothTransformation
+    dpr = _device_pixel_ratio()
+    scaled = pixmap.scaledToHeight(max(1, int(round(height * dpr))), transform_mode)
+    scaled.setDevicePixelRatio(dpr)
+    return scaled
+
+
 def icon_base_paths():
     """收集用于查找图标的基础目录列表。"""
     bases = []

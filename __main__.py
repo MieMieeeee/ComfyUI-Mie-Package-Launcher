@@ -18,8 +18,49 @@ def _prepare_cli_output(force: bool = False) -> None:
     sys.stderr = open("CONOUT$", "w")
 
 
+def _enable_per_monitor_dpi_awareness() -> None:
+    """在 Qt 或任何窗口创建前声明进程为 Per-Monitor DPI V2 感知。
+
+    必须在 QApplication 构造之前调用，使 Qt 的高 DPI 缩放按每块显示器独立生效，
+    解决多显示器（不同缩放比例）间拖动窗口时模糊/错位的问题。全程失败则静默，
+    不影响启动；Qt 自身的 AA_EnableHighDpiScaling 会在此基础上继续工作。
+    """
+    if sys.platform != "win32":
+        return
+
+    import ctypes
+
+    # 1) 优先 Per-Monitor V2（Win10 1703+）
+    try:
+        # DPI_AWARENESS_CONTEXT 是 HANDLE（指针宽），64 位下必须显式 c_void_p
+        # 避免把 PER_MONITOR_AWARE_V2 = -4 当成 int 截断成无意义值
+        fn = ctypes.windll.user32.SetProcessDpiAwarenessContext
+        fn.argtypes = [ctypes.c_void_p]
+        fn.restype = ctypes.c_bool
+        if fn(ctypes.c_void_p(-4)):
+            return
+    except Exception:
+        pass
+
+    # 2) 退回 Per-Monitor V1（Win8.1+/Win10，via shcore）
+    try:
+        ctypes.windll.shcore.SetProcessDpiAwareness(2)  # PROCESS_PER_MONITOR_DPI_AWARE
+        return
+    except Exception:
+        pass
+
+    # 3) 最后退回系统级 DPI 感知（Vista+）
+    try:
+        ctypes.windll.user32.SetProcessDpiAware()
+    except Exception:
+        pass
+
+
 def main():
     global _comfyui_process
+
+    # 尽早声明 Per-Monitor DPI V2 感知（必须在 QApplication / 任何窗口创建之前）
+    _enable_per_monitor_dpi_awareness()
 
     # Add project root to path for imports
     sys.path.insert(0, ".")

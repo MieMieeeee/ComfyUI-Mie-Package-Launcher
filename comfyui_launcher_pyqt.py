@@ -149,13 +149,13 @@ class SplashScreen(QtWidgets.QWidget):
         logo_label.setFixedHeight(48)
         # 尝试加载图标文件
         try:
-            from ui.assets_helper import resolve_asset
+            from ui.assets_helper import resolve_asset, scaled_to_height
             icon_path = resolve_asset('rabbit.png')
             if icon_path.exists():
                 pixmap = QtGui.QPixmap(str(icon_path))
                 if not pixmap.isNull():
-                    # 缩放图片，保持宽高比，高度固定48
-                    scaled = pixmap.scaledToHeight(48, QtCore.Qt.SmoothTransformation)
+                    # 缩放图片，保持宽高比，高度固定 48（逻辑像素，按 dpr 放大保证清晰）
+                    scaled = scaled_to_height(pixmap, 48, QtCore.Qt.SmoothTransformation)
                     logo_label.setPixmap(scaled)
                 else:
                     logo_label.setText("🐰")
@@ -209,6 +209,8 @@ def launch_gui():
 
     try:
         # 设置高分屏支持（必须在 QApplication 创建之前）
+        # 进程级 Per-Monitor V2 感知已由 __main__ 在更早处通过 Win32 API 声明，
+        # 这里启用 Qt 的 AA_EnableHighDpiScaling/AA_UseHighDpiPixmaps 与之配合。
         try:
             if hasattr(QtCore.Qt, 'AA_EnableHighDpiScaling'):
                 QtWidgets.QApplication.setAttribute(QtCore.Qt.AA_EnableHighDpiScaling, True)

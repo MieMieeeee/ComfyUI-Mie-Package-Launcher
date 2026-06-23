@@ -104,7 +104,7 @@ class AboutComfyUIPage(BasePage):
             if p and p.exists():
                 pix = QtGui.QPixmap(str(p))
                 if not pix.isNull():
-                    banner_label.setPixmap(pix.scaledToHeight(120, QtCore.Qt.SmoothTransformation))
+                    banner_label.setPixmap(ASSETS.scaled_to_height(pix, 120, QtCore.Qt.SmoothTransformation))
                     banner_label.setStyleSheet("background: transparent;")
                 else:
                     banner_label.setStyleSheet(f"font: bold 40px 'Microsoft YaHei UI'; color: {self.theme_manager.colors.get('text')}; background: transparent;")
