@@ -47,3 +47,12 @@ launcher_cache.json
 .test_venv/
 python_embeded/pip.ini
 .coverage
+
+
+# Debug / diagnostic scripts
+/_diag*.py
+/diag*.py
+
+# Build artifacts (Enigma Virtual Box / Nuitka)
+EnigmaVirtualBox/
+nuitka-crash-report.xml
