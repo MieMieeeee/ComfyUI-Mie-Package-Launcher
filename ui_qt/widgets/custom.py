@@ -4,7 +4,13 @@ from PyQt5.QtCore import Qt
 
 class CircleAvatar(QtWidgets.QLabel):
     """
-    自定义圆形头像控件，解决 QSS border-radius 锯齿及大图裁剪问题
+    自定义圆形头像控件，解决 QSS border-radius 锯齿及大图裁剪问题。
+
+    HiDPI 处理意图：paintEvent 中读 self.devicePixelRatioF()（widget 级），
+    不走 QApplication.instance().devicePixelRatio()（全局）。原因：
+    在 Per-Monitor DPI V2 模式下，widget 被拖到另一块不同 dpr 的屏幕时，
+    widget 级 dpr 会随之变化，而全局 dpr 不会。走 widget 级 dpr 才能
+    保证多显示器下头像不发糊。
     """
     def __init__(self, pixmap=None, size=80, parent=None):
         super().__init__(parent)
