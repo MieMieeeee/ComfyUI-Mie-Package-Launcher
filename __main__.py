@@ -10,65 +10,6 @@ console —— 这是 GUI subsystem 打包（Nuitka --windows-console-mode=disab
 import sys
 
 
-def _enable_per_monitor_dpi_awareness(_ctypes=None) -> "str | None":
-    """在 Qt 或任何窗口创建前声明进程为 Per-Monitor DPI V2 感知。
-
-    必须在 QApplication 构造之前调用，使 Qt 的高 DPI 缩放按每块显示器独立生效，
-    解决多显示器（不同缩放比例）间拖动窗口时模糊/错位的问题。全程失败则静默，
-    不影响启动；Qt 自身的 AA_EnableHighDpiScaling 会在此基础上继续工作。
-
-    返回值用于诊断（logging.debug），None 表示全程失败。
-
-    副作用范围：进程级声明。任何子进程（CLI 模式下 fork 出去的 ComfyUI
-    子进程也算）会继承 V2 感知标记 —— 子进程自己会再声明一次，所以无影响，
-    但值得知道。CLI 模式调用本函数本身是无害的（只是声明一下，没真用到）。
-
-    ``_ctypes`` 参数仅供测试注入使用，调用方传 ``None`` 走真实 ``import ctypes``。
-    """
-    if sys.platform != "win32":
-        return None
-
-    if _ctypes is None:
-        import ctypes as _ctypes  # noqa: F811 (intentional shadow)
-
-    import logging
-    log = logging.getLogger("__main__")
-
-    # 1) 优先 Per-Monitor V2（Win10 1703+）
-    try:
-        fn = _ctypes.windll.user32.SetProcessDpiAwarenessContext
-        fn.argtypes = [_ctypes.c_void_p]
-        fn.restype = _ctypes.c_bool
-        if fn(_ctypes.c_void_p(-4)):
-            log.debug("DPI: Per-Monitor V2 declared (SetProcessDpiAwarenessContext)")
-            return "v2"
-    except Exception as exc:
-        log.debug("DPI: V2 path failed: %s", exc)
-
-    # 2) 退回 Per-Monitor V1（Win8.1+/Win10，via shcore）
-    try:
-        hr = _ctypes.windll.shcore.SetProcessDpiAwareness(2)
-        if hr == 0:
-            log.debug("DPI: Per-Monitor V1 declared (shcore.SetProcessDpiAwareness)")
-            return "v1"
-        log.debug("DPI: V1 path returned HRESULT 0x%x, treating as failure", hr & 0xFFFFFFFF)
-    except Exception as exc:
-        log.debug("DPI: V1 path failed: %s", exc)
-
-    # 3) 最后退回系统级 DPI 感知（Vista+）
-    try:
-        ok = _ctypes.windll.user32.SetProcessDpiAware()
-        if ok:
-            log.debug("DPI: system-level DPI aware declared (SetProcessDpiAware)")
-            return "legacy"
-        log.debug("DPI: legacy path returned non-true, treating as failure")
-    except Exception as exc:
-        log.debug("DPI: legacy path failed: %s", exc)
-
-    log.debug("DPI: all three paths failed, Windows will virtualize DPI instead")
-    return None
-
-
 def _attach_parent_console() -> None:
     r"""Win32: attach 当前进程到父进程的 console，让 stdout / stderr 可见。
 
@@ -132,9 +73,6 @@ def _is_cli_invocation() -> bool:
 
 
 def main() -> int:
-    # 尽早声明 Per-Monitor DPI V2 感知（必须在 QApplication / 任何窗口创建之前）
-    _enable_per_monitor_dpi_awareness()
-
     import os
     # 切到 exe 所在目录，让 launcher/config.json 永远能找到
     # （PyInstaller 打包后 sys.executable 是 exe 路径；开发模式下也是脚本路径）

@@ -4,13 +4,7 @@ from PyQt5.QtCore import Qt
 
 class CircleAvatar(QtWidgets.QLabel):
     """
-    自定义圆形头像控件，解决 QSS border-radius 锯齿及大图裁剪问题。
-
-    HiDPI 处理意图：paintEvent 中读 self.devicePixelRatioF()（widget 级），
-    不走 QApplication.instance().devicePixelRatio()（全局）。原因：
-    在 Per-Monitor DPI V2 模式下，widget 被拖到另一块不同 dpr 的屏幕时，
-    widget 级 dpr 会随之变化，而全局 dpr 不会。走 widget 级 dpr 才能
-    保证多显示器下头像不发糊。
+    自定义圆形头像控件，解决 QSS border-radius 锯齿及大图裁剪问题
     """
     def __init__(self, pixmap=None, size=80, parent=None):
         super().__init__(parent)
@@ -39,21 +33,12 @@ class CircleAvatar(QtWidgets.QLabel):
         painter.setClipPath(path)
 
         # 比例模式填满圆形区域 (类似 CSS object-fit: cover)
-        # 按 devicePixelRatio 放大到物理像素，避免高 DPI 下头像发糊
-        dpr = self.devicePixelRatioF() or 1.0
-        phys_w = max(1, int(round(self.width() * dpr)))
-        phys_h = max(1, int(round(self.height() * dpr)))
         scaled_pixmap = self._pix.scaled(
-            phys_w, phys_h, Qt.KeepAspectRatioByExpanding, Qt.SmoothTransformation
+            self.size(), Qt.KeepAspectRatioByExpanding, Qt.SmoothTransformation
         )
-        scaled_pixmap.setDevicePixelRatio(dpr)
 
-        # drawPixmap(int,int,QPixmap) 按逻辑坐标绘制；设了 dpr 后 pixmap.width() 是物理像素，
-        # 居中需换算回逻辑尺寸（物理 / dpr）
-        logical_w = scaled_pixmap.width() / dpr
-        logical_h = scaled_pixmap.height() / dpr
-        x = int(round((self.width() - logical_w) / 2))
-        y = int(round((self.height() - logical_h) / 2))
+        x = (self.width() - scaled_pixmap.width()) // 2
+        y = (self.height() - scaled_pixmap.height()) // 2
         painter.drawPixmap(x, y, scaled_pixmap)
 
 class NoWheelComboBox(QtWidgets.QComboBox):
