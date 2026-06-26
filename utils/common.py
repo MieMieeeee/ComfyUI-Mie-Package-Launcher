@@ -60,6 +60,10 @@ def run_hidden(cmd, **kwargs):
         si.dwFlags |= subprocess.STARTF_USESHOWWINDOW
         kwargs["startupinfo"] = si
         kwargs["creationflags"] = kwargs.get("creationflags", 0) | subprocess.CREATE_NO_WINDOW
+        # capture_output 时显式 DEVNULL stdin，避免 GUI 进程 attach console 后
+        # 继承到无效句柄，subprocess._get_handles 抛 WinError 6。
+        if kwargs.get("capture_output"):
+            kwargs.setdefault("stdin", subprocess.DEVNULL)
 
     global RUNHIDDEN_SEQ
     RUNHIDDEN_SEQ += 1

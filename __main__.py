@@ -83,9 +83,9 @@ def main() -> int:
         pass
     sys.path.insert(0, ".")
 
-    # CLI 模式：先把 stdout / stderr 挂到父 console（GUI subsystem 打包必备）
-    _attach_parent_console()
     if _is_cli_invocation():
+        # 仅 CLI 需要挂父 console；GUI 路径调用会破坏 subprocess 标准句柄 → WinError 6
+        _attach_parent_console()
         from core.cli.main import main as cli_main
         return cli_main()
 

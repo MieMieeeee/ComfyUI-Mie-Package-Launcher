@@ -80,6 +80,8 @@ class BigBtnProxy:
         self._action_label = None
         self._state = "idle"
         self._text = None
+        self._display_status = None
+        self._display_action = None
 
     def attach(self, qbtn, status_label=None, action_label=None):
         self._btn = qbtn
@@ -97,16 +99,28 @@ class BigBtnProxy:
 
     def set_display(self, status, action=""):
         """设置双行显示：状态行（大字）+ 操作行（小字）"""
+        if (
+            self._display_status == status
+            and self._display_action == action
+        ):
+            return
+        self._display_status = status
+        self._display_action = action
         self._text = f"{status}\n{action}" if action else status
         if self._status_label is not None:
-            self._status_label.setText(status)
+            if self._status_label.text() != status:
+                self._status_label.setText(status)
             self._status_label.setVisible(True)
         if self._action_label is not None:
-            self._action_label.setText(action)
-            self._action_label.setVisible(bool(action))
+            if self._action_label.text() != action:
+                self._action_label.setText(action)
+            want_visible = bool(action)
+            if self._action_label.isVisible() != want_visible:
+                self._action_label.setVisible(want_visible)
         if self._status_label is None and self._btn is not None:
             try:
-                self._btn.setText(self._text)
+                if self._btn.text() != self._text:
+                    self._btn.setText(self._text)
             except Exception:
                 pass
 
@@ -114,20 +128,29 @@ class BigBtnProxy:
         if self._status_label is not None:
             if '\n' in t:
                 parts = t.split('\n', 1)
-                self._status_label.setText(parts[0])
+                if self._status_label.text() != parts[0]:
+                    self._status_label.setText(parts[0])
                 self._status_label.setVisible(True)
                 if self._action_label is not None:
-                    self._action_label.setText(parts[1])
-                    self._action_label.setVisible(bool(parts[1]))
+                    sub = parts[1]
+                    if self._action_label.text() != sub:
+                        self._action_label.setText(sub)
+                    want_visible = bool(sub)
+                    if self._action_label.isVisible() != want_visible:
+                        self._action_label.setVisible(want_visible)
             else:
-                self._status_label.setText(t)
+                if self._status_label.text() != t:
+                    self._status_label.setText(t)
                 self._status_label.setVisible(True)
                 if self._action_label is not None:
-                    self._action_label.setText("")
-                    self._action_label.setVisible(False)
+                    if self._action_label.text():
+                        self._action_label.setText("")
+                    if self._action_label.isVisible():
+                        self._action_label.setVisible(False)
         elif self._btn is not None:
             try:
-                self._btn.setText(t)
+                if self._btn.text() != t:
+                    self._btn.setText(t)
             except Exception:
                 pass
 
@@ -844,6 +867,9 @@ class PyQtLauncher(QtWidgets.QMainWindow, process_events.ProcessCallback):
         self._tray_quit_requested = False  # 从托盘菜单退出时为 True，跳过确认对话框
         self._tray_quit_and_stop_requested = False  # 从托盘菜单选择"退出并关闭 ComfyUI"
         self._tray_warned_unavailable = False  # 避免重复警告托盘不可用
+        # Win32 标题栏拖动 / 缩放期间推迟 UI 刷新，避免与 DWM 模态循环抢主线程
+        self._in_size_move = False
+        self._pending_running_ui = None
         self.qt_app = QtWidgets.QApplication.instance() or QtWidgets.QApplication(
             sys.argv
         )
@@ -2301,17 +2327,14 @@ class PyQtLauncher(QtWidgets.QMainWindow, process_events.ProcessCallback):
         except Exception:
             pass
 
-        # 定时检测 ComfyUI 运行状态并同步按钮（每 5 秒）；同时与托盘菜单同步
+        # 定时检测 ComfyUI 运行状态并同步按钮（每 5 秒）。
+        # 托盘状态由 refresh_status 异步回调 _apply_comfyui_running_ui 更新；
+        # 切勿在此处同步 HTTP 探测——会在 UI 线程阻塞 ~1s，拖动标题栏时体感卡顿。
         try:
             def _refresh_and_push_to_tray():
                 try:
                     if hasattr(self, "services") and hasattr(self.services, "process"):
                         self.services.process.refresh_status()
-                except Exception:
-                    pass
-                try:
-                    if getattr(self, "_tray", None) and self._tray.available:
-                        self._tray.update_comfyui_status(bool(self._is_comfyui_running()))
                 except Exception:
                     pass
 
@@ -3623,6 +3646,49 @@ class PyQtLauncher(QtWidgets.QMainWindow, process_events.ProcessCallback):
 
         open_web(self)
 
+    def _apply_comfyui_running_ui(self, running: bool) -> None:
+        """把 ComfyUI 运行状态同步到大按钮与托盘；拖动窗口期间推迟到释放后。"""
+        if getattr(self, "_in_size_move", False):
+            self._pending_running_ui = running
+            return
+        self._do_apply_comfyui_running_ui(running)
+
+    def _do_apply_comfyui_running_ui(self, running: bool) -> None:
+        state = "running" if running else "idle"
+        btn = self.big_btn
+        if btn._state != state:
+            btn.set_state(state)
+        if running:
+            btn.set_display("正常运行", "点击停止")
+        else:
+            btn.set_display("🚀 一键启动")
+        tray = getattr(self, "_tray", None)
+        if tray is not None and tray.available:
+            tray.update_comfyui_status(running)
+
+    def _flush_pending_ui_after_move(self) -> None:
+        pending = getattr(self, "_pending_running_ui", None)
+        if pending is None:
+            return
+        self._pending_running_ui = None
+        self._do_apply_comfyui_running_ui(pending)
+
+    def nativeEvent(self, eventType, message):
+        if sys.platform == "win32":
+            try:
+                import ctypes
+                from ctypes import wintypes
+
+                msg = wintypes.MSG.from_address(int(message))
+                if msg.message == 0x0231:  # WM_ENTERSIZEMOVE
+                    self._in_size_move = True
+                elif msg.message == 0x0232:  # WM_EXITSIZEMOVE
+                    self._in_size_move = False
+                    self._flush_pending_ui_after_move()
+            except Exception:
+                pass
+        return super().nativeEvent(eventType, message)
+
     def _is_comfyui_running(self) -> bool:
         pm = getattr(self, "process_manager", None)
         try:
@@ -4005,6 +4071,8 @@ class PyQtLauncher(QtWidgets.QMainWindow, process_events.ProcessCallback):
 
             def _sync():
                 try:
+                    if getattr(self, "_in_size_move", False):
+                        return
                     # 强制用主线程重绘，避免早期跨线程 setText 失效
                     labs = list(self._version_label_refs or [])
                     # 必须与 items 列表顺序一致: 内核, 前端, 模板库, Python, Torch, Git
@@ -4020,7 +4088,9 @@ class PyQtLauncher(QtWidgets.QMainWindow, process_events.ProcessCallback):
                     for i in range(0, len(vals) * 2, 2):
                         if i < len(labs):
                             try:
-                                labs[i].setText(vals[i // 2])
+                                new_text = vals[i // 2]
+                                if labs[i].text() != new_text:
+                                    labs[i].setText(new_text)
                             except Exception:
                                 pass
                 except Exception:
