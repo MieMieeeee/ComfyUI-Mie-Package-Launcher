@@ -91,6 +91,12 @@ class LauncherTray(QtCore.QObject):
 
         self._apply_menu_style()
 
+        # 菜单弹出前复核动作可用性（见 _on_about_to_show），避免异步推送错过/过时
+        try:
+            self._menu.aboutToShow.connect(self._on_about_to_show)
+        except Exception:
+            pass
+
         self._tray.setContextMenu(self._menu)
 
         def _on_activated(reason):
@@ -149,6 +155,24 @@ class LauncherTray(QtCore.QObject):
                 self._quit_and_stop_action.setEnabled(bool(running))
             except Exception:
                 pass
+
+    def _on_about_to_show(self):
+        """菜单弹出前复核'退出并关闭 ComfyUI'可用性，避免异步推送错过/过时。
+
+        aboutToShow 是 UI 线程信号，故 setEnabled 必在 UI 线程执行；用
+        ProcessManager.is_running_fast()（非阻塞，不发 HTTP）拿当下运行态。
+        """
+        running = False
+        pm = getattr(self._app, "process_manager", None)
+        try:
+            if pm is not None and hasattr(pm, "is_running_fast"):
+                running = bool(pm.is_running_fast())
+        except Exception:
+            running = False
+        try:
+            self.update_comfyui_status(running)
+        except Exception:
+            pass
 
     def show_first_time_hint(self):
         """\u7b2c\u4e00\u6b21\u7f29\u5230\u6258\u76d8\u65f6\u5f39\u51fa\u6c14\u6ce1\u63d0\u793a\u3002\u91cd\u590d\u8c03\u7528\u53ea\u89e6\u53d1\u4e00\u6b21\u3002"""

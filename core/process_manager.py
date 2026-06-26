@@ -702,6 +702,22 @@ class ProcessManager:
         self._probe_cache = (running, now)
         return running
 
+    def is_running_fast(self) -> bool:
+        """非阻塞的'是否在跑'快速判断：本进程 Popen + 探针缓存，绝不做 HTTP。
+
+        供 UI 线程（如托盘菜单 aboutToShow）调用，避免阻塞主线程。
+        5s 状态定时器会在 UI 线程持续刷新 _probe_cache，所以缓存值足够新。
+        """
+        try:
+            if self.comfyui_process and self.comfyui_process.poll() is None:
+                return True
+        except Exception:
+            pass
+        cached = self._probe_cache
+        if cached is not None:
+            return bool(cached[0])
+        return False
+
     def _apply_running_state(self, running: bool) -> None:
         fn = getattr(self.app, "_apply_comfyui_running_ui", None)
         if callable(fn):

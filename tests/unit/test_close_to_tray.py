@@ -221,6 +221,7 @@ class _FakeAction:
 
 
 class _FakeMenu:
+    aboutToShow = _FakeSignal()
     def __init__(self):
         self.actions = []
     def addAction(self, text):
@@ -300,6 +301,51 @@ def test_tray_quit_and_stop_enables_when_comfyui_running(qt_app):
     assert stop_action.isEnabled() is True
     tray.update_comfyui_status(False)
     assert stop_action.isEnabled() is False
+
+
+def test_tray_about_to_show_disables_stop_when_not_running(qt_app):
+    """菜单弹出（aboutToShow）据 is_running_fast 复核：未跑时「退出并关闭」必置灰。
+
+    回归：即便动作此前被异步推送误置为 enabled，弹出时也要纠正回来。
+    """
+    from ui_qt.widgets import tray_icon as ti
+
+    fake_menu = _FakeMenu()
+    app_stub = type("A", (), {
+        "logger": None,
+        "process_manager": type("PM", (), {"is_running_fast": lambda self: False})(),
+    })()
+
+    with patch.object(ti.QtWidgets, "QSystemTrayIcon", _FakeTray), \
+         patch.object(ti.QtWidgets, "QMenu", lambda: fake_menu):
+        tray = ti.LauncherTray(app=app_stub, theme_manager=None, parent=None)
+        tray.init()
+
+    stop_action = next(a for a in fake_menu.actions if a.text() == "退出并关闭 ComfyUI")
+    stop_action.setEnabled(True)  # 模拟异步推送留下的过时 enabled 态
+    assert stop_action.isEnabled() is True
+    tray._on_about_to_show()
+    assert stop_action.isEnabled() is False
+
+
+def test_tray_about_to_show_enables_stop_when_running(qt_app):
+    """is_running_fast=True 时，aboutToShow 启用「退出并关闭」项。"""
+    from ui_qt.widgets import tray_icon as ti
+
+    fake_menu = _FakeMenu()
+    app_stub = type("A", (), {
+        "logger": None,
+        "process_manager": type("PM", (), {"is_running_fast": lambda self: True})(),
+    })()
+
+    with patch.object(ti.QtWidgets, "QSystemTrayIcon", _FakeTray), \
+         patch.object(ti.QtWidgets, "QMenu", lambda: fake_menu):
+        tray = ti.LauncherTray(app=app_stub, theme_manager=None, parent=None)
+        tray.init()
+
+    stop_action = next(a for a in fake_menu.actions if a.text() == "退出并关闭 ComfyUI")
+    tray._on_about_to_show()
+    assert stop_action.isEnabled() is True
 
 
 def test_tray_emits_quit_and_stop_signal(qt_app):
