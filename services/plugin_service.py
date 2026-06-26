@@ -132,6 +132,30 @@ class PluginService:
         except Exception as e:
             return {"rc": -1, "stdout": "", "stderr": str(e)}
 
+    def outdated_plugins(self, names: list[str]) -> list[str]:
+        """返回 names 中「git 仓库且本地 HEAD 落后于 origin HEAD」的子集。
+
+        正常更新后仍落后 = 该插件没被更新成功（如 dirty 树被 cm-cli 拒），
+        用来决定是否提示用户强制更新。ls-remote 取不到（无网）则不当成落后。
+        """
+        result = []
+        cn_dir = PATHS.plugins_dir(self._comfyui_dir())
+        for name in names:
+            d = cn_dir / name
+            if not (d / ".git").exists():
+                continue
+            local = self._git_out(["rev-parse", "HEAD"], d)
+            remote = self._git_remote_head(d)
+            if remote and local and remote != local:
+                result.append(name)
+        return result
+
+    def _git_remote_head(self, plugin_dir: Path) -> str:
+        """git ls-remote origin HEAD → 远端 HEAD sha（取不到返回空串）。"""
+        out = self._git_out(["ls-remote", "origin", "HEAD"], plugin_dir)
+        parts = out.split()
+        return parts[0] if parts else ""
+
     # ---- 通用 cm-cli 执行器 ----
     def _run_cmcli(self, args: list[str], timeout: int = _DEFAULT_TIMEOUT) -> dict[str, Any]:
         """跑一个 cm-cli 子命令。返回 {returncode, stdout, stderr, error}。"""

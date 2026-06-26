@@ -2487,6 +2487,8 @@ class PyQtLauncher(QtWidgets.QMainWindow, process_events.ProcessCallback):
                 run_in_background=lambda fn: threading.Thread(target=fn, daemon=True).start(),
                 post_to_ui=lambda fn: self._invoker.emit_invoke(fn),
             )
+            # 正常更新失败的插件 → 二次确认是否强制更新
+            page_plugins.force_update_suggested.connect(self._prompt_plugin_force_update)
             # 启动后稍延迟首次拉取已装列表
             QtCore.QTimer.singleShot(800, page_plugins.refresh_requested.emit)
         except Exception:
@@ -3949,6 +3951,44 @@ class PyQtLauncher(QtWidgets.QMainWindow, process_events.ProcessCallback):
         except Exception:
             pass
         return 0
+
+    def _prompt_plugin_force_update(self, names):
+        """正常更新后仍有插件落后 → 二次确认是否强制更新（git stash + pull）。
+
+        罕见路径：比如本地 MieNodes 从仓库直接同步（dirty 树），cm-cli 正常更新会拒，
+        这里提示用户是否对这些插件强制更新。默认「取消」——二次确认要谨慎。
+        """
+        try:
+            if not names:
+                return
+            from ui_qt.widgets.custom_confirm_dialog import CustomConfirmDialog
+
+            listing = "\n".join(str(n) for n in names)
+            dlg = CustomConfirmDialog(
+                self,
+                title="部分插件更新失败",
+                content=(
+                    "以下插件正常更新未成功（可能本地有改动，例如从仓库直接同步的插件）：\n\n"
+                    f"{listing}\n\n"
+                    "是否对它们强制更新？（会先 git stash 本地改动，再 git pull --ff-only）"
+                ),
+                buttons=[
+                    {"text": "取消", "role": "normal"},
+                    {"text": "强制更新", "role": "destructive"},
+                ],
+                default_index=0,
+                theme_manager=getattr(self, "theme_manager", None),
+            )
+            if dlg.exec_() == QtWidgets.QDialog.Accepted and (dlg.get_result() or 0) == 1:
+                ctrl = getattr(self, "_plugin_controller", None)
+                if ctrl is not None:
+                    ctrl.apply_force_update(list(names))
+        except Exception:
+            try:
+                if getattr(self, "logger", None):
+                    self.logger.warning("插件强制更新确认弹窗失败", exc_info=True)
+            except Exception:
+                pass
 
     def _perform_shutdown(self, event):
         """真正退出的后续流程：站伏 workers、关窗口、QApplication.quit。与原 closeEvent 后半段一致。"""

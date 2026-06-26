@@ -136,10 +136,49 @@ def test_controller_update_selected_passes_checked_names(qt_app):
     page.list_widget.item(1).setCheckState(QtCore.Qt.Checked)  # 只勾选 B
     svc = MagicMock()
     svc.update_selected.return_value = {"updated": True, "log": "", "error": None}
+    svc.outdated_plugins.return_value = []  # 成功路径：无失败 → 不提示强制
     svc.list_installed.return_value = [_plugin("A"), _plugin("B"), _plugin("C")]
     run_bg, post_ui = _sync_runner()
     ctrl = PluginController(page, svc, run_bg, post_ui)
 
     page.update_selected_btn.click()
     svc.update_selected.assert_called_once_with(["B"])
+
+
+def test_controller_offers_force_update_when_plugins_still_outdated(qt_app):
+    from ui_qt.pages.plugins_page import PluginsPage, PluginController
+
+    page = PluginsPage(theme_manager=_stub_theme())
+    svc = MagicMock()
+    svc.update_selected.return_value = {"updated": True, "log": "", "error": None}
+    svc.outdated_plugins.return_value = ["MieNodes"]  # 正常更新后仍落后 = 失败
+    run_bg, post_ui = _sync_runner()
+    ctrl = PluginController(page, svc, run_bg, post_ui)
+
+    suggested = []
+    page.force_update_suggested.connect(lambda names: suggested.append(names))
+
+    page.populate([_plugin("MieNodes")])
+    page.list_widget.item(0).setCheckState(QtCore.Qt.Checked)
+    page.update_selected_btn.click()
+
+    svc.update_selected.assert_called_once_with(["MieNodes"])
+    svc.outdated_plugins.assert_called_once_with(["MieNodes"])
+    assert suggested == [["MieNodes"]]
+
+
+def test_controller_apply_force_update_calls_service_then_refreshes(qt_app):
+    from ui_qt.pages.plugins_page import PluginsPage, PluginController
+
+    page = PluginsPage(theme_manager=_stub_theme())
+    svc = MagicMock()
+    svc.force_update_selected.return_value = [
+        {"name": "MieNodes", "ok": True, "skipped": False, "detail": "Already up to date."}]
+    svc.list_installed.return_value = [_plugin("MieNodes")]
+    run_bg, post_ui = _sync_runner()
+    ctrl = PluginController(page, svc, run_bg, post_ui)
+
+    ctrl.apply_force_update(["MieNodes"])
+    svc.force_update_selected.assert_called_once_with(["MieNodes"])
+    svc.list_installed.assert_called_once()  # 强制后刷新
 

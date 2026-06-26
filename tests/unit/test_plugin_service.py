@@ -318,3 +318,79 @@ def test_lifecycle_op_maps_nonzero_rc_to_error():
     assert r["ok"] is False
     assert r["error"]
 
+
+# ---- outdated_plugins：正常更新后仍落后于远端的（= 失败）----
+
+def test_outdated_plugins_detects_behind(tmp_path):
+    cn = tmp_path / "ComfyUI" / "custom_nodes"
+    cn.mkdir(parents=True)
+    (cn / "MieNodes" / ".git").mkdir(parents=True)
+
+    svc = PluginService(_app())
+
+    def fake(cmd, **kwargs):
+        r = MagicMock()
+        r.returncode = 0
+        r.stderr = ""
+        r.stdout = "remote999\tHEAD\n" if "ls-remote" in cmd else "local111\n"
+        return r
+
+    with patch.object(svc, "_comfyui_dir", return_value=tmp_path / "ComfyUI"), \
+         patch("services.plugin_service.run_hidden", side_effect=fake):
+        out = svc.outdated_plugins(["MieNodes"])
+    assert out == ["MieNodes"]
+
+
+def test_outdated_plugins_skips_up_to_date(tmp_path):
+    cn = tmp_path / "ComfyUI" / "custom_nodes"
+    cn.mkdir(parents=True)
+    (cn / "Uptodate" / ".git").mkdir(parents=True)
+
+    svc = PluginService(_app())
+
+    def fake(cmd, **kwargs):
+        r = MagicMock()
+        r.returncode = 0
+        r.stderr = ""
+        r.stdout = "same123\tHEAD\n" if "ls-remote" in cmd else "same123\n"
+        return r
+
+    with patch.object(svc, "_comfyui_dir", return_value=tmp_path / "ComfyUI"), \
+         patch("services.plugin_service.run_hidden", side_effect=fake):
+        assert svc.outdated_plugins(["Uptodate"]) == []
+
+
+def test_outdated_plugins_skips_non_git_without_calling_git(tmp_path):
+    cn = tmp_path / "ComfyUI" / "custom_nodes"
+    cn.mkdir(parents=True)
+    (cn / "plain").mkdir()  # 非 git
+
+    svc = PluginService(_app())
+    with patch.object(svc, "_comfyui_dir", return_value=tmp_path / "ComfyUI"), \
+         patch("services.plugin_service.run_hidden") as mock_run:
+        assert svc.outdated_plugins(["plain"]) == []
+        mock_run.assert_not_called()  # 非 git 不应查 git
+
+
+def test_outdated_plugins_treats_unreachable_remote_as_not_outdated(tmp_path):
+    cn = tmp_path / "ComfyUI" / "custom_nodes"
+    cn.mkdir(parents=True)
+    (cn / "Offline" / ".git").mkdir(parents=True)
+
+    svc = PluginService(_app())
+
+    def fake(cmd, **kwargs):
+        r = MagicMock()
+        r.stderr = ""
+        if "ls-remote" in cmd:
+            r.returncode = 1  # 无网 / 取不到远端
+            r.stdout = ""
+        else:
+            r.returncode = 0
+            r.stdout = "local111\n"
+        return r
+
+    with patch.object(svc, "_comfyui_dir", return_value=tmp_path / "ComfyUI"), \
+         patch("services.plugin_service.run_hidden", side_effect=fake):
+        assert svc.outdated_plugins(["Offline"]) == []  # 取不到远端，不误报落后
+

@@ -18,6 +18,7 @@ class PluginsPage(BasePage):
     update_all_requested = QtCore.pyqtSignal()
     update_selected_requested = QtCore.pyqtSignal(list)
     refresh_requested = QtCore.pyqtSignal()
+    force_update_suggested = QtCore.pyqtSignal(list)  # 正常更新后仍有失败 → 建议强制更新（带名字）
 
     def __init__(self, app=None, theme_manager=None, parent=None):
         super().__init__(theme_manager, parent)
@@ -110,6 +111,18 @@ class PluginController:
 
     def _update_selected_work(self, names):
         self.svc.update_selected(names)
+        failed = self.svc.outdated_plugins(names)
+        if failed:
+            self._post_to_ui(lambda: self.page.force_update_suggested.emit(failed))
+        else:
+            self._populate_from_service()
+
+    def apply_force_update(self, names):
+        """用户在二次确认弹窗里同意后调用：强制更新这些插件。"""
+        self._run_in_background(lambda: self._force_update_work(names))
+
+    def _force_update_work(self, names):
+        self.svc.force_update_selected(names)
         self._populate_from_service()
 
     def _populate_from_service(self):
