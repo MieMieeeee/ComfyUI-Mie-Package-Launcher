@@ -48,11 +48,21 @@
 - **灵活切换**: 支持为 ComfyUI 指定独立的 Python 环境，方便切换不同版本的 Python 或虚拟环境。
 - **自动适配**: 修改路径后，启动器会自动刷新版本信息并使用新环境启动 ComfyUI，无需重启启动器。
 
-### CLI 模式（v1.0.8）
-- `--start`：无 GUI 启动 ComfyUI，后台运行，适合服务器/静默启动
-- `--stop`：优雅停止 ComfyUI 进程
-- `--status`：检查 ComfyUI 运行状态
-- 详见 [CLI_README.md](CLI_README.md)
+### CLI 模式（v1.0.8+）
+无参数启动即 GUI；带子命令进 headless CLI（复用 GUI 同一套启停路径），适合服务器 / 自动化 / 开机自启：
+
+| 子命令 | 说明 |
+|---|---|
+| `start` / `stop` / `restart` | 启动 / 停止 / 重启 ComfyUI |
+| `status` | 查询运行状态（退出码区分在跑 / 未跑 / 异常） |
+| `info` | 打印当前生效配置 |
+| `logs launcher\|comfyui` | tail 日志 |
+| `update comfyui` | 更新内核 |
+| `help [command]` | 打印帮助 |
+
+所有子命令支持 `--json`（单行 JSON 输出）与稳定的退出码契约。
+- agent 操作指南：[AGENTS.md](AGENTS.md)
+- 完整 CLI 参考：[docs/cli.md](docs/cli.md)
 
 ## 使用说明
 
@@ -61,14 +71,16 @@
 # GUI 模式
 python comfyui_launcher_pyqt.py
 
-# 或通过 __main__.py（支持 CLI 参数）
+# 或通过 __main__.py（无参 = GUI；带子命令 = CLI）
 python __main__.py              # 启动 GUI
-python __main__.py --start      # 无 GUI 后台启动
-python __main__.py --stop       # 停止
-python __main__.py --status     # 查看状态
+python __main__.py status       # 查询运行状态
+python __main__.py start        # 启动 ComfyUI（阻塞到就绪）
+python __main__.py stop         # 停止 ComfyUI
+python __main__.py status --json # JSON 输出，便于脚本解析
 
 # 或直接运行已打包的可执行文件（若已构建）
-# 双击 ComfyUI启动器.exe
+# 双击 ComfyUI启动器.exe          # 无参 = GUI
+# ComfyUI启动器.exe status --json # CLI 子命令
 ```
 
 ### 使用流程
@@ -297,7 +309,8 @@ pytest --cov=. --cov-report=html
 - 调用 Core 与 Utils，避免直接操作 UI 控件或线程调度。
 
 ## 文档
-- CLI 使用说明：[CLI_README.md](CLI_README.md)
+- Agent 操作指南：[AGENTS.md](AGENTS.md)
+- CLI 完整参考：[docs/cli.md](docs/cli.md)
 - 接口契约：[docs/ServiceInterfaces.md](docs/ServiceInterfaces.md)
 - 自动更新设计：[docs/auto-update.md](docs/auto-update.md)
 - 进程事件设计：[docs/process_events_design.md](docs/process_events_design.md)
