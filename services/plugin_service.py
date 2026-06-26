@@ -123,6 +123,15 @@ class PluginService:
             pass
         return ""
 
+    def _git_run(self, args: list[str], cwd: Path, timeout: int = 120) -> dict[str, Any]:
+        """跑一条 git 命令，返回 {rc, stdout, stderr}（保留退出码，供强制更新判断）。"""
+        try:
+            r = run_hidden([self._git_exec(), *args], cwd=str(cwd),
+                           capture_output=True, text=True, timeout=timeout)
+            return {"rc": r.returncode, "stdout": r.stdout or "", "stderr": r.stderr or ""}
+        except Exception as e:
+            return {"rc": -1, "stdout": "", "stderr": str(e)}
+
     # ---- 通用 cm-cli 执行器 ----
     def _run_cmcli(self, args: list[str], timeout: int = _DEFAULT_TIMEOUT) -> dict[str, Any]:
         """跑一个 cm-cli 子命令。返回 {returncode, stdout, stderr, error}。"""
@@ -162,6 +171,57 @@ class PluginService:
             return {"updated": False, "up_to_date": False, "log": "",
                     "error": "未指定要更新的插件"}
         return self._do_update([str(n) for n in nodes])
+
+    def uninstall(self, target):
+        """卸载插件（cm-cli uninstall）。"""
+        return self._lifecycle("uninstall", target)
+
+    def disable(self, target):
+        """禁用插件（cm-cli disable）。"""
+        return self._lifecycle("disable", target)
+
+    def enable(self, target):
+        """启用插件（cm-cli enable）。"""
+        return self._lifecycle("enable", target)
+
+    def install(self, node_spec):
+        """安装插件（cm-cli install <CNR id | git url>）。"""
+        return self._lifecycle("install", node_spec)
+
+    def _lifecycle(self, op: str, target) -> dict[str, Any]:
+        """uninstall/disable/enable/install 共用：跑 cm-cli <op> <target>。"""
+        res = self._run_cmcli([op, str(target)])
+        if res["error"]:
+            return {"ok": False, "log": "", "error": res["error"]}
+        log = _truncate((res["stdout"] or res["stderr"]).strip())
+        rc = res["returncode"]
+        return {"ok": rc == 0, "log": log,
+                "error": None if rc == 0 else f"cm-cli {op} 退出码 {rc}"}
+
+    def force_update_selected(self, names: list[str]) -> list[dict[str, Any]]:
+        """强制更新选中的插件：确认是 git 仓库则 git stash + git pull --ff-only。
+
+        绕过 cm-cli（dirty 树会被它拒），直接对每个 git 插件 stash 本地改动后强拉。
+        返回每插件结果 [{name, ok, skipped, detail}]。
+        """
+        return [self._force_update_one(str(n)) for n in names]
+
+    def _force_update_one(self, name: str) -> dict[str, Any]:
+        cn_dir = PATHS.plugins_dir(self._comfyui_dir())
+        plugin_dir = cn_dir / name
+        if not plugin_dir.exists():
+            return {"name": name, "ok": False, "skipped": True, "detail": "目录不存在"}
+        if not (plugin_dir / ".git").exists():
+            return {"name": name, "ok": False, "skipped": True, "detail": "非 git 仓库，跳过强制更新"}
+        # 尽力 stash 本地改动（无改动也返回 0，忽略结果）
+        self._git_run(["stash"], plugin_dir)
+        pull = self._git_run(["pull", "--ff-only"], plugin_dir)
+        if pull["rc"] == 0:
+            detail = (pull["stdout"] or "已是最新").strip()
+            return {"name": name, "ok": True, "skipped": False, "detail": detail[:200]}
+        err = (pull["stderr"] or pull["stdout"] or "").strip()
+        return {"name": name, "ok": False, "skipped": False,
+                "detail": f"pull 失败 (rc={pull['rc']}): {err[:200]}"}
 
     def _do_update(self, nodes: list[str]) -> dict[str, Any]:
         if not self.is_available():

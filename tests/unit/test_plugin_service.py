@@ -203,3 +203,118 @@ def test_list_installed_skips_caches_hidden_and_files(tmp_path):
     names = {r["name"] for r in result}
     assert names == {"ComfyUI-KJNodes", "real-plugin"}
 
+
+# ---- force_update_selected：确认 git 仓库则 git stash + git pull（强制更新）----
+
+def test_force_update_git_plugin_runs_stash_then_pull(tmp_path):
+    cn = tmp_path / "ComfyUI" / "custom_nodes"
+    cn.mkdir(parents=True)
+    (cn / "ComfyUI-KJNodes" / ".git").mkdir(parents=True)
+
+    svc = PluginService(_app())
+    calls = []
+
+    def fake_run_hidden(cmd, **kwargs):
+        calls.append((cmd, kwargs.get("cwd")))
+        r = MagicMock()
+        r.returncode = 0
+        r.stdout = "Already up to date." if "pull" in cmd else ""
+        r.stderr = ""
+        return r
+
+    with patch.object(svc, "_comfyui_dir", return_value=tmp_path / "ComfyUI"), \
+         patch("services.plugin_service.run_hidden", side_effect=fake_run_hidden):
+        results = svc.force_update_selected(["ComfyUI-KJNodes"])
+
+    subcmds = [" ".join(c[0][1:]) for c in calls]  # 去掉 git 可执行路径
+    cwds = [str(c[1]) for c in calls]
+    assert any("stash" in s for s in subcmds)
+    assert any("pull" in s for s in subcmds)
+    assert all("ComfyUI-KJNodes" in c for c in cwds)  # 都在该插件目录跑
+    assert results[0]["name"] == "ComfyUI-KJNodes"
+    assert results[0]["ok"] is True
+
+
+def test_force_update_skips_non_git_plugin(tmp_path):
+    cn = tmp_path / "ComfyUI" / "custom_nodes"
+    cn.mkdir(parents=True)
+    (cn / "plain-scripts").mkdir()  # 非 git
+
+    svc = PluginService(_app())
+    with patch.object(svc, "_comfyui_dir", return_value=tmp_path / "ComfyUI"), \
+         patch("services.plugin_service.run_hidden") as mock_run:
+        results = svc.force_update_selected(["plain-scripts"])
+    assert results[0]["skipped"] is True
+    assert results[0]["ok"] is False
+    mock_run.assert_not_called()  # 非 git 不应跑任何 git 命令
+
+
+def test_force_update_reports_failure_when_pull_fails(tmp_path):
+    cn = tmp_path / "ComfyUI" / "custom_nodes"
+    cn.mkdir(parents=True)
+    (cn / "ComfyUI-KJNodes" / ".git").mkdir(parents=True)
+
+    svc = PluginService(_app())
+
+    def fake(cmd, **kwargs):
+        r = MagicMock()
+        if "pull" in cmd:
+            r.returncode = 1
+            r.stdout = ""
+            r.stderr = "merge conflict"
+        else:
+            r.returncode = 0
+            r.stdout = ""
+            r.stderr = ""
+        return r
+
+    with patch.object(svc, "_comfyui_dir", return_value=tmp_path / "ComfyUI"), \
+         patch("services.plugin_service.run_hidden", side_effect=fake):
+        results = svc.force_update_selected(["ComfyUI-KJNodes"])
+    assert results[0]["ok"] is False
+    assert "merge conflict" in results[0]["detail"]
+
+
+# ---- cm-cli 包装：uninstall / disable / enable / install ----
+
+def _cmcli_ok():
+    return {"returncode": 0, "stdout": "done", "stderr": "", "error": None}
+
+
+def test_uninstall_invokes_cmcli_uninstall():
+    svc = PluginService(_app())
+    with patch.object(svc, "_run_cmcli", return_value=_cmcli_ok()) as m:
+        r = svc.uninstall("ComfyUI-KJNodes")
+    m.assert_called_once_with(["uninstall", "ComfyUI-KJNodes"])
+    assert r["ok"] is True
+
+
+def test_disable_invokes_cmcli_disable():
+    svc = PluginService(_app())
+    with patch.object(svc, "_run_cmcli", return_value=_cmcli_ok()) as m:
+        svc.disable("ComfyUI-KJNodes")
+    m.assert_called_once_with(["disable", "ComfyUI-KJNodes"])
+
+
+def test_enable_invokes_cmcli_enable():
+    svc = PluginService(_app())
+    with patch.object(svc, "_run_cmcli", return_value=_cmcli_ok()) as m:
+        svc.enable("ComfyUI-KJNodes")
+    m.assert_called_once_with(["enable", "ComfyUI-KJNodes"])
+
+
+def test_install_invokes_cmcli_install_with_spec():
+    svc = PluginService(_app())
+    with patch.object(svc, "_run_cmcli", return_value=_cmcli_ok()) as m:
+        svc.install("https://github.com/kijai/ComfyUI-KJNodes")
+    m.assert_called_once_with(["install", "https://github.com/kijai/ComfyUI-KJNodes"])
+
+
+def test_lifecycle_op_maps_nonzero_rc_to_error():
+    svc = PluginService(_app())
+    fail = {"returncode": 1, "stdout": "", "stderr": "boom", "error": None}
+    with patch.object(svc, "_run_cmcli", return_value=fail):
+        r = svc.uninstall("ComfyUI-KJNodes")
+    assert r["ok"] is False
+    assert r["error"]
+
