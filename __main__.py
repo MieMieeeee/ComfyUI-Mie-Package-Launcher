@@ -74,11 +74,24 @@ def _is_cli_invocation() -> bool:
 
 def main() -> int:
     import os
-    # 切到 exe 所在目录，让 launcher/config.json 永远能找到
-    # （PyInstaller 打包后 sys.executable 是 exe 路径；开发模式下也是脚本路径）
-    exe_dir = os.path.dirname(os.path.abspath(sys.executable))
+    # 判定运行环境（与 ui_qt/qt_app.py、utils/logging.py 的惯用法一致）：
+    #   Nuitka → __compiled__ 存在（版本对象）；PyInstaller → sys.frozen / _MEIPASS
     try:
-        os.chdir(exe_dir)
+        _is_nuitka = __compiled__ is not None
+    except NameError:
+        _is_nuitka = False
+    _is_compiled = _is_nuitka or getattr(sys, "frozen", False) or hasattr(sys, "_MEIPASS")
+
+    # 让 launcher/config.json 永远能找到：切到「程序所在目录」。
+    # - 打包：sys.executable 指向 exe → exe 所在目录（保持既有行为）
+    # - dev：sys.executable 是 python.exe，chdir 过去会跑到 Python 安装目录、读到那里的
+    #   旧 config；改用本脚本所在目录（= python __main__.py 运行的项目根）。
+    if _is_compiled:
+        base_dir = os.path.dirname(os.path.abspath(sys.executable))
+    else:
+        base_dir = os.path.dirname(os.path.abspath(__file__))
+    try:
+        os.chdir(base_dir)
     except Exception:
         pass
     sys.path.insert(0, ".")
