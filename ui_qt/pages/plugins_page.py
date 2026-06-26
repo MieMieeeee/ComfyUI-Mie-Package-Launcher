@@ -26,19 +26,39 @@ class PluginsPage(BasePage):
         self._setup_ui()
 
     def _setup_ui(self):
+        c = self.theme_manager.colors
+        s = self.theme_manager.styles
         layout = QtWidgets.QVBoxLayout(self)
         layout.setContentsMargins(25, 25, 25, 25)
         layout.setSpacing(12)
 
         title = QtWidgets.QLabel("插件管理（custom_nodes）")
-        title.setStyleSheet("font-size: 18px; font-weight: bold;")
+        title.setStyleSheet(f"""
+            font: bold 16pt "Microsoft YaHei UI";
+            color: {c.get('label')};
+            margin-bottom: 2px;
+        """)
         layout.addWidget(title)
+
+        hint = QtWidgets.QLabel(
+            "勾选插件后可「更新选中」，或「更新全部」。从仓库直接同步的插件（如 MieNodes）"
+            "正常更新失败时，会弹窗询问是否强制更新。"
+        )
+        hint.setWordWrap(True)
+        hint.setStyleSheet(f"color: {c.get('label_dim')}; font: 9pt 'Microsoft YaHei UI';")
+        layout.addWidget(hint)
 
         # 按钮行：刷新 / 更新全部 / 更新选中
         btn_row = QtWidgets.QHBoxLayout()
         self.refresh_btn = QtWidgets.QPushButton("刷新列表")
         self.update_all_btn = QtWidgets.QPushButton("更新全部")
         self.update_selected_btn = QtWidgets.QPushButton("更新选中")
+        try:
+            self.refresh_btn.setStyleSheet(s.secondary_button_style())
+            self.update_all_btn.setStyleSheet(s.primary_button_style())
+            self.update_selected_btn.setStyleSheet(s.primary_button_style())
+        except Exception:
+            pass
         self.refresh_btn.clicked.connect(self.refresh_requested.emit)
         self.update_all_btn.clicked.connect(self.update_all_requested.emit)
         self.update_selected_btn.clicked.connect(self._emit_update_selected)
@@ -49,6 +69,20 @@ class PluginsPage(BasePage):
 
         # 插件列表（可勾选）
         self.list_widget = QtWidgets.QListWidget()
+        self.list_widget.setStyleSheet(f"""
+            QListWidget {{
+                background-color: {c.get('input_bg')};
+                color: {c.get('text')};
+                border: 1px solid {c.get('input_border')};
+                border-radius: 6px;
+                padding: 4px;
+                font: 10pt "Microsoft YaHei UI";
+                outline: none;
+            }}
+            QListWidget::item {{ padding: 6px 8px; border-radius: 4px; }}
+            QListWidget::item:hover {{ background-color: {c.get('group_bg')}; }}
+            QListWidget::item:selected {{ background-color: {c.get('btn_primary_bg')}; color: #FFFFFF; }}
+        """)
         layout.addWidget(self.list_widget)
 
     def _emit_update_selected(self):
@@ -58,9 +92,17 @@ class PluginsPage(BasePage):
         """用 PluginService.list_installed() 的结果填充列表。每项可勾选。"""
         self.list_widget.clear()
         for p in plugins:
-            item = QtWidgets.QListWidgetItem(p.get("name", "?"))
+            name = p.get("name", "?")
+            item = QtWidgets.QListWidgetItem(name)
             item.setCheckState(QtCore.Qt.Unchecked)
             item.setData(QtCore.Qt.UserRole, p)
+            if p.get("is_git"):
+                ver = (p.get("version") or "")[:12]
+                remote = p.get("remote_url") or ""
+                tip = f"{name}\n版本: {ver or '(未知)'}\n来源: {remote or '(未知)'}"
+            else:
+                tip = f"{name}\n（非 git 插件，无法强制更新）"
+            item.setToolTip(tip)
             self.list_widget.addItem(item)
 
     def plugin_names(self):

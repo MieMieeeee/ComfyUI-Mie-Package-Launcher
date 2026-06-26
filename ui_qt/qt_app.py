@@ -2110,13 +2110,13 @@ class PyQtLauncher(QtWidgets.QMainWindow, process_events.ProcessCallback):
 
         btns = {
             "launch": NavBtn("🚀 启动与更新"),
+            "plugins": NavBtn("🧩 插件管理"),
             "version": NavBtn("🧬 内核版本管理"),
             "models": NavBtn("📂 外置模型库管理"),
             "settings": NavBtn("⚙️ 系统设置"),
             "about": NavBtn("👤 关于我"),
             "comfyui": NavBtn("📚 关于 ComfyUI"),
             "about_launcher": NavBtn("🧰 关于启动器"),
-            "plugins": NavBtn("🧩 插件管理"),
         }
         # 为导航按钮添加工具提示和存储完整文字
         btns["launch"].setToolTip("启动、停止ComfyUI，查看运行状态")
@@ -2438,23 +2438,23 @@ class PyQtLauncher(QtWidgets.QMainWindow, process_events.ProcessCallback):
             return scroll
 
         content.addWidget(wrap_in_scroll(page_launch))
+        content.addWidget(wrap_in_scroll(page_plugins))
         content.addWidget(wrap_in_scroll(page_version))
         content.addWidget(wrap_in_scroll(page_models))
         content.addWidget(wrap_in_scroll(page_settings))
         content.addWidget(wrap_in_scroll(page_about_me))
         content.addWidget(wrap_in_scroll(page_about_comfyui))
         content.addWidget(wrap_in_scroll(page_about_launcher))
-        content.addWidget(wrap_in_scroll(page_plugins))
         # Navigation actions
         pages = {
             "launch": page_launch,
+            "plugins": page_plugins,
             "version": page_version,
             "models": page_models,
             "settings": page_settings,
             "about": page_about_me,
             "comfyui": page_about_comfyui,
             "about_launcher": page_about_launcher,
-            "plugins": page_plugins,
         }
 
         def _select_tab(name):

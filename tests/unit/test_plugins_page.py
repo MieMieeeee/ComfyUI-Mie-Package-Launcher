@@ -32,6 +32,8 @@ def _stub_theme():
     styles.c.dark = False
     styles.content_style_light.return_value = ""
     styles.content_style_dark.return_value = ""
+    styles.primary_button_style.return_value = ""
+    styles.secondary_button_style.return_value = ""
     tm.styles = styles
     tm.colors = {}
     return tm
