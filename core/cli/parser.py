@@ -33,7 +33,7 @@ SUBCOMMANDS: Final[List[str]] = [
 LOGS_TARGETS: Final[List[str]] = ["launcher", "comfyui"]
 
 # update 子命令的稳定目标清单。
-UPDATE_TARGETS: Final[List[str]] = ["comfyui"]
+UPDATE_TARGETS: Final[List[str]] = ["comfyui", "plugins"]
 
 
 # 各子命令的 epilog 模板（Exit codes + Output schema）
@@ -127,11 +127,16 @@ Exit codes:
   1  update failed (network, conflict, dirty tree, etc.)
 
 Output schema (default human / --json):
-  component    (str)   - "comfyui"
+  component    (str)   - "comfyui" (内核) | "plugins" (custom_nodes 插件)
   updated      (bool)  - whether any change was applied
   from_version (str)   - pre-update version; null if unknown
   to_version   (str)   - post-update version; null if unchanged
   log          (str)   - human-readable summary of what happened
+
+Targets:
+  comfyui  走 GUI 内核更新流程（git + 前端/模板库同步）
+  plugins  调 ComfyUI-Manager 的 cm-cli update all（含每个插件的 pip 依赖修复）；
+           需 ComfyUI-Manager 已装在 custom_nodes/ComfyUI-Manager
 """
 
 _HELP_EPILOG = """\
@@ -344,8 +349,9 @@ def build_parser() -> argparse.ArgumentParser:
     # update
     sp = _make_subparser(
         sub, "update",
-        help="更新组件（当前仅 comfyui）",
-        description='走 GUI 的更新流程，等价于点击"更新"按钮。',
+        help="更新组件（comfyui 内核 / plugins 插件）",
+        description="comfyui: 走 GUI 内核更新流程（git + 前端/模板库同步）；"
+                    "plugins: 调 ComfyUI-Manager cm-cli 更新全部 custom_nodes 插件（含 pip 依赖修复）。",
         epilog=_UPDATE_EPILOG,
         formatter_class=argparse.RawDescriptionHelpFormatter,
     )
@@ -353,7 +359,7 @@ def build_parser() -> argparse.ArgumentParser:
         "update_target",
         choices=UPDATE_TARGETS,
         metavar="TARGET",
-        help='"comfyui"。',
+        help='"comfyui" 或 "plugins"。',
     )
     sp.add_argument(
         "--yes",

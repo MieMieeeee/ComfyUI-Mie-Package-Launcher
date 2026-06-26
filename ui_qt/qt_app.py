@@ -38,6 +38,7 @@ from ui_qt.pages.models_page import ModelsPage
 from ui_qt.pages.about_me_page import AboutMePage
 from ui_qt.pages.about_comfyui_page import AboutComfyUIPage
 from ui_qt.pages.about_launcher_page import AboutLauncherPage
+from ui_qt.pages.plugins_page import PluginsPage, PluginController
 from ui_qt.pages.system_settings_page import SystemSettingsPage
 from ui_qt.widgets.tray_icon import LauncherTray
 
@@ -2115,6 +2116,7 @@ class PyQtLauncher(QtWidgets.QMainWindow, process_events.ProcessCallback):
             "about": NavBtn("👤 关于我"),
             "comfyui": NavBtn("📚 关于 ComfyUI"),
             "about_launcher": NavBtn("🧰 关于启动器"),
+            "plugins": NavBtn("🧩 插件管理"),
         }
         # 为导航按钮添加工具提示和存储完整文字
         btns["launch"].setToolTip("启动、停止ComfyUI，查看运行状态")
@@ -2131,6 +2133,8 @@ class PyQtLauncher(QtWidgets.QMainWindow, process_events.ProcessCallback):
         btns["comfyui"].setProperty("full_text", "📚 关于 ComfyUI")
         btns["about_launcher"].setToolTip("关于启动器的介绍和相关链接")
         btns["about_launcher"].setProperty("full_text", "🧰 关于启动器")
+        btns["plugins"].setToolTip("管理 custom_nodes 插件：列已装、勾选更新")
+        btns["plugins"].setProperty("full_text", "🧩 插件管理")
         self._nav_buttons = list(btns.values())
         for b in btns.values():
             nav.addWidget(b)
@@ -2352,6 +2356,7 @@ class PyQtLauncher(QtWidgets.QMainWindow, process_events.ProcessCallback):
         page_about_launcher = AboutLauncherPage(
             app=self, theme_manager=self.theme_manager
         )
+        page_plugins = PluginsPage(app=self, theme_manager=self.theme_manager)
         page_settings = SystemSettingsPage(
             app=self, theme_manager=self.theme_manager
         )
@@ -2365,6 +2370,7 @@ class PyQtLauncher(QtWidgets.QMainWindow, process_events.ProcessCallback):
             "about": page_about_me,
             "comfyui": page_about_comfyui,
             "about_launcher": page_about_launcher,
+            "plugins": page_plugins,
         }
 
         def wrap_in_scroll(widget):
@@ -2438,6 +2444,7 @@ class PyQtLauncher(QtWidgets.QMainWindow, process_events.ProcessCallback):
         content.addWidget(wrap_in_scroll(page_about_me))
         content.addWidget(wrap_in_scroll(page_about_comfyui))
         content.addWidget(wrap_in_scroll(page_about_launcher))
+        content.addWidget(wrap_in_scroll(page_plugins))
         # Navigation actions
         pages = {
             "launch": page_launch,
@@ -2447,6 +2454,7 @@ class PyQtLauncher(QtWidgets.QMainWindow, process_events.ProcessCallback):
             "about": page_about_me,
             "comfyui": page_about_comfyui,
             "about_launcher": page_about_launcher,
+            "plugins": page_plugins,
         }
 
         def _select_tab(name):
@@ -2467,6 +2475,22 @@ class PyQtLauncher(QtWidgets.QMainWindow, process_events.ProcessCallback):
         for key, b in btns.items():
             b.clicked.connect(lambda _, k=key: _select_tab(k))
         _select_tab("launch")
+
+        # 插件页控制器：页面信号 → PluginService（后台线程 + UiInvoker 派回 UI 线程）。
+        # 控制器必须被持有，否则 GC 后信号连接失效；存在 self._plugin_controller 上。
+        # 包 try/except：services/_invoker 时序或 threading 异常不应拖垮整个 UI 构建。
+        try:
+            import threading
+            self._plugin_controller = PluginController(
+                page_plugins,
+                self.services.plugins,
+                run_in_background=lambda fn: threading.Thread(target=fn, daemon=True).start(),
+                post_to_ui=lambda fn: self._invoker.emit_invoke(fn),
+            )
+            # 启动后稍延迟首次拉取已装列表
+            QtCore.QTimer.singleShot(800, page_plugins.refresh_requested.emit)
+        except Exception:
+            self._plugin_controller = None
 
         # 验证路径（在获取版本信息之前）
         # 标记验证状态，用于后续决定是否提示用户配置

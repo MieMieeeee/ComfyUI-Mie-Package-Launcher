@@ -1,7 +1,7 @@
-"""update 子命令：当前仅支持 comfyui。
+"""update 子命令：支持 comfyui（内核）/ plugins（custom_nodes 插件）。
 
-走 services.update_service.UpdateService 的 update 路径。等价于
-GUI 的"更新内核"按钮。
+- comfyui: 走 services.update_service.UpdateService 的 update 路径，等价于 GUI 的"更新内核"。
+- plugins: 走 services.plugin_service.PluginService，调 ComfyUI-Manager 的 cm-cli update all。
 """
 from core.cli.exitcodes import EXIT_OK, EXIT_UP_TO_DATE, EXIT_ERROR
 from core.cli.output import format_human, format_json
@@ -9,13 +9,30 @@ from core.cli.output import format_human, format_json
 __all__ = ["run", "UPDATE_TARGETS"]
 
 # 锁住的 target 列表，与 parser.UPDATE_TARGETS 一致
-UPDATE_TARGETS = ["comfyui"]
+UPDATE_TARGETS = ["comfyui", "plugins"]
 
 
 def _do_update(app, target: str) -> dict:
     """实际触发更新。返回 dict with keys:
       updated (bool), up_to_date (bool), version (str|None), log (str), error (str|None)
     """
+    if target == "plugins":
+        try:
+            from services.plugin_service import PluginService
+            res = PluginService(app).update_all()
+            return {
+                "updated": bool(res.get("updated")),
+                "up_to_date": bool(res.get("up_to_date")),
+                "version": None,
+                "log": res.get("log") or "",
+                "error": res.get("error"),
+            }
+        except Exception as e:
+            return {
+                "updated": False, "up_to_date": False, "version": None,
+                "log": "", "error": str(e),
+            }
+
     if target != "comfyui":
         return {
             "updated": False, "up_to_date": False, "version": None,
@@ -50,7 +67,6 @@ def run(args, app) -> int:
     if target not in UPDATE_TARGETS:
         msg = f"unsupported update target: {target!r} (supported: {UPDATE_TARGETS})"
         if as_json:
-            from core.cli.output import format_json
             print(format_json({"component": target, "updated": False, "log": "", "error": msg}))
         else:
             print(f"update: {msg}")
@@ -58,12 +74,16 @@ def run(args, app) -> int:
 
     if dry_run:
         # 只打印会做什么，不实际执行
+        would_do = {
+            "comfyui": "would invoke UpdateService.perform_batch_update()",
+            "plugins": "would invoke PluginService.update_all() (cm-cli update all)",
+        }.get(target, "would invoke update")
         data = {
             "component": target,
             "updated": False,
             "from_version": None,
             "to_version": None,
-            "log": "dry-run: would invoke UpdateService.perform_batch_update()",
+            "log": f"dry-run: {would_do}",
         }
         if as_json:
             print(format_json(data))
