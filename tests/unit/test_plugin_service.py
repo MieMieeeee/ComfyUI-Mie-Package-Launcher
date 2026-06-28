@@ -159,6 +159,28 @@ def test_list_installed_flags_git_vs_non_git_plugins(tmp_path):
     assert by_name["plain-scripts"]["is_git"] is False
 
 
+def test_list_installed_detects_disabled_plugin_and_strips_suffix(tmp_path):
+    """禁用插件 = 目录名带 .disabled 后缀：enabled=False、name 刻后缀、dir_name 保留。"""
+    cn = tmp_path / "ComfyUI" / "custom_nodes"
+    cn.mkdir(parents=True)
+    (cn / "ComfyUI-KJNodes").mkdir()  # 启用
+    (cn / "MieNodes.disabled").mkdir()  # 禁用
+    (cn / "MieNodes.disabled" / ".git").mkdir()  # git 仍有效
+
+    svc = PluginService(_app())
+    with patch.object(svc, "_comfyui_dir", return_value=tmp_path / "ComfyUI"):
+        result = {r["name"]: r for r in svc.list_installed()}
+
+    # 启用插件
+    assert result["ComfyUI-KJNodes"]["enabled"] is True
+    assert result["ComfyUI-KJNodes"]["dir_name"] == "ComfyUI-KJNodes"
+    assert result["ComfyUI-KJNodes"]["name"] == "ComfyUI-KJNodes"
+    # 禁用插件：name 刻后缀、dir_name 保留后缀、enabled=False
+    assert result["MieNodes"]["enabled"] is False
+    assert result["MieNodes"]["dir_name"] == "MieNodes.disabled"
+    assert result["MieNodes"]["name"] == "MieNodes"
+
+
 def test_list_installed_includes_commit_and_remote_for_git_plugins(tmp_path):
     _make_custom_nodes(tmp_path)
     svc = PluginService(_app())
@@ -172,6 +194,9 @@ def test_list_installed_includes_commit_and_remote_for_git_plugins(tmp_path):
         elif "get-url" in cmd:
             r.returncode = 0
             r.stdout = "https://github.com/kijai/ComfyUI-KJNodes\n"
+        elif "log" in cmd:  # local_date: git log -1 --format=%cs
+            r.returncode = 0
+            r.stdout = "2025-04-12\n"
         else:
             r.returncode = 0
             r.stdout = ""
@@ -183,9 +208,67 @@ def test_list_installed_includes_commit_and_remote_for_git_plugins(tmp_path):
     by_name = {r["name"]: r for r in result}
     assert by_name["ComfyUI-KJNodes"]["version"] == "abc1234"
     assert by_name["ComfyUI-KJNodes"]["remote_url"] == "https://github.com/kijai/ComfyUI-KJNodes"
-    # 非 git 插件不带 version/remote
+    assert by_name["ComfyUI-KJNodes"]["local_date"] == "2025-04-12"
+    # 非 git 插件不带 version/remote/local_date
     assert by_name["plain-scripts"]["version"] == ""
     assert by_name["plain-scripts"]["remote_url"] == ""
+    assert by_name["plain-scripts"]["local_date"] == ""
+
+
+def test_list_installed_classifies_cnr_git_local_three_kinds(tmp_path):
+    """类型三态：.git→git / 无.git 有pyproject→cnr / 都没有→local。
+
+    CNR 插件（Manager 装的）有 pyproject.toml 但无 .git 目录，version/remote 从 pyproject 取。
+    """
+    cn = tmp_path / "ComfyUI" / "custom_nodes"
+    cn.mkdir(parents=True)
+    # git 插件：有 .git（version 仍优先看 pyproject 若有，否则 git hash）
+    (cn / "GitPlugin" / ".git").mkdir(parents=True)
+    # CNR 插件：无 .git，有 pyproject.toml 带 version + Repository
+    (cn / "CnrPlugin").mkdir()
+    (cn / "CnrPlugin" / "pyproject.toml").write_text(
+        '[project]\nname = "CnrPlugin"\nversion = "1.2.3"\n'
+        '[project.urls]\nRepository = "https://github.com/x/CnrPlugin"\n',
+        encoding="utf-8")
+    # 本地脚本：都没有
+    (cn / "LocalScript").mkdir()
+
+    svc = PluginService(_app())
+    with patch.object(svc, "_comfyui_dir", return_value=tmp_path / "ComfyUI"):
+        result = {r["name"]: r for r in svc.list_installed()}
+
+    assert result["GitPlugin"]["kind"] == "git"
+    assert result["GitPlugin"]["is_git"] is True  # 向后兼容
+    assert result["CnrPlugin"]["kind"] == "cnr"
+    assert result["CnrPlugin"]["is_git"] is False  # CNR 无 .git，不能 git pull
+    assert result["CnrPlugin"]["version"] == "1.2.3"  # 版本号来自 pyproject
+    assert result["CnrPlugin"]["remote_url"] == "https://github.com/x/CnrPlugin"
+    assert result["LocalScript"]["kind"] == "local"
+    assert result["LocalScript"]["version"] == ""
+
+
+def test_list_installed_version_prefers_pyproject_over_git_hash(tmp_path):
+    """git 插件若同时有 pyproject，version 取 pyproject 版本号（比 commit hash 直观）。"""
+    cn = tmp_path / "ComfyUI" / "custom_nodes"
+    cn.mkdir(parents=True)
+    (cn / "Mixed" / ".git").mkdir(parents=True)
+    (cn / "Mixed" / "pyproject.toml").write_text(
+        '[project]\nversion = "2.0.0"\n', encoding="utf-8")
+
+    svc = PluginService(_app())
+
+    def fake(cmd, **kwargs):
+        r = MagicMock()
+        r.returncode = 0
+        r.stderr = ""
+        r.stdout = "abc1234\n"  # git hash（应被 pyproject 版本号覆盖）
+        return r
+
+    with patch.object(svc, "_comfyui_dir", return_value=tmp_path / "ComfyUI"), \
+         patch("services.plugin_service.run_hidden", side_effect=fake):
+        result = {r["name"]: r for r in svc.list_installed()}
+    assert result["Mixed"]["version"] == "2.0.0"  # pyproject 优先
+    assert result["Mixed"]["kind"] == "git"  # 有 .git 仍是 git
 
 
 def test_list_installed_skips_caches_hidden_and_files(tmp_path):
@@ -273,6 +356,62 @@ def test_force_update_reports_failure_when_pull_fails(tmp_path):
         results = svc.force_update_selected(["ComfyUI-KJNodes"])
     assert results[0]["ok"] is False
     assert "merge conflict" in results[0]["detail"]
+
+
+def test_force_update_installs_requirements_after_pull(tmp_path):
+    cn = tmp_path / "ComfyUI" / "custom_nodes"
+    cn.mkdir(parents=True)
+    plugin = cn / "MieNodes"
+    (plugin / ".git").mkdir(parents=True)
+    (plugin / "requirements.txt").write_text("somepkg==1.0\n")
+
+    svc = PluginService(_app())
+
+    def fake_git(cmd, **kwargs):
+        r = MagicMock()
+        r.returncode = 0
+        r.stderr = ""
+        r.stdout = "Already up to date." if "pull" in cmd else ""
+        return r
+
+    with patch.object(svc, "_comfyui_dir", return_value=tmp_path / "ComfyUI"), \
+         patch.object(svc, "_python_exec", return_value="/py/python.exe"), \
+         patch("services.plugin_service.run_hidden", side_effect=fake_git), \
+         patch("utils.pip.install_requirements_file") as mock_pip:
+        mock_pip.return_value = {"success": True, "installed": ["somepkg"], "up_to_date": False}
+        results = svc.force_update_selected(["MieNodes"])
+
+    mock_pip.assert_called_once()
+    args, _ = mock_pip.call_args
+    assert str(args[0]).endswith("requirements.txt")  # 传的是 requirements 文件
+    assert "MieNodes" in str(args[0])
+    assert args[1] == "/py/python.exe"  # 用 ComfyUI python
+    assert results[0]["ok"] is True
+    assert "依赖" in results[0]["detail"]
+
+
+def test_force_update_skips_deps_when_no_requirements(tmp_path):
+    cn = tmp_path / "ComfyUI" / "custom_nodes"
+    cn.mkdir(parents=True)
+    plugin = cn / "NoDeps"
+    (plugin / ".git").mkdir(parents=True)  # 无 requirements.txt
+
+    svc = PluginService(_app())
+
+    def fake_git(cmd, **kwargs):
+        r = MagicMock()
+        r.returncode = 0
+        r.stderr = ""
+        r.stdout = "Already up to date." if "pull" in cmd else ""
+        return r
+
+    with patch.object(svc, "_comfyui_dir", return_value=tmp_path / "ComfyUI"), \
+         patch.object(svc, "_python_exec", return_value="/py/python.exe"), \
+         patch("services.plugin_service.run_hidden", side_effect=fake_git), \
+         patch("utils.pip.install_requirements_file") as mock_pip:
+        results = svc.force_update_selected(["NoDeps"])
+    mock_pip.assert_not_called()  # 无 requirements.txt 不应尝试装依赖
+    assert results[0]["ok"] is True
 
 
 # ---- cm-cli 包装：uninstall / disable / enable / install ----
@@ -393,4 +532,218 @@ def test_outdated_plugins_treats_unreachable_remote_as_not_outdated(tmp_path):
     with patch.object(svc, "_comfyui_dir", return_value=tmp_path / "ComfyUI"), \
          patch("services.plugin_service.run_hidden", side_effect=fake):
         assert svc.outdated_plugins(["Offline"]) == []  # 取不到远端，不误报落后
+
+
+# ---- check_updates：批量查全部已装插件（UI「检查更新」按钮 / CLI check-updates 共用）----
+
+def test_check_updates_returns_dir_names_of_outdated_plugins(tmp_path):
+    """check_updates = list_installed().dir_name 全传给 outdated_plugins。"""
+    cn = tmp_path / "ComfyUI" / "custom_nodes"
+    cn.mkdir(parents=True)
+    (cn / "Behind" / ".git").mkdir(parents=True)  # 落后
+    (cn / "Current" / ".git").mkdir(parents=True)  # 最新
+
+    svc = PluginService(_app())
+
+    # outdated_plugins 走真实 git：Behind 落后、Current 最新
+    def fake(cmd, **kwargs):
+        r = MagicMock()
+        r.returncode = 0
+        r.stderr = ""
+        cwd = str(kwargs.get("cwd", ""))
+        if "ls-remote" in cmd:
+            r.stdout = "remote999\tHEAD\n"  # 远端统一 remote999
+        else:  # rev-parse HEAD
+            r.stdout = "local111\n" if "Behind" in cwd else "remote999\n"
+        return r
+
+    with patch.object(svc, "_comfyui_dir", return_value=tmp_path / "ComfyUI"), \
+         patch("services.plugin_service.run_hidden", side_effect=fake):
+        out = svc.check_updates()
+    assert out == ["Behind"]
+
+
+def test_check_updates_includes_disabled_dir_names(tmp_path):
+    """禁用插件目录名带 .disabled，check_updates 用 dir_name 仍能拼对路径。"""
+    cn = tmp_path / "ComfyUI" / "custom_nodes"
+    cn.mkdir(parents=True)
+    (cn / "MieNodes.disabled" / ".git").mkdir(parents=True)
+
+    svc = PluginService(_app())
+
+    def fake(cmd, **kwargs):
+        r = MagicMock()
+        r.returncode = 0
+        r.stderr = ""
+        r.stdout = "remote999\tHEAD\n" if "ls-remote" in cmd else "local111\n"
+        return r
+
+    with patch.object(svc, "_comfyui_dir", return_value=tmp_path / "ComfyUI"), \
+         patch("services.plugin_service.run_hidden", side_effect=fake):
+        out = svc.check_updates()
+    assert out == ["MieNodes.disabled"]
+
+
+# ---- remote_dates：检查更新后对落后插件取远端 commit 日期 ----
+
+def test_remote_dates_returns_origin_head_commit_date(tmp_path):
+    """remote_dates 对每个 git 插件跑 git log -1 origin/HEAD，{dir_name: YYYY-MM-DD}。"""
+    cn = tmp_path / "ComfyUI" / "custom_nodes"
+    cn.mkdir(parents=True)
+    (cn / "Behind" / ".git").mkdir(parents=True)
+    (cn / "NoRef" / ".git").mkdir(parents=True)  # origin/HEAD 未 fetch，取不到
+
+    svc = PluginService(_app())
+
+    def fake(cmd, **kwargs):
+        r = MagicMock()
+        r.returncode = 0
+        r.stderr = ""
+        cwd = str(kwargs.get("cwd", ""))
+        if "Behind" in cwd:
+            r.stdout = "2025-06-01\n"
+        else:  # NoRef：git log origin/HEAD 失败
+            r.returncode = 128
+            r.stdout = ""
+        return r
+
+    with patch.object(svc, "_comfyui_dir", return_value=tmp_path / "ComfyUI"), \
+         patch("services.plugin_service.run_hidden", side_effect=fake):
+        out = svc.remote_dates(["Behind", "NoRef"])
+    # Behind 有远端日期；NoRef 取不到不进结果
+    assert out == {"Behind": "2025-06-01"}
+
+
+def test_remote_dates_skips_non_git_plugins(tmp_path):
+    """非 git 插件不查（无 .git 目录），不进结果。"""
+    cn = tmp_path / "ComfyUI" / "custom_nodes"
+    cn.mkdir(parents=True)
+    (cn / "plain").mkdir()  # 非 git
+
+    svc = PluginService(_app())
+    with patch.object(svc, "_comfyui_dir", return_value=tmp_path / "ComfyUI"), \
+         patch("services.plugin_service.run_hidden") as mock_run:
+        assert svc.remote_dates(["plain"]) == {}
+    mock_run.assert_not_called()
+
+
+# ---- CNR 更新检测：读 registry 缓存（nodes.json），按 repo URL 匹配，语义版本比较 ----
+
+def _make_cnr_plugin(cn, name, version, repo):
+    """造一个 CNR 插件：有 pyproject.toml，无 .git。"""
+    d = cn / name
+    d.mkdir(parents=True)
+    (d / "pyproject.toml").write_text(
+        f'[project]\nname = "{name}"\nversion = "{version}"\n'
+        f'[project.urls]\nRepository = "{repo}"\n', encoding="utf-8")
+    return d
+
+
+def _make_nodes_cache(comfy_dir, repo_versions: dict):
+    """造一个 Manager nodes.json 缓存：{repo_url: latest_version}。"""
+    cache_dir = comfy_dir / "user" / "__manager" / "cache"
+    cache_dir.mkdir(parents=True)
+    nodes = []
+    for repo, ver in repo_versions.items():
+        nodes.append({"id": repo.split("/")[-1], "repository": repo,
+                      "latest_version": {"version": ver}})
+    import json
+    (cache_dir / "12345_nodes.json").write_text(
+        json.dumps({"nodes": nodes}), encoding="utf-8")
+
+
+def test_outdated_plugins_detects_cnr_version_behind(tmp_path):
+    """CNR 插件本地版本 < registry 最新版 → 报告 outdated（语义版本比较）。"""
+    comfy = tmp_path / "ComfyUI"
+    cn = comfy / "custom_nodes"
+    cn.mkdir(parents=True)
+    _make_cnr_plugin(cn, "ComfyUI-GGUF", "1.1.0", "https://github.com/city96/ComfyUI-GGUF")
+    _make_cnr_plugin(cn, "UpToDate", "2.0.0", "https://github.com/x/UpToDate")
+    _make_nodes_cache(comfy, {
+        "https://github.com/city96/ComfyUI-GGUF": "1.1.10",  # 1.1.0 < 1.1.10 → outdated
+        "https://github.com/x/UpToDate": "2.0.0",            # 相等 → 不 outdated
+    })
+
+    svc = PluginService(_app())
+    with patch.object(svc, "_comfyui_dir", return_value=comfy), \
+         patch("services.plugin_service.run_hidden") as mock_git:  # CNR 不调 git
+        out = svc.outdated_plugins(["ComfyUI-GGUF", "UpToDate"])
+    assert out == ["ComfyUI-GGUF"]
+    mock_git.assert_not_called()  # CNR 检测走 registry，不跑 git
+
+
+def test_outdated_plugins_cnr_repo_url_trailing_slash_tolerant(tmp_path):
+    """repo URL 末尾斜杠容错（pyproject 可能带/不带 trailing slash）。"""
+    comfy = tmp_path / "ComfyUI"
+    cn = comfy / "custom_nodes"
+    cn.mkdir(parents=True)
+    # pyproject 带 trailing slash，registry 不带
+    _make_cnr_plugin(cn, "P", "1.0.0", "https://github.com/x/P/")
+    _make_nodes_cache(comfy, {"https://github.com/x/P": "1.2.0"})
+
+    svc = PluginService(_app())
+    with patch.object(svc, "_comfyui_dir", return_value=comfy):
+        assert svc.outdated_plugins(["P"]) == ["P"]
+
+
+def test_outdated_plugins_cnr_no_registry_cache_skips(tmp_path):
+    """registry 缓存不存在 → CNR 插件无法判断，不当 outdated（优雅降级）。"""
+    comfy = tmp_path / "ComfyUI"
+    cn = comfy / "custom_nodes"
+    cn.mkdir(parents=True)
+    _make_cnr_plugin(cn, "P", "1.0.0", "https://github.com/x/P")
+    # 不造 nodes.json
+
+    svc = PluginService(_app())
+    with patch.object(svc, "_comfyui_dir", return_value=comfy):
+        assert svc.outdated_plugins(["P"]) == []
+
+
+def test_outdated_plugins_mixed_git_and_cnr(tmp_path):
+    """git 插件（ls-remote 落后）+ CNR 插件（版本落后）都能被检出。"""
+    comfy = tmp_path / "ComfyUI"
+    cn = comfy / "custom_nodes"
+    cn.mkdir(parents=True)
+    # git 插件
+    (cn / "GitBehind" / ".git").mkdir(parents=True)
+    # CNR 插件
+    _make_cnr_plugin(cn, "CnrBehind", "1.0.0", "https://github.com/x/CnrBehind")
+    _make_nodes_cache(comfy, {"https://github.com/x/CnrBehind": "2.0.0"})
+
+    svc = PluginService(_app())
+
+    def fake(cmd, **kwargs):
+        r = MagicMock()
+        r.returncode = 0
+        r.stderr = ""
+        r.stdout = "remote999\tHEAD\n" if "ls-remote" in cmd else "local111\n"
+        return r
+
+    with patch.object(svc, "_comfyui_dir", return_value=comfy), \
+         patch("services.plugin_service.run_hidden", side_effect=fake):
+        out = svc.outdated_plugins(["GitBehind", "CnrBehind"])
+    assert set(out) == {"GitBehind", "CnrBehind"}
+
+
+def test_remote_dates_returns_cnr_latest_version(tmp_path):
+    """remote_dates 对 CNR 插件返回 registry 最新版本号（git 插件仍返回日期）。"""
+    comfy = tmp_path / "ComfyUI"
+    cn = comfy / "custom_nodes"
+    cn.mkdir(parents=True)
+    _make_cnr_plugin(cn, "CnrP", "1.0.0", "https://github.com/x/CnrP")
+    _make_nodes_cache(comfy, {"https://github.com/x/CnrP": "1.5.0"})
+
+    svc = PluginService(_app())
+    with patch.object(svc, "_comfyui_dir", return_value=comfy):
+        out = svc.remote_dates(["CnrP"])
+    assert out == {"CnrP": "1.5.0"}  # 远端列对 CNR 显示版本号
+
+
+def test_parse_version_semantic_comparison():
+    """_parse_version 语义版本比较：1.2.10 > 1.2.9，2.0 > 1.99。"""
+    from services.plugin_service import _parse_version
+    assert _parse_version("1.2.10") > _parse_version("1.2.9")
+    assert _parse_version("2.0") > _parse_version("1.99")
+    assert _parse_version("1.0.0") > _parse_version("")  # 空串最小
+    assert _parse_version("1.0.0") > _parse_version("nightly")  # nightly 当 0.0.0
 

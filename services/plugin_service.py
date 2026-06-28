@@ -25,6 +25,23 @@ from typing import Any, Optional
 from utils import paths as PATHS
 from utils.common import run_hidden
 
+
+def _parse_version(v: str) -> tuple:
+    """把语义版本字符串（如 '1.2.10'）转成可比较的元组 (1, 2, 10)。
+
+    非数字段当 0 处理；空串/nightly 等 → (-1,) 保证小于任何正式版。
+    用于 CNR 插件「本地版本 < registry 最新版」判断。
+    """
+    if not v:
+        return (-1,)
+    parts = []
+    for p in str(v).split("."):
+        try:
+            parts.append(int(p))
+        except (ValueError, TypeError):
+            parts.append(0)
+    return tuple(parts) if parts else (-1,)
+
 # cm-cli update 全量可能很久（N 个插件 git + pip）；给个宽松上限。
 _DEFAULT_TIMEOUT = 3600
 # 返回 log 截断长度（cm-cli 输出是人类文本，可能很长）。
@@ -76,9 +93,26 @@ class PluginService:
     def list_installed(self) -> list[dict[str, Any]]:
         """枚举 custom_nodes 下已装插件（直接文件系统探测，不依赖 server/registry）。
 
-        返回 [{name, is_git, version, remote_url}], 按名称排序。
-        version/remote_url 仅 git 插件有值（commit 短哈希 / origin URL），非 git 为空串。
-        供 UI 逐个勾选更新用。
+        返回 [{name, dir_name, kind, enabled, version, remote_url, local_date}], 按名称排序。
+
+        字段说明：
+        - name:      展示用的纯插件名（已刻掉 .disabled 后缀）。
+        - dir_name:  custom_nodes 下的真实目录名（禁用插件带 .disabled 后缀）。
+                     git/cm-cli 等磁盘操作一律用这个，不用 name。
+        - enabled:   是否启用。ComfyUI-Manager 用给目录加 .disabled 后缀的方式禁用，
+                     这里据此判断（entry.name.endswith('.disabled')）。
+        - kind:      插件来源类型，三态（与 ComfyUI-Manager 对齐）：
+                       "git"  = 有 .git 目录（git clone 装的，可 git pull 更新）
+                       "cnr"  = 无 .git 但有 pyproject.toml（CNR registry 发布版，如 Manager 装的）
+                       "local"= 都没有（纯本地脚本，无法更新）
+                     （历史 is_git 字段保留 = (kind == "git")，向后兼容）
+        - version:   优先 pyproject.toml 的 version（如 "1.1.10"，人读友好）；
+                     无 pyproject 时回退 git commit 短哈希；都没有为空串。
+        - remote_url: git origin URL 或 pyproject 的 Repository URL；都没有为空串。
+        - local_date: git 插件的 HEAD commit 日期(YYYY-MM-DD)；非 git 为空串。
+                       （CNR 插件的版本走 version 字段，不靠日期。）
+
+        供 UI 逐个勾选更新 / 卸载 / 启用禁用 用。
         """
         cn_dir = PATHS.plugins_dir(self._comfyui_dir())
         if not cn_dir.exists():
@@ -87,21 +121,88 @@ class PluginService:
         for entry in sorted(cn_dir.iterdir()):
             if not entry.is_dir():
                 continue
-            name = entry.name
-            if name.startswith("__") or name.startswith("."):
+            dir_name = entry.name
+            if dir_name.startswith("__") or dir_name.startswith("."):
                 continue
-            is_git = (entry / ".git").exists()
+            # ComfyUI-Manager 禁用插件 = 给目录加 .disabled 后缀
+            enabled = not dir_name.endswith(".disabled")
+            name = dir_name[:-len(".disabled")] if not enabled else dir_name
+
+            has_git = (entry / ".git").exists()
+            py = self._read_pyproject(entry)
+            # 三态分类：.git 优先 git；否则有 pyproject 是 cnr；都没有 local
+            if has_git:
+                kind = "git"
+            elif py:
+                kind = "cnr"
+            else:
+                kind = "local"
+
             rec: dict[str, Any] = {
-                "name": entry.name,
-                "is_git": is_git,
+                "name": name,
+                "dir_name": dir_name,
+                "kind": kind,
+                "is_git": kind == "git",  # 向后兼容（outdated_plugins 等仍用它判断能否 git 操作）
+                "enabled": enabled,
                 "version": "",
                 "remote_url": "",
+                "local_date": "",
             }
-            if is_git:
-                rec["version"] = self._git_short(entry)
-                rec["remote_url"] = self._git_remote(entry)
+            # version/remote_url：优先 pyproject（CNR 和多数 git 插件都有），回退 git 命令
+            if py:
+                rec["version"] = py.get("version", "")
+                rec["remote_url"] = py.get("repository", "")
+            if has_git:
+                if not rec["version"]:
+                    rec["version"] = self._git_short(entry)
+                if not rec["remote_url"]:
+                    rec["remote_url"] = self._git_remote(entry)
+                rec["local_date"] = self._git_date(entry)
             results.append(rec)
         return results
+
+    def _read_pyproject(self, plugin_dir: Path) -> dict[str, str]:
+        """读插件根目录的 pyproject.toml，取 version 和 project.urls.Repository。
+
+        CNR 插件和多数现代 git 插件都有 pyproject.toml，是版本信息最可靠的来源
+        （比 git commit 哈希更直观）。失败/不存在返回空 dict，不抛。
+        用 tomllib（3.11+）解析，失败回退正则（兼容嵌入式 python 或格式异常）。
+        """
+        pp = plugin_dir / "pyproject.toml"
+        if not pp.exists():
+            return {}
+        try:
+            raw = pp.read_text(encoding="utf-8")
+        except Exception:
+            return {}
+        # 优先 tomllib（标准库，3.11+）
+        try:
+            import tomllib
+            data = tomllib.loads(raw)
+            proj = data.get("project", {}) or {}
+            result = {"version": str(proj.get("version", "") or "")}
+            urls = proj.get("urls", {}) or {}
+            result["repository"] = str(urls.get("Repository", "") or urls.get("Homepage", "") or "")
+            return result
+        except Exception:
+            pass
+        # 回退：正则取 version 和 Repository（行内 key = "value"）
+        import re
+        ver = ""
+        repo = ""
+        m = re.search(r'^\s*version\s*=\s*"([^"]*)"', raw, re.MULTILINE)
+        if m:
+            ver = m.group(1)
+        m = re.search(r'Repository\s*=\s*"([^"]*)"', raw)
+        if m:
+            repo = m.group(1)
+        out = {}
+        if ver:
+            out["version"] = ver
+        if repo:
+            out["repository"] = repo
+        return out
+
 
     def _git_exec(self) -> str:
         return getattr(self.app, "git_path", None) or "git"
@@ -111,6 +212,13 @@ class PluginService:
 
     def _git_remote(self, plugin_dir: Path) -> str:
         return self._git_out(["remote", "get-url", "origin"], plugin_dir)
+
+    def _git_date(self, plugin_dir: Path) -> str:
+        """HEAD commit 的提交日期，紧凑 YYYY-MM-DD（git log -1 --format=%cs）。
+
+        本地操作无网络开销；供 UI 版本列展示「本地日期」用。
+        """
+        return self._git_out(["log", "-1", "--format=%cs"], plugin_dir)
 
     def _git_out(self, args: list[str], cwd: Path) -> str:
         """跑一条 git 命令，成功返回 strip 后的 stdout，否则空串。"""
@@ -132,22 +240,93 @@ class PluginService:
         except Exception as e:
             return {"rc": -1, "stdout": "", "stderr": str(e)}
 
-    def outdated_plugins(self, names: list[str]) -> list[str]:
-        """返回 names 中「git 仓库且本地 HEAD 落后于 origin HEAD」的子集。
+    def _cnr_registry_map(self) -> dict[str, str]:
+        """读 ComfyUI-Manager 的 CNR registry 缓存，建 {repo_url: latest_version} 映射。
+
+        缓存文件：<comfyui>/user/__manager/cache/<hash>_nodes.json（hash 不固定，glob 找）。
+        Manager 用它判断 CNR 插件是否有新版（本地 pyproject version < registry latest_version）。
+        缓存不存在/解析失败返回空 dict，不抛（CNR 插件查不出更新，优雅降级）。
+
+        匹配方式与 Manager 一致：用 repository URL 反查（本地 pyproject.Repository ↔ registry.repository）。
+        """
+        try:
+            cache_dir = self._comfyui_dir() / "user" / "__manager" / "cache"
+            if not cache_dir.exists():
+                return {}
+            # nodes.json 文件名带 hash，glob 找最新的
+            candidates = sorted(cache_dir.glob("*_nodes.json"), key=lambda p: p.stat().st_mtime, reverse=True)
+            if not candidates:
+                return {}
+            import json
+            data = json.loads(candidates[0].read_text(encoding="utf-8"))
+            nodes = data.get("nodes", []) if isinstance(data, dict) else []
+            mapping = {}
+            for n in nodes:
+                if not isinstance(n, dict):
+                    continue
+                repo = n.get("repository") or ""
+                lv = n.get("latest_version")
+                ver = ""
+                if isinstance(lv, dict):
+                    ver = str(lv.get("version", "") or "")
+                if repo and ver:
+                    mapping[repo.rstrip("/")] = ver
+            return mapping
+        except Exception:
+            return {}
+
+    def outdated_plugins(self, names: list[str], on_progress=None) -> list[str]:
+        """返回 names 中「有可用更新」的子集，支持 git 和 CNR 两类插件。
+
+        - git 插件：本地 HEAD != origin HEAD（git ls-remote 比对）。dirty 树/无网则不当落后。
+        - CNR 插件：本地 pyproject version < registry latest_version（语义版本比较）。
+          registry 缓存读不到则跳过（无法判断，不当落后）。
+        local 插件：无更新源，跳过。
 
         正常更新后仍落后 = 该插件没被更新成功（如 dirty 树被 cm-cli 拒），
-        用来决定是否提示用户强制更新。ls-remote 取不到（无网）则不当成落后。
+        也可作为「更新选中」后的失败检测。
+
+        on_progress(current, total, name)：每查完一个插件调一次，供 UI 显示
+        逐插件进度（如「正在查询第 3/60 个...」）。None 则不回调。
         """
         result = []
         cn_dir = PATHS.plugins_dir(self._comfyui_dir())
-        for name in names:
+        total = len(names)
+        # CNR 检测依赖 registry 缓存，按需加载一次（git 检测不需要）
+        cnr_map = None  # 懒加载
+        installed = None  # list_installed 结果（CNR 需要 version/remote_url），懒加载
+        for i, name in enumerate(names):
+            if on_progress:
+                try:
+                    on_progress(i, total, name)
+                except Exception:
+                    pass
             d = cn_dir / name
-            if not (d / ".git").exists():
+            has_git = (d / ".git").exists()
+            if has_git:
+                # git 插件：ls-remote 比对
+                local = self._git_out(["rev-parse", "HEAD"], d)
+                remote = self._git_remote_head(d)
+                if remote and local and remote != local:
+                    result.append(name)
                 continue
-            local = self._git_out(["rev-parse", "HEAD"], d)
-            remote = self._git_remote_head(d)
-            if remote and local and remote != local:
+            # 非 git：可能是 CNR 插件（有 pyproject.toml），用 registry 版本比较
+            py = self._read_pyproject(d)
+            if not py or not py.get("version"):
+                continue  # local 插件无更新源
+            if cnr_map is None:
+                cnr_map = self._cnr_registry_map()
+            if not cnr_map:
+                continue  # registry 缓存不可用，无法判断
+            repo_url = (py.get("repository") or "").rstrip("/")
+            latest = cnr_map.get(repo_url)
+            if latest and _parse_version(latest) > _parse_version(py["version"]):
                 result.append(name)
+        if on_progress:
+            try:
+                on_progress(total, total, "")
+            except Exception:
+                pass
         return result
 
     def _git_remote_head(self, plugin_dir: Path) -> str:
@@ -155,6 +334,48 @@ class PluginService:
         out = self._git_out(["ls-remote", "origin", "HEAD"], plugin_dir)
         parts = out.split()
         return parts[0] if parts else ""
+
+    def remote_dates(self, names: list[str]) -> dict[str, str]:
+        """取这些插件远端 HEAD 的 commit 日期，{dir_name: "YYYY-MM-DD"}。
+
+        用 git log -1 --format=%cs origin/HEAD —— 依赖本地已 fetch 过 origin/HEAD ref
+        （ComfyUI 插件通常都有）。取不到（未 fetch / 无网）的插件不进结果 dict，
+        delegate 对缺失项不画远端日期列。仅对 outdated 插件调用，控制网络/IO 成本。
+        """
+        cn_dir = PATHS.plugins_dir(self._comfyui_dir())
+        result: dict[str, str] = {}
+        cnr_map = None
+        for name in names:
+            d = cn_dir / name
+            if (d / ".git").exists():
+                # git 插件：远端 commit 日期
+                date = self._git_out(["log", "-1", "--format=%cs", "origin/HEAD"], d)
+                if date:
+                    result[name] = date
+                continue
+            # CNR 插件：远端 = registry 最新版本号（如 "1.2.0"）
+            py = self._read_pyproject(d)
+            if not py.get("repository"):
+                continue
+            if cnr_map is None:
+                cnr_map = self._cnr_registry_map()
+            latest = cnr_map.get((py["repository"]).rstrip("/"))
+            if latest:
+                result[name] = latest
+        return result
+
+    def check_updates(self, on_progress=None) -> list[str]:
+        """检查全部已装插件是否有更新（批量 git ls-remote 比对）。
+
+        复用 outdated_plugins：把 list_installed() 的 dir_name 全传过去，
+        返回落后于 origin 的 dir_name 子集。供 UI「检查更新」按钮和
+        CLI `plugins check-updates` 共用，避免两处重复拼 names。
+        ls-remote 取不到（无网）的插件不当成落后，离线友好。
+
+        on_progress(current, total, name)：透传给 outdated_plugins，供 UI 逐插件进度。
+        """
+        names = [p["dir_name"] for p in self.list_installed()]
+        return self.outdated_plugins(names, on_progress=on_progress)
 
     # ---- 通用 cm-cli 执行器 ----
     def _run_cmcli(self, args: list[str], timeout: int = _DEFAULT_TIMEOUT) -> dict[str, Any]:
@@ -242,10 +463,40 @@ class PluginService:
         pull = self._git_run(["pull", "--ff-only"], plugin_dir)
         if pull["rc"] == 0:
             detail = (pull["stdout"] or "已是最新").strip()
-            return {"name": name, "ok": True, "skipped": False, "detail": detail[:200]}
+            # git pull 拉来的新 requirements.txt 要装上，否则插件可能少依赖
+            deps = self._install_deps(plugin_dir)
+            if deps:
+                detail = f"{detail} | 依赖: {deps}"
+            return {"name": name, "ok": True, "skipped": False, "detail": detail[:300]}
         err = (pull["stderr"] or pull["stdout"] or "").strip()
         return {"name": name, "ok": False, "skipped": False,
                 "detail": f"pull 失败 (rc={pull['rc']}): {err[:200]}"}
+
+    def _install_deps(self, plugin_dir: Path) -> str:
+        """装该插件 requirements.txt（用 ComfyUI python，冻结 CUDA 相关包避免破坏环境）。
+
+        无 requirements.txt 返回空串（不算异常）。与内核更新用同一冻结清单。
+        """
+        req = plugin_dir / "requirements.txt"
+        if not req.exists():
+            return ""
+        py = self._python_exec()
+        if not py:
+            return "python 未找到，跳过"
+        try:
+            from utils.pip import install_requirements_file
+            from services.update_service import FROZEN_PKGS
+            res = install_requirements_file(
+                req, py, ignore_pkgs=FROZEN_PKGS,
+                logger=getattr(self.app, "logger", None),
+            )
+            installed = res.get("installed", []) or []
+            failed = res.get("failed", []) or []
+            if res.get("success") or res.get("up_to_date"):
+                return f"已装 {len(installed)}" if installed else "已是最新"
+            return f"部分失败({len(failed)})"
+        except Exception as e:
+            return f"异常: {e}"
 
     def _do_update(self, nodes: list[str]) -> dict[str, Any]:
         if not self.is_available():
