@@ -20,7 +20,8 @@ commands:
   restart      先停后启 ComfyUI
   info         打印当前生效的配置
   logs         tail 日志文件（launcher / comfyui 二选一）
-  update       更新组件（当前仅 comfyui）
+  update       更新组件（comfyui 内核 / plugins 全部插件）
+  plugins      管理 custom_nodes 插件（list/install/uninstall/disable/enable/check-updates/force-update）
   help         打印帮助（无参 = 顶层；带子命令名 = 该子命令的 help）
 ```
 
@@ -186,14 +187,18 @@ comfyui-launcher logs TARGET [-n N] [-f | --no-follow]
 ### update
 
 走 `services.update_service.UpdateService` 的批量更新路径，等价于
-GUI 的"更新内核"按钮。**当前仅支持 comfyui**；launcher 自更新和
-custom-nodes 更新留作 phase 3。
+GUI 的"更新内核"按钮。支持两个 target：
+
+- `comfyui`：内核更新（git + 前端/模板库同步）
+- `plugins`：调 ComfyUI-Manager 的 cm-cli `update all`，更新全部 custom_nodes
+  插件（含每个插件的 pip 依赖修复）。需要 ComfyUI-Manager 已装在
+  `custom_nodes/ComfyUI-Manager`。
 
 ```
 comfyui-launcher update TARGET [--yes] [--dry-run] [--json]
 ```
 
-`TARGET` 当前只能是 `comfyui`。
+`TARGET` 取 `comfyui` 或 `plugins`。
 
 | flag | 默认 | 说明 |
 |---|---|---|
@@ -206,11 +211,62 @@ comfyui-launcher update TARGET [--yes] [--dry-run] [--json]
 - `1` 更新失败（网络、冲突、dirty tree 等）
 
 **Output schema:**
-- `component (str)` `"comfyui"`
+- `component (str)` `"comfyui"` 或 `"plugins"`
 - `updated (bool)` 本次是否真的更新了
-- `from_version (str|null)` 更新前版本
+- `from_version (str|null)` 更新前版本（plugins target 为 null）
 - `to_version (str|null)` 更新后版本（未变时为 null）
 - `log (str)` 人类可读的更新摘要
+
+### plugins
+
+管理 custom_nodes 插件，复用 GUI 同一套 `PluginService`（走 ComfyUI-Manager
+的 cm-cli / 直接 git）。只读操作（list/check-updates）不改状态；lifecycle
+操作（install/uninstall/disable/enable）改状态；force-update 对 dirty 树
+插件做 `git stash` + `git pull --ff-only`（绕过 cm-cli）。
+
+```
+comfyui-launcher plugins ACTION [NAME] [--json]
+```
+
+`ACTION` 取 `list` / `install` / `uninstall` / `disable` / `enable` /
+`check-updates` / `force-update`。`NAME` 对 lifecycle/force-update 必填
+（插件 dir_name / git URL / CNR id）；`force-update` 省略 NAME 则作用于全部。
+
+| flag | 默认 | 说明 |
+|---|---|---|
+| `ACTION` | 必填 | 操作类型 |
+| `NAME` | 无 | lifecycle/force-update 的目标；省略时 force-update 作用于全部 |
+
+**Exit codes:**
+- `0` 成功（list/check-updates 总是 0；lifecycle op 成功；force-update 全部成功或无插件）
+- `1` 失败（lifecycle op 失败 / force-update 有插件失败 / 路径错误等）
+
+**Output schema:**
+- `list`: `plugins (list)` 每项 `{name, dir_name, is_git, enabled, version, remote_url}`；`count (int)`
+- `install/uninstall/disable/enable`: `action (str)` `target (str)` `ok (bool)` `log (str)` `error (str|null)`
+- `check-updates`: `outdated (list)` 有更新的 dir_name 列表；`count (int)`
+- `force-update`: `results (list)` 每项 `{name, ok, skipped, detail}`；`all_ok (bool)`
+
+> 禁用态：ComfyUI-Manager 通过给目录加 `.disabled` 后缀禁用插件。`list` 输出里
+> `enabled=false` 的项即被禁用，`name` 是刻掉后缀的纯名，`dir_name` 带后缀；
+> 后续操作一律传 `dir_name`。
+
+**示例:**
+```bash
+$ comfyui-launcher plugins list --json | jq '.count'
+12
+
+$ comfyui-launcher plugins check-updates --json
+{"outdated": ["ComfyUI-KJNodes"], "count": 1, "error": null}
+
+$ comfyui-launcher plugins disable ComfyUI-KJNodes
+ok: true
+log: disabled ComfyUI-KJNodes
+
+$ comfyui-launcher plugins force-update MieNodes
+ok: true
+log: Already up to date.
+```
 
 ### help
 

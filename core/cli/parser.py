@@ -12,7 +12,8 @@
     restart     stop + start
     info        打印当前生效配置
     logs        tail 日志（launcher / comfyui 二选一）
-    update      更新组件（当前仅 comfyui）
+    update      更新组件（comfyui 内核 / plugins 全部插件）
+    plugins     管理 custom_nodes 插件（list/install/uninstall/disable/enable/check-updates/force-update）
 """
 import argparse
 from typing import Final, List
@@ -26,6 +27,7 @@ SUBCOMMANDS: Final[List[str]] = [
     "info",
     "logs",
     "update",
+    "plugins",
     "help",
 ]
 
@@ -34,6 +36,12 @@ LOGS_TARGETS: Final[List[str]] = ["launcher", "comfyui"]
 
 # update 子命令的稳定目标清单。
 UPDATE_TARGETS: Final[List[str]] = ["comfyui", "plugins"]
+
+# plugins 子命令的稳定 action 清单。
+PLUGINS_ACTIONS: Final[List[str]] = [
+    "list", "install", "uninstall", "disable", "enable",
+    "check-updates", "force-update",
+]
 
 
 # 各子命令的 epilog 模板（Exit codes + Output schema）
@@ -137,6 +145,33 @@ Targets:
   comfyui  走 GUI 内核更新流程（git + 前端/模板库同步）
   plugins  调 ComfyUI-Manager 的 cm-cli update all（含每个插件的 pip 依赖修复）；
            需 ComfyUI-Manager 已装在 custom_nodes/ComfyUI-Manager
+"""
+
+_PLUGINS_EPILOG = """\
+Exit codes:
+  0  success (list/check-updates 总是 0；lifecycle op 成功；force-update 全部成功)
+  1  failure (lifecycle op 失败 / force-update 有插件失败 / 路径错误等)
+
+Output schema (default human / --json):
+
+  list:
+    plugins (list)  - [{name, dir_name, is_git, enabled, version, remote_url}]
+    count   (int)   - 插件数
+
+  install / uninstall / disable / enable <NAME>:
+    action (str)   - 操作名
+    target (str)   - 传入的 NAME（dir_name / git URL / CNR id）
+    ok     (bool)  - 是否成功
+    log    (str)   - cm-cli 输出
+    error  (str)   - 失败原因；成功时 null
+
+  check-updates:
+    outdated (list) - 有更新的插件 dir_name 列表
+    count    (int)  - 有更新的数量
+
+  force-update [NAME]:
+    results (list) - [{name, ok, skipped, detail}] 每插件结果
+    all_ok  (bool) - 是否全部成功
 """
 
 _HELP_EPILOG = """\
@@ -370,6 +405,31 @@ def build_parser() -> argparse.ArgumentParser:
         "--dry-run",
         action="store_true",
         help="只打印会做什么，不实际执行。",
+    )
+
+    # plugins
+    sp = _make_subparser(
+        sub, "plugins",
+        help="管理 custom_nodes 插件（list/install/uninstall/disable/enable/check-updates/force-update）",
+        description="复用 GUI 同一套 PluginService（走 ComfyUI-Manager cm-cli / 直接 git）。"
+                    "list/check-updates 只读；install/uninstall/disable/enable 改状态；"
+                    "force-update 对 dirty 树插件 git stash + pull。",
+        epilog=_PLUGINS_EPILOG,
+        formatter_class=argparse.RawDescriptionHelpFormatter,
+    )
+    sp.add_argument(
+        "plugins_action",
+        choices=PLUGINS_ACTIONS,
+        metavar="ACTION",
+        help="list / install / uninstall / disable / enable / check-updates / force-update。",
+    )
+    sp.add_argument(
+        "plugins_name",
+        nargs="?",
+        default=None,
+        metavar="NAME",
+        help="install/uninstall/disable/enable/force-update 的目标插件（dir_name / git URL / CNR id）。"
+             "force-update 省略则作用于全部。",
     )
 
     return p

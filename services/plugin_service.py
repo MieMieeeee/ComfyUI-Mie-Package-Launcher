@@ -463,40 +463,10 @@ class PluginService:
         pull = self._git_run(["pull", "--ff-only"], plugin_dir)
         if pull["rc"] == 0:
             detail = (pull["stdout"] or "已是最新").strip()
-            # git pull 拉来的新 requirements.txt 要装上，否则插件可能少依赖
-            deps = self._install_deps(plugin_dir)
-            if deps:
-                detail = f"{detail} | 依赖: {deps}"
-            return {"name": name, "ok": True, "skipped": False, "detail": detail[:300]}
+            return {"name": name, "ok": True, "skipped": False, "detail": detail[:200]}
         err = (pull["stderr"] or pull["stdout"] or "").strip()
         return {"name": name, "ok": False, "skipped": False,
                 "detail": f"pull 失败 (rc={pull['rc']}): {err[:200]}"}
-
-    def _install_deps(self, plugin_dir: Path) -> str:
-        """装该插件 requirements.txt（用 ComfyUI python，冻结 CUDA 相关包避免破坏环境）。
-
-        无 requirements.txt 返回空串（不算异常）。与内核更新用同一冻结清单。
-        """
-        req = plugin_dir / "requirements.txt"
-        if not req.exists():
-            return ""
-        py = self._python_exec()
-        if not py:
-            return "python 未找到，跳过"
-        try:
-            from utils.pip import install_requirements_file
-            from services.update_service import FROZEN_PKGS
-            res = install_requirements_file(
-                req, py, ignore_pkgs=FROZEN_PKGS,
-                logger=getattr(self.app, "logger", None),
-            )
-            installed = res.get("installed", []) or []
-            failed = res.get("failed", []) or []
-            if res.get("success") or res.get("up_to_date"):
-                return f"已装 {len(installed)}" if installed else "已是最新"
-            return f"部分失败({len(failed)})"
-        except Exception as e:
-            return f"异常: {e}"
 
     def _do_update(self, nodes: list[str]) -> dict[str, Any]:
         if not self.is_available():

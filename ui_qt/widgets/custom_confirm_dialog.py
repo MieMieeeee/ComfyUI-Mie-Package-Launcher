@@ -7,11 +7,12 @@ class CustomConfirmDialog(FramelessDraggableDialog):
     """
     一个美观的确认弹窗，支持自定义标题、内容和多个操作按钮
     """
-    def __init__(self, parent=None, title="确认", content="", buttons=None, default_index=0, theme_manager=None, min_width=480, remember_checkbox_text=None, remember_checked=False):
+    def __init__(self, parent=None, title="确认", content="", buttons=None, default_index=0, theme_manager=None, min_width=480, remember_checkbox_text=None, remember_checked=False, show_input=False, input_text="", input_placeholder=""):
         # 默认 modal=True, window_type=Qt.Dialog，flags / 透明背景 / 拖拽 都在基类
         super().__init__(parent=parent)
         self.theme_manager = theme_manager
         self._result = None
+        self._input_widget = None  # 仅 show_input=True 时创建
         
         # UI Setup
         layout = QtWidgets.QVBoxLayout(self)
@@ -106,7 +107,29 @@ QCheckBox::indicator:checked:hover {{ background-color: {accent_hover}; border: 
         self.lbl_content.setWordWrap(True)
         self.lbl_content.setAlignment(QtCore.Qt.AlignLeft | QtCore.Qt.AlignTop)
         inner_layout.addWidget(self.lbl_content)
-        
+
+        # 可选的输入框（show_input=True 时显示，如让用户输入 git URL / CNR id）
+        if show_input:
+            try:
+                from ui_qt.widgets.inputs import StyledLineEdit
+                # StyledLineEdit 需要 ThemeStyles 对象（不是 theme_manager）
+                styles = getattr(theme_manager, "styles", None)
+                self._input_widget = StyledLineEdit(input_text, styles, self)
+                if input_placeholder:
+                    self._input_widget.setPlaceholderText(input_placeholder)
+                inner_layout.addWidget(self._input_widget)
+            except Exception:
+                # 测试 stub 的 theme_manager.styles 是 MagicMock，StyledLineEdit 会崩；
+                # 退化成原生 QLineEdit 保证输入能力不丢
+                self._input_widget = QtWidgets.QLineEdit(input_text, self)
+                if input_placeholder:
+                    self._input_widget.setPlaceholderText(input_placeholder)
+                self._input_widget.setStyleSheet(
+                    f"QLineEdit {{ background-color: {input_bg}; color: {text};"
+                    f" border: 1px solid {border}; border-radius: 6px; padding: 6px 10px;"
+                    f" font: 10pt 'Microsoft YaHei UI'; }}")
+                inner_layout.addWidget(self._input_widget)
+
         # 可选的「记住我的选择」复选框
         self._remember_checkbox = None
         if remember_checkbox_text:
@@ -161,6 +184,15 @@ QCheckBox::indicator:checked:hover {{ background-color: {accent_hover}; border: 
         
     def get_result(self):
         return self._result
+
+    def get_input_value(self) -> str:
+        """返回输入框文本（show_input=False 时返回空串）。"""
+        if self._input_widget is None:
+            return ""
+        try:
+            return self._input_widget.text().strip()
+        except Exception:
+            return ""
 
     def is_remember_checked(self) -> bool:
         """返回「记住我的选择」复选框是否被勾选。

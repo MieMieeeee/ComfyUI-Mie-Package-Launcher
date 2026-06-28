@@ -1,7 +1,9 @@
 """PluginsPage 单测：纯 UI + 信号（不依赖 qt_app / PluginService）。
 
-页面只做：展示插件列表 + 勾选 + 通过信号请求「更新全部/更新选中/刷新」。
-真正调 PluginService 的控制器逻辑在 qt_app 侧（手动验证，本环境 import qt_app 会崩）。
+页面只做：展示插件列表 + 勾选 + 通过信号请求「更新全部/更新选中/刷新/
+启用禁用/卸载/安装/检查更新」。真正调 PluginService 的控制器逻辑在
+PluginController（本文件内测），qt_app 侧的弹窗接线靠手动验证
+（本环境 import qt_app 会崩）。
 """
 import os
 import sys
@@ -20,8 +22,11 @@ def qt_app():
     yield app
 
 
-def _plugin(name, is_git=True, version="abc1234", remote="https://github.com/x/y"):
-    return {"name": name, "is_git": is_git, "version": version, "remote_url": remote}
+def _plugin(name, is_git=True, version="abc1234", remote="https://github.com/x/y",
+            enabled=True, dir_name=None):
+    """造一个插件 dict（含新字段 dir_name / enabled）。默认 dir_name=name。"""
+    return {"name": name, "dir_name": dir_name or name, "is_git": is_git,
+            "enabled": enabled, "version": version, "remote_url": remote}
 
 
 def _stub_theme():
@@ -34,10 +39,13 @@ def _stub_theme():
     styles.content_style_dark.return_value = ""
     styles.primary_button_style.return_value = ""
     styles.secondary_button_style.return_value = ""
+    styles.destructive_button_style.return_value = ""
     tm.styles = styles
     tm.colors = {}
     return tm
 
+
+# ---- populate / 选择 ----
 
 def test_populate_lists_all_plugins(qt_app):
     from ui_qt.pages.plugins_page import PluginsPage
@@ -57,6 +65,30 @@ def test_selected_names_returns_checked_items(qt_app):
     page.list_widget.item(2).setCheckState(QtCore.Qt.Checked)
     assert page.selected_names() == ["A", "C"]
 
+
+def test_selected_dir_names_uses_dir_name_including_disabled_suffix(qt_app):
+    """禁用插件 dir_name 带 .disabled，selected_dir_names 必须返回它（操作要拼对路径）。"""
+    from ui_qt.pages.plugins_page import PluginsPage
+
+    page = PluginsPage(theme_manager=_stub_theme())
+    page.populate([_plugin("A"), _plugin("MieNodes", enabled=False, dir_name="MieNodes.disabled")])
+    page.list_widget.item(1).setCheckState(QtCore.Qt.Checked)  # 勾选禁用的那个
+    assert page.selected_dir_names() == ["MieNodes.disabled"]
+
+
+def test_populate_marks_disabled_item_with_suffix_and_keeps_name(qt_app):
+    """禁用项显示带「（已禁用）」后缀，但 name 字段仍是纯名。"""
+    from ui_qt.pages.plugins_page import PluginsPage
+
+    page = PluginsPage(theme_manager=_stub_theme())
+    page.populate([_plugin("MieNodes", enabled=False, dir_name="MieNodes.disabled")])
+    item = page.list_widget.item(0)
+    assert "已禁用" in item.text()
+    # plugin_names 返回纯 name（剥状态后缀）
+    assert page.plugin_names() == ["MieNodes"]
+
+
+# ---- 原有三按钮信号 ----
 
 def test_refresh_button_emits_refresh_requested(qt_app):
     from ui_qt.pages.plugins_page import PluginsPage
@@ -78,7 +110,8 @@ def test_update_all_button_emits_update_all_requested(qt_app):
     assert received == [True]
 
 
-def test_update_selected_button_emits_checked_names(qt_app):
+def test_update_selected_button_emits_checked_dir_names(qt_app):
+    """update_selected 现在发 dir_name（操作要用），不再是纯 name。"""
     from ui_qt.pages.plugins_page import PluginsPage
 
     page = PluginsPage(theme_manager=_stub_theme())
@@ -89,6 +122,94 @@ def test_update_selected_button_emits_checked_names(qt_app):
     page.update_selected_requested.connect(lambda names: received.append(names))
     page.update_selected_btn.click()
     assert received == [["B"]]
+
+
+# ---- 新增按钮信号 ----
+
+def test_check_updates_button_emits_check_updates_requested(qt_app):
+    from ui_qt.pages.plugins_page import PluginsPage
+
+    page = PluginsPage(theme_manager=_stub_theme())
+    received = []
+    page.check_updates_requested.connect(lambda: received.append(True))
+    page.check_updates_btn.click()
+    assert received == [True]
+
+
+def test_disable_button_emits_selected_dir_names(qt_app):
+    from ui_qt.pages.plugins_page import PluginsPage
+
+    page = PluginsPage(theme_manager=_stub_theme())
+    page.populate([_plugin("A"), _plugin("B")])
+    page.list_widget.item(0).setCheckState(QtCore.Qt.Checked)
+    received = []
+    page.disable_selected_requested.connect(lambda names: received.append(names))
+    page.disable_btn.click()
+    assert received == [["A"]]
+
+
+def test_enable_button_emits_selected_dir_names(qt_app):
+    from ui_qt.pages.plugins_page import PluginsPage
+
+    page = PluginsPage(theme_manager=_stub_theme())
+    page.populate([_plugin("A"), _plugin("B")])
+    page.list_widget.item(1).setCheckState(QtCore.Qt.Checked)
+    received = []
+    page.enable_selected_requested.connect(lambda names: received.append(names))
+    page.enable_btn.click()
+    assert received == [["B"]]
+
+
+def test_uninstall_button_emits_selected_dir_names(qt_app):
+    from ui_qt.pages.plugins_page import PluginsPage
+
+    page = PluginsPage(theme_manager=_stub_theme())
+    page.populate([_plugin("A")])
+    page.list_widget.item(0).setCheckState(QtCore.Qt.Checked)
+    received = []
+    page.uninstall_selected_requested.connect(lambda names: received.append(names))
+    page.uninstall_btn.click()
+    assert received == [["A"]]
+
+
+def test_outdated_reported_is_emittable(qt_app):
+    """outdated_reported 是控制器→页面的回推信号（list + dict），验证它能连。"""
+    from ui_qt.pages.plugins_page import PluginsPage
+
+    page = PluginsPage(theme_manager=_stub_theme())
+    received = []
+    page.outdated_reported.connect(lambda names, dates: received.append((names, dates)))
+    page.outdated_reported.emit(["Behind"], {"Behind": "2025-01-01"})
+    assert received == [(["Behind"], {"Behind": "2025-01-01"})]
+
+
+# ---- mark_outdated：检查更新结果回推后更新显示 ----
+
+def test_mark_outdated_prefixes_outdated_items(qt_app):
+    from ui_qt.pages.plugins_page import PluginsPage
+
+    page = PluginsPage(theme_manager=_stub_theme())
+    page.populate([_plugin("Current"), _plugin("Behind")])
+    page.mark_outdated(["Behind"])
+    texts = [page.list_widget.item(i).text() for i in range(page.list_widget.count())]
+    assert any("可更新" in t for t in texts if "Behind" in t or "🔄" in t)
+    # 重排后 outdated(Behind) 置顶；Current 在后面且不被标记
+    # 找到 Current 那一行（不在固定位置，因 Behind 被提前），断言它不含「可更新」
+    current_texts = [t for t in texts if "Current" in t]
+    assert current_texts, "Current 项应存在"
+    assert all("可更新" not in t for t in current_texts), "Current 不应被标记"
+
+
+def test_mark_outdated_moves_outdated_to_top(qt_app):
+    """outdated 项重排到列表顶部，其余按原顺序跟在后面。"""
+    from ui_qt.pages.plugins_page import PluginsPage
+
+    page = PluginsPage(theme_manager=_stub_theme())
+    page.populate([_plugin("Alpha"), _plugin("Behind1"), _plugin("Behind2"), _plugin("Zeta")])
+    page.mark_outdated(["Behind1", "Behind2"])
+    order = [page._item_name(page.list_widget.item(i)) for i in range(page.list_widget.count())]
+    # Behind1/Behind2 在前（保留 name 排序），Alpha/Zeta 在后
+    assert order == ["Behind1", "Behind2", "Alpha", "Zeta"], f"重排顺序错: {order}"
 
 
 # ---- PluginController：编排（page 信号 → PluginService），可测 ----
@@ -130,7 +251,7 @@ def test_controller_update_all_calls_service_then_refreshes(qt_app):
     assert page.plugin_names() == ["AfterUpdate"]
 
 
-def test_controller_update_selected_passes_checked_names(qt_app):
+def test_controller_update_selected_passes_checked_dir_names(qt_app):
     from ui_qt.pages.plugins_page import PluginsPage, PluginController
 
     page = PluginsPage(theme_manager=_stub_theme())
@@ -184,3 +305,108 @@ def test_controller_apply_force_update_calls_service_then_refreshes(qt_app):
     svc.force_update_selected.assert_called_once_with(["MieNodes"])
     svc.list_installed.assert_called_once()  # 强制后刷新
 
+
+def test_controller_apply_force_update_runs_sync_deps(qt_app):
+    """强制更新后复用普通更新的「同步依赖库」流程（注入的 sync_deps 回调）。"""
+    from ui_qt.pages.plugins_page import PluginsPage, PluginController
+
+    page = PluginsPage(theme_manager=_stub_theme())
+    svc = MagicMock()
+    svc.force_update_selected.return_value = [
+        {"name": "MieNodes", "ok": True, "skipped": False, "detail": ""}]
+    svc.list_installed.return_value = [_plugin("MieNodes")]
+    sync_calls = []
+    run_bg, post_ui = _sync_runner()
+    ctrl = PluginController(page, svc, run_bg, post_ui,
+                            sync_deps=lambda: sync_calls.append(True))
+
+    ctrl.apply_force_update(["MieNodes"])
+    svc.force_update_selected.assert_called_once_with(["MieNodes"])
+    assert sync_calls == [True]  # 强制更新后跑了依赖同步
+
+
+# ---- 新增控制器方法 ----
+
+def test_controller_disable_loops_service_disable_per_dir_name_then_refreshes(qt_app):
+    from ui_qt.pages.plugins_page import PluginsPage, PluginController
+
+    page = PluginsPage(theme_manager=_stub_theme())
+    page.populate([_plugin("A"), _plugin("B")])
+    page.list_widget.item(0).setCheckState(QtCore.Qt.Checked)
+    page.list_widget.item(1).setCheckState(QtCore.Qt.Checked)
+    svc = MagicMock()
+    svc.list_installed.return_value = [_plugin("A"), _plugin("B")]
+    run_bg, post_ui = _sync_runner()
+    ctrl = PluginController(page, svc, run_bg, post_ui)
+
+    page.disable_btn.click()
+    # service.disable 接收单 target，故被调两次
+    assert svc.disable.call_count == 2
+    svc.disable.assert_any_call("A")
+    svc.disable.assert_any_call("B")
+    svc.list_installed.assert_called_once()  # 刷新
+
+
+def test_controller_enable_loops_service_enable_per_dir_name(qt_app):
+    from ui_qt.pages.plugins_page import PluginsPage, PluginController
+
+    page = PluginsPage(theme_manager=_stub_theme())
+    page.populate([_plugin("MieNodes", enabled=False, dir_name="MieNodes.disabled")])
+    page.list_widget.item(0).setCheckState(QtCore.Qt.Checked)
+    svc = MagicMock()
+    svc.list_installed.return_value = [_plugin("MieNodes")]
+    run_bg, post_ui = _sync_runner()
+    ctrl = PluginController(page, svc, run_bg, post_ui)
+
+    page.enable_btn.click()
+    svc.enable.assert_called_once_with("MieNodes.disabled")  # 用 dir_name
+
+
+def test_controller_apply_uninstall_loops_service_uninstall_then_refreshes(qt_app):
+    from ui_qt.pages.plugins_page import PluginsPage, PluginController
+
+    page = PluginsPage(theme_manager=_stub_theme())
+    svc = MagicMock()
+    svc.list_installed.return_value = []
+    run_bg, post_ui = _sync_runner()
+    ctrl = PluginController(page, svc, run_bg, post_ui)
+
+    ctrl.apply_uninstall(["A", "B"])  # 公开方法（qt_app 确认后调）
+    assert svc.uninstall.call_count == 2
+    svc.uninstall.assert_any_call("A")
+    svc.uninstall.assert_any_call("B")
+    svc.list_installed.assert_called_once()
+
+
+def test_controller_request_install_calls_service_install_then_refreshes(qt_app):
+    from ui_qt.pages.plugins_page import PluginsPage, PluginController
+
+    page = PluginsPage(theme_manager=_stub_theme())
+    svc = MagicMock()
+    svc.list_installed.return_value = [_plugin("NewPlugin")]
+    run_bg, post_ui = _sync_runner()
+    ctrl = PluginController(page, svc, run_bg, post_ui)
+
+    ctrl.request_install("https://github.com/x/NewPlugin")
+    svc.install.assert_called_once_with("https://github.com/x/NewPlugin")
+    svc.list_installed.assert_called_once()
+
+
+def test_controller_check_updates_emits_outdated_reported(qt_app):
+    from ui_qt.pages.plugins_page import PluginsPage, PluginController
+
+    page = PluginsPage(theme_manager=_stub_theme())
+    svc = MagicMock()
+    svc.check_updates.return_value = ["Behind", "MieNodes.disabled"]
+    svc.remote_dates.return_value = {"Behind": "2025-06-01", "MieNodes.disabled": "2025-05-20"}
+    run_bg, post_ui = _sync_runner()
+    ctrl = PluginController(page, svc, run_bg, post_ui)
+
+    reported = []
+    page.outdated_reported.connect(lambda names, dates: reported.append((names, dates)))
+
+    page.check_updates_btn.click()
+    svc.check_updates.assert_called_once()
+    svc.remote_dates.assert_called_once_with(["Behind", "MieNodes.disabled"])
+    assert reported == [(["Behind", "MieNodes.disabled"],
+                         {"Behind": "2025-06-01", "MieNodes.disabled": "2025-05-20"})]

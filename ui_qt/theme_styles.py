@@ -563,9 +563,9 @@ class ThemeStyles:
             background: qlineargradient(x1:0, y1:0, x2:1, y2:1, stop:0 {self.c.get('btn_primary_bg')}, stop:1 {self.c.get('btn_primary_hover')});
             color: #FFFFFF;
             border: none;
-            border-radius: {self._px(12)}px;
+            border-radius: {self._px(6)}px;
             font: bold {self._pt(10)}pt "Microsoft YaHei UI";
-            padding: {self._px(8)}px {self._px(16)}px;
+            padding: {self._px(5)}px {self._px(15)}px;
         }}
         QPushButton:hover {{
             background: qlineargradient(x1:0, y1:0, x2:1, y2:1, stop:0 #6941C6, stop:1 #7F56D9);
@@ -577,6 +577,42 @@ class ThemeStyles:
             background: qlineargradient(x1:0, y1:0, x2:1, y2:1, stop:0 rgba(127, 86, 217, 90), stop:1 rgba(158, 119, 237, 90));
             color: rgba(255, 255, 255, 160);
             border: 1px solid rgba(255, 255, 255, 30);
+        }}
+        """
+
+    # ==================== 危险/破坏性按钮样式（卸载、退出等高风险操作）====================
+    # 颜色沿用 CustomConfirmDialog 的 #DestructiveBtn（#EF4444/#DC2626），保证全应用红色一致。
+    def destructive_button_style(self) -> str:
+        return f"""
+        QPushButton {{
+            background-color: #EF4444;
+            color: #FFFFFF;
+            border: none;
+            border-radius: {self._px(6)}px;
+            padding: {self._px(5)}px {self._px(15)}px;
+            font: {self._pt(10)}pt "Microsoft YaHei UI";
+        }}
+        QPushButton:hover {{
+            background-color: #DC2626;
+        }}
+        """
+
+    # ==================== 破坏性按钮的「描边」变体（ActionBar 里的禁用/卸载选中用）====================
+    # 与实色 destructive 区分：ActionBar 是次级操作条，描边红比实色红更克制，
+    # 避免和一级红色按钮（退出弹窗）抢视觉。hover 时才填实色提示风险。
+    def destructive_outline_button_style(self) -> str:
+        return f"""
+        QPushButton {{
+            background-color: transparent;
+            color: #EF4444;
+            border: 1px solid #EF4444;
+            border-radius: {self._px(6)}px;
+            padding: {self._px(5)}px {self._px(15)}px;
+            font: {self._pt(10)}pt "Microsoft YaHei UI";
+        }}
+        QPushButton:hover {{
+            background-color: rgba(239, 68, 68, 0.15);
+            color: #FFFFFF;
         }}
         """
 

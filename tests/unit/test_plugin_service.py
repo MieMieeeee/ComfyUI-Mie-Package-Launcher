@@ -358,62 +358,6 @@ def test_force_update_reports_failure_when_pull_fails(tmp_path):
     assert "merge conflict" in results[0]["detail"]
 
 
-def test_force_update_installs_requirements_after_pull(tmp_path):
-    cn = tmp_path / "ComfyUI" / "custom_nodes"
-    cn.mkdir(parents=True)
-    plugin = cn / "MieNodes"
-    (plugin / ".git").mkdir(parents=True)
-    (plugin / "requirements.txt").write_text("somepkg==1.0\n")
-
-    svc = PluginService(_app())
-
-    def fake_git(cmd, **kwargs):
-        r = MagicMock()
-        r.returncode = 0
-        r.stderr = ""
-        r.stdout = "Already up to date." if "pull" in cmd else ""
-        return r
-
-    with patch.object(svc, "_comfyui_dir", return_value=tmp_path / "ComfyUI"), \
-         patch.object(svc, "_python_exec", return_value="/py/python.exe"), \
-         patch("services.plugin_service.run_hidden", side_effect=fake_git), \
-         patch("utils.pip.install_requirements_file") as mock_pip:
-        mock_pip.return_value = {"success": True, "installed": ["somepkg"], "up_to_date": False}
-        results = svc.force_update_selected(["MieNodes"])
-
-    mock_pip.assert_called_once()
-    args, _ = mock_pip.call_args
-    assert str(args[0]).endswith("requirements.txt")  # 传的是 requirements 文件
-    assert "MieNodes" in str(args[0])
-    assert args[1] == "/py/python.exe"  # 用 ComfyUI python
-    assert results[0]["ok"] is True
-    assert "依赖" in results[0]["detail"]
-
-
-def test_force_update_skips_deps_when_no_requirements(tmp_path):
-    cn = tmp_path / "ComfyUI" / "custom_nodes"
-    cn.mkdir(parents=True)
-    plugin = cn / "NoDeps"
-    (plugin / ".git").mkdir(parents=True)  # 无 requirements.txt
-
-    svc = PluginService(_app())
-
-    def fake_git(cmd, **kwargs):
-        r = MagicMock()
-        r.returncode = 0
-        r.stderr = ""
-        r.stdout = "Already up to date." if "pull" in cmd else ""
-        return r
-
-    with patch.object(svc, "_comfyui_dir", return_value=tmp_path / "ComfyUI"), \
-         patch.object(svc, "_python_exec", return_value="/py/python.exe"), \
-         patch("services.plugin_service.run_hidden", side_effect=fake_git), \
-         patch("utils.pip.install_requirements_file") as mock_pip:
-        results = svc.force_update_selected(["NoDeps"])
-    mock_pip.assert_not_called()  # 无 requirements.txt 不应尝试装依赖
-    assert results[0]["ok"] is True
-
-
 # ---- cm-cli 包装：uninstall / disable / enable / install ----
 
 def _cmcli_ok():

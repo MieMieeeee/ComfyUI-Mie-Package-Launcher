@@ -1483,6 +1483,8 @@ class PyQtLauncher(QtWidgets.QMainWindow, process_events.ProcessCallback):
 
             # Update nav button style
             if hasattr(self, "_nav_buttons"):
+                # 选中态：半透明紫底 + 紫字 + 左侧 4px 紫色指示条（替代原白底黑字，呼应品牌紫）。
+                # border-left 在 1px border 之后再设，覆盖左边为 4px 粗指示条。
                 nav_style = """QPushButton {{
                         color: {text_muted};
                         background-color: transparent;
@@ -1501,6 +1503,8 @@ class PyQtLauncher(QtWidgets.QMainWindow, process_events.ProcessCallback):
                         background-color: {checked_bg};
                         color: {checked_text};
                         border: 1px solid {checked_border};
+                        border-left: 4px solid {checked_accent};
+                        padding-left: 12px;
                         font-weight: bold;
                     }}"""
                 if c is not None:
@@ -1509,18 +1513,20 @@ class PyQtLauncher(QtWidgets.QMainWindow, process_events.ProcessCallback):
                             text_muted=c.get("sidebar_text_muted"),
                             hover_bg=c.get("btn_ghost_bg"),
                             hover_text=c.get("text"),
-                            checked_bg=c.get("text"),
-                            checked_text="#333333",
-                            checked_border=c.get("label_muted"),
+                            checked_bg="rgba(127, 86, 217, 0.15)",
+                            checked_text=c.get("btn_primary_hover"),
+                            checked_border="rgba(127, 86, 217, 0.3)",
+                            checked_accent=c.get("btn_primary_bg"),
                         )
                     else:
                         qss = nav_style.format(
                             text_muted=c.get("sidebar_text"),
-                            hover_bg="rgba(56, 189, 248, 0.12)",
+                            hover_bg="rgba(127, 86, 217, 0.10)",
                             hover_text=c.get("text"),
-                            checked_bg="#38BDF8",
-                            checked_text=c.get("text"),
-                            checked_border="#0EA5E9",
+                            checked_bg="rgba(127, 86, 217, 0.12)",
+                            checked_text=c.get("btn_primary_pressed"),
+                            checked_border="rgba(127, 86, 217, 0.3)",
+                            checked_accent=c.get("btn_primary_bg"),
                         )
                 else:
                     if dark:
@@ -1528,18 +1534,20 @@ class PyQtLauncher(QtWidgets.QMainWindow, process_events.ProcessCallback):
                             text_muted="#999999",
                             hover_bg="rgba(255, 255, 255, 0.1)",
                             hover_text="#FFFFFF",
-                            checked_bg="#FFFFFF",
-                            checked_text="#333333",
-                            checked_border="#E5E7EB",
+                            checked_bg="rgba(127, 86, 217, 0.15)",
+                            checked_text="#9E77ED",
+                            checked_border="rgba(127, 86, 217, 0.3)",
+                            checked_accent="#7F56D9",
                         )
                     else:
                         qss = nav_style.format(
                             text_muted="#1F2937",
-                            hover_bg="rgba(56, 189, 248, 0.12)",
+                            hover_bg="rgba(127, 86, 217, 0.10)",
                             hover_text="#0F172A",
-                            checked_bg="#38BDF8",
-                            checked_text="#0F172A",
-                            checked_border="#0EA5E9",
+                            checked_bg="rgba(127, 86, 217, 0.12)",
+                            checked_text="#53389E",
+                            checked_border="rgba(127, 86, 217, 0.3)",
+                            checked_accent="#7F56D9",
                         )
                 for b in self._nav_buttons:
                     b.setStyleSheet(qss)
@@ -2113,11 +2121,13 @@ class PyQtLauncher(QtWidgets.QMainWindow, process_events.ProcessCallback):
             "plugins": NavBtn("🧩 插件管理"),
             "version": NavBtn("🧬 内核版本管理"),
             "models": NavBtn("📂 外置模型库管理"),
+            "tasks": NavBtn("📋 后台任务"),
             "settings": NavBtn("⚙️ 系统设置"),
             "about": NavBtn("👤 关于我"),
             "comfyui": NavBtn("📚 关于 ComfyUI"),
             "about_launcher": NavBtn("🧰 关于启动器"),
         }
+        # btns dict 的插入顺序 = nav 显示顺序。tasks 在 settings 前。
         # 为导航按钮添加工具提示和存储完整文字
         btns["launch"].setToolTip("启动、停止ComfyUI，查看运行状态")
         btns["launch"].setProperty("full_text", "🚀 启动与更新")
@@ -2135,7 +2145,10 @@ class PyQtLauncher(QtWidgets.QMainWindow, process_events.ProcessCallback):
         btns["about_launcher"].setProperty("full_text", "🧰 关于启动器")
         btns["plugins"].setToolTip("管理 custom_nodes 插件：列已装、勾选更新")
         btns["plugins"].setProperty("full_text", "🧩 插件管理")
+        btns["tasks"].setToolTip("查看后台运行的任务和完成历史")
+        btns["tasks"].setProperty("full_text", "📋 后台任务")
         self._nav_buttons = list(btns.values())
+        self._nav_btn_map = btns  # key→按钮映射，供 _refresh_bg_tasks_nav 等按 key 取按钮
         for b in btns.values():
             nav.addWidget(b)
 
@@ -2221,6 +2234,15 @@ class PyQtLauncher(QtWidgets.QMainWindow, process_events.ProcessCallback):
         theme_row_layout.addWidget(btn_light, 1)
 
         bottom_layout.addWidget(theme_row)
+
+        # 后台任务注册表（「后台任务」现在是左侧导航的一个标签页，见 page_tasks）。
+        # 信号连 _refresh_bg_tasks_nav，用 nav 按钮的文字反映任务计数（badge 效果）。
+        from ui_qt.background_task_registry import BackgroundTaskRegistry
+        self._bg_task_registry = BackgroundTaskRegistry(self)
+        self._bg_tasks_page = None  # page 创建后赋值
+        self._bg_task_registry.task_added.connect(lambda _tid: self._refresh_bg_tasks_nav())
+        self._bg_task_registry.task_updated.connect(lambda _tid: self._refresh_bg_tasks_nav())
+        self._bg_task_registry.task_removed.connect(lambda _tid: self._refresh_bg_tasks_nav())
 
         side_layout.addWidget(bottom_container)
         nav.addStretch(1)
@@ -2357,6 +2379,12 @@ class PyQtLauncher(QtWidgets.QMainWindow, process_events.ProcessCallback):
             app=self, theme_manager=self.theme_manager
         )
         page_plugins = PluginsPage(app=self, theme_manager=self.theme_manager)
+        self._plugins_page = page_plugins  # 供 _do_plugin_check_updates 等回推结果用
+        # 后台任务页：注册表已在 _setup_ui 侧边栏构造时建好（self._bg_task_registry）
+        from ui_qt.widgets.background_task_panel import BackgroundTasksPage
+        page_tasks = BackgroundTasksPage(
+            self._bg_task_registry, theme_manager=self.theme_manager, parent=self)
+        self._bg_tasks_page = page_tasks  # 供 badge 刷新等用
         page_settings = SystemSettingsPage(
             app=self, theme_manager=self.theme_manager
         )
@@ -2371,6 +2399,7 @@ class PyQtLauncher(QtWidgets.QMainWindow, process_events.ProcessCallback):
             "comfyui": page_about_comfyui,
             "about_launcher": page_about_launcher,
             "plugins": page_plugins,
+            "tasks": page_tasks,
         }
 
         def wrap_in_scroll(widget):
@@ -2441,6 +2470,7 @@ class PyQtLauncher(QtWidgets.QMainWindow, process_events.ProcessCallback):
         content.addWidget(wrap_in_scroll(page_plugins))
         content.addWidget(wrap_in_scroll(page_version))
         content.addWidget(wrap_in_scroll(page_models))
+        content.addWidget(wrap_in_scroll(page_tasks))
         content.addWidget(wrap_in_scroll(page_settings))
         content.addWidget(wrap_in_scroll(page_about_me))
         content.addWidget(wrap_in_scroll(page_about_comfyui))
@@ -2451,6 +2481,7 @@ class PyQtLauncher(QtWidgets.QMainWindow, process_events.ProcessCallback):
             "plugins": page_plugins,
             "version": page_version,
             "models": page_models,
+            "tasks": page_tasks,
             "settings": page_settings,
             "about": page_about_me,
             "comfyui": page_about_comfyui,
@@ -2486,9 +2517,24 @@ class PyQtLauncher(QtWidgets.QMainWindow, process_events.ProcessCallback):
                 self.services.plugins,
                 run_in_background=lambda fn: threading.Thread(target=fn, daemon=True).start(),
                 post_to_ui=lambda fn: self._invoker.emit_invoke(fn),
+                sync_deps=self._sync_plugin_deps,
             )
             # 正常更新失败的插件 → 二次确认是否强制更新
             page_plugins.force_update_suggested.connect(self._prompt_plugin_force_update)
+            # 卸载是破坏性操作 → 二次确认（destructive 按钮）
+            page_plugins.uninstall_selected_requested.connect(self._prompt_plugin_uninstall)
+            # 安装按钮 → 弹输入框拿 git URL / CNR id
+            page_plugins.install_btn.clicked.connect(self._prompt_plugin_install)
+            # 检查更新结果回推 → 页面标记 🔄（page 自身消费，但信号是 page 拥有，故在此显式连）
+            page_plugins.outdated_reported.connect(page_plugins.mark_outdated)
+            # 检查更新 / 更新全部：断开 page 默认的信号连接，改走带进度弹窗的版本
+            try:
+                page_plugins.check_updates_btn.clicked.disconnect()
+                page_plugins.update_all_btn.clicked.disconnect()
+                page_plugins.check_updates_btn.clicked.connect(self._do_plugin_check_updates)
+                page_plugins.update_all_btn.clicked.connect(self._do_plugin_update_all)
+            except Exception:
+                pass
             # 启动后稍延迟首次拉取已装列表
             QtCore.QTimer.singleShot(800, page_plugins.refresh_requested.emit)
         except Exception:
@@ -3989,6 +4035,304 @@ class PyQtLauncher(QtWidgets.QMainWindow, process_events.ProcessCallback):
                     self.logger.warning("插件强制更新确认弹窗失败", exc_info=True)
             except Exception:
                 pass
+
+    def _sync_plugin_deps(self):
+        """强制更新插件后，复用普通内核更新的「同步依赖库」流程。
+
+        直接调 update_service.sync_requirements_files()——它自身按 auto_update_deps_var
+        网关（_needs_consistency），与内核更新按钮完全同一套。注意：该流程只同步
+        ComfyUI 内核 requirements*.txt，不含各插件自己的 requirements.txt（按既定设计）。
+        """
+        try:
+            if hasattr(self, "services") and hasattr(self.services, "update"):
+                self.services.update.sync_requirements_files()
+        except Exception:
+            try:
+                if getattr(self, "logger", None):
+                    self.logger.warning("插件强制更新后同步依赖库失败", exc_info=True)
+            except Exception:
+                pass
+
+    def _prompt_plugin_uninstall(self, dir_names):
+        """卸载选中插件 → 二次确认（破坏性，不可撤销）。默认「取消」。
+
+        与 _prompt_plugin_force_update 同构：page 发 uninstall_selected_requested，
+        这里弹框；同意后调 controller.apply_uninstall（它循环 svc.uninstall）。
+        """
+        try:
+            if not dir_names:
+                return
+            from ui_qt.widgets.custom_confirm_dialog import CustomConfirmDialog
+
+            listing = "\n".join(str(n) for n in dir_names)
+            dlg = CustomConfirmDialog(
+                self,
+                title="卸载确认",
+                content=(
+                    f"将卸载以下 {len(dir_names)} 个插件：\n\n"
+                    f"{listing}\n\n"
+                    "此操作不可撤销（cm-cli uninstall 会删除目录）。确认卸载？"
+                ),
+                buttons=[
+                    {"text": "取消", "role": "normal"},
+                    {"text": "卸载", "role": "destructive"},
+                ],
+                default_index=0,
+                theme_manager=getattr(self, "theme_manager", None),
+            )
+            if dlg.exec_() == QtWidgets.QDialog.Accepted and (dlg.get_result() or 0) == 1:
+                ctrl = getattr(self, "_plugin_controller", None)
+                if ctrl is not None:
+                    ctrl.apply_uninstall(list(dir_names))
+        except Exception:
+            try:
+                if getattr(self, "logger", None):
+                    self.logger.warning("插件卸载确认弹窗失败", exc_info=True)
+            except Exception:
+                pass
+
+    def _prompt_plugin_install(self):
+        """安装插件 → 弹输入框拿 git URL / CNR id，调 controller.request_install。
+
+        用 CustomConfirmDialog 的 show_input 模式（复用主题化样式 + StyledLineEdit）。
+        空输入不触发安装。
+        """
+        try:
+            from ui_qt.widgets.custom_confirm_dialog import CustomConfirmDialog
+
+            dlg = CustomConfirmDialog(
+                self,
+                title="安装插件",
+                content="输入插件的 git 仓库 URL 或 CNR id（如 ComfyUI-KJNodes）：",
+                buttons=[
+                    {"text": "取消", "role": "normal"},
+                    {"text": "安装", "role": "primary"},
+                ],
+                default_index=1,
+                theme_manager=getattr(self, "theme_manager", None),
+                show_input=True,
+                input_placeholder="https://github.com/...  或  CNR-id",
+            )
+            if dlg.exec_() == QtWidgets.QDialog.Accepted and (dlg.get_result() or 0) == 1:
+                spec = dlg.get_input_value()
+                if spec:
+                    ctrl = getattr(self, "_plugin_controller", None)
+                    if ctrl is not None:
+                        ctrl.request_install(spec)
+        except Exception:
+            try:
+                if getattr(self, "logger", None):
+                    self.logger.warning("插件安装输入弹窗失败", exc_info=True)
+            except Exception:
+                pass
+
+    def _do_plugin_check_updates(self):
+        """检查更新：带逐插件进度 + 取消 + 后台运行（注册到后台任务注册表，可找回）。"""
+        ctrl = getattr(self, "_plugin_controller", None)
+        if ctrl is None:
+            return
+        try:
+            from ui_qt.widgets.progress_dialog import ProgressDialog
+            registry = getattr(self, "_bg_task_registry", None)
+            task_id = registry.register("检查更新") if registry else None
+            pd = ProgressDialog(self, title="检查更新", theme_manager=getattr(self, "theme_manager", None),
+                                show_cancel=True, show_background=True)
+            if registry and task_id:
+                registry.set_dialog(task_id, pd)  # 持有弹窗引用，供面板找回
+            pd.set_status("正在获取已装插件列表...")
+            pd.set_progress(0, maximum=0)  # 初始脉冲
+            pd.show()
+            QtWidgets.QApplication.processEvents()
+
+            def on_progress(cur, total, name):
+                # 同步注册表（面板列表的进度条/状态文字靠它）
+                if registry and task_id:
+                    label = f"正在查询第 {cur}/{total} 个插件..." + (f"  {name}" if name else "") if total > 0 else ""
+                    registry.update(task_id, status=label, progress=(cur, total) if total > 0 else (0, 0))
+                # 取消或已后台运行 → 不更新弹窗 UI（任务可能仍在跑，结果按各自标志处理）
+                if pd.is_cancelled() or pd.is_backgrounded():
+                    return
+                if total > 0:
+                    pd.set_progress(cur, maximum=total)
+                    plabel = f"正在查询第 {cur}/{total} 个插件..." + (f"  {name}" if name else "")
+                    pd.set_status(plabel)
+
+            def on_done(outdated, remote_dates):
+                try:
+                    page = self._find_plugins_page()
+                    if page is not None:
+                        # 结果无论取消/后台都回填列表（用户能看到标记）
+                        page.mark_outdated(outdated, remote_dates)
+                    n = len(outdated)
+                    done_msg = (f"检查完成：发现 {n} 个插件有可用更新" if n
+                                else "检查完成：所有插件均为最新版本")
+                    # 关键：先把弹窗更新到完成态（progress=满 + 状态文字 + 隐藏取消按钮）。
+                    # 后台模式下 on_progress 跳过了弹窗 UI，不更新到这里，restore 找回时会看到
+                    # 进度停在中途、与面板「已完成」不一致。mark_complete 还会隐藏取消按钮
+                    # （已完成的任务不该再有取消选项）。这里统一同步。
+                    try:
+                        pd.mark_complete(done_msg + " ✓")
+                    except Exception:
+                        pass
+                    # 注册表标记完成（驱动按钮变绿）
+                    if registry and task_id:
+                        registry.complete(task_id)
+                        registry.update(task_id, status=done_msg)
+                    # 取消了：直接关弹窗 + 清任务
+                    if pd.is_cancelled():
+                        try:
+                            pd.close()
+                        except Exception:
+                            pass
+                        return
+                    if pd.is_backgrounded():
+                        # 后台运行：弹窗已隐藏但已更新到完成态（restore 可见），状态栏提示 + 按钮变绿。
+                        # 不再自动 remove：保留为本次启动的完成历史（问题3），用户可手动清。
+                        self._notify_plugins_result(done_msg)
+                        return
+                    # 前台：已显示结果，延迟关闭（保留历史）
+                    def _close():
+                        try:
+                            pd.close()
+                        except Exception:
+                            pass
+                    QtCore.QTimer.singleShot(1500, _close)
+                except Exception:
+                    try:
+                        pd.close()
+                    except Exception:
+                        pass
+                    if registry and task_id:
+                        registry.remove(task_id)
+
+            ctrl.run_check_updates(on_progress=on_progress, on_done=on_done)
+        except Exception:
+            try:
+                if getattr(self, "logger", None):
+                    self.logger.warning("插件检查更新弹窗失败", exc_info=True)
+            except Exception:
+                pass
+
+    def _do_plugin_update_all(self):
+        """更新全部：带脉冲进度 + 取消 + 后台运行（注册到后台任务注册表，可找回）。
+        cm-cli update all 无中间进度，用脉冲。"""
+        ctrl = getattr(self, "_plugin_controller", None)
+        if ctrl is None:
+            return
+        try:
+            from ui_qt.widgets.progress_dialog import ProgressDialog
+            registry = getattr(self, "_bg_task_registry", None)
+            task_id = registry.register("更新全部") if registry else None
+            status_init = "正在更新全部插件（含 pip 依赖修复，可能需要几分钟）..."
+            pd = ProgressDialog(self, title="更新全部", theme_manager=getattr(self, "theme_manager", None),
+                                show_cancel=True, show_background=True)
+            if registry and task_id:
+                registry.set_dialog(task_id, pd)
+                registry.update(task_id, status=status_init)
+            pd.set_status(status_init)
+            pd.set_progress(0, maximum=0)  # 脉冲
+            pd.show()
+            QtWidgets.QApplication.processEvents()
+
+            def on_status(text):
+                if registry and task_id:
+                    registry.update(task_id, status=text)
+                if pd.is_cancelled() or pd.is_backgrounded():
+                    return
+                try:
+                    pd.set_status(text)
+                except Exception:
+                    pass
+
+            def on_done():
+                try:
+                    page = self._find_plugins_page()  # 列表刷新在 controller._populate_from_service 里
+                    done_msg = "插件更新完成"
+                    # 同步弹窗到完成态（后台模式下 on_progress 跳过了弹窗 UI，这里统一更新；
+                    # mark_complete 还会隐藏取消按钮——已完成的任务不该再有取消选项）
+                    try:
+                        pd.mark_complete(done_msg + " ✓（列表已刷新）")
+                    except Exception:
+                        pass
+                    if registry and task_id:
+                        registry.complete(task_id)
+                        registry.update(task_id, status=done_msg)
+                    if pd.is_cancelled():
+                        try:
+                            pd.close()
+                        except Exception:
+                            pass
+                        return
+                    if pd.is_backgrounded():
+                        # 后台：弹窗已更新到完成态，状态栏提示。不自动 remove（保留历史）
+                        self._notify_plugins_result(done_msg)
+                        return
+                    # 前台：已显示结果，延迟关闭（保留历史，不 remove）
+                    def _close():
+                        try:
+                            pd.close()
+                        except Exception:
+                            pass
+                    QtCore.QTimer.singleShot(1500, _close)
+                except Exception:
+                    try:
+                        pd.close()
+                    except Exception:
+                        pass
+                    if registry and task_id:
+                        registry.remove(task_id)
+
+            ctrl.run_update_all(on_status=on_status, on_done=on_done)
+        except Exception:
+            try:
+                if getattr(self, "logger", None):
+                    self.logger.warning("插件更新全部弹窗失败", exc_info=True)
+            except Exception:
+                pass
+
+    def _notify_plugins_result(self, message):
+        """后台运行完成时的轻量提示（statusBar 短暂显示，不抢焦点）。"""
+        try:
+            sb = self.statusBar()
+            if sb is not None:
+                sb.showMessage(message, 4000)
+        except Exception:
+            pass
+
+    def _refresh_bg_tasks_nav(self):
+        """注册表变化 → 刷新「后台任务」nav 按钮文字（badge 效果）+ 同步页面。
+
+        - 有活动任务：nav 显示「📋 后台任务 (N)」（N=进行中数）
+        - 无活动但有完成历史：显示「📋 后台任务 ✓」（提示有可查看的历史）
+        - 全空：恢复「📋 后台任务」
+        page 自身连了注册表信号会自动 refresh，这里只补 nav 按钮文字。
+        """
+        try:
+            registry = getattr(self, "_bg_task_registry", None)
+            btn_map = getattr(self, "_nav_btn_map", None) or {}
+            btn = btn_map.get("tasks")
+            if registry is None or btn is None:
+                return
+            n_active = registry.count_active()
+            n_done = registry.count_done_unread()
+            base = "📋 后台任务"
+            if n_active > 0:
+                btn.setText(f"{base} ({n_active})")
+            elif n_done > 0:
+                btn.setText(f"{base} ✓")
+            else:
+                btn.setText(base)
+        except Exception:
+            pass
+
+
+    def _find_plugins_page(self):
+        """安全拿到 plugins page（outdated_reported 回推时用），找不到返回 None。"""
+        try:
+            return getattr(self, "_plugins_page", None)
+        except Exception:
+            return None
+
 
     def _perform_shutdown(self, event):
         """真正退出的后续流程：站伏 workers、关窗口、QApplication.quit。与原 closeEvent 后半段一致。"""
