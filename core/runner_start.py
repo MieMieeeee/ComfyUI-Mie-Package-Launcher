@@ -22,13 +22,45 @@ def _spawn_process(pm, cmd, env, run_cwd, show_console=True):
         si.dwFlags |= subprocess.STARTF_USESHOWWINDOW
         if show_console:
             si.wShowWindow = 1  # SW_SHOWNORMAL
-            pm.comfyui_process = subprocess.Popen(
-                cmd,
-                env=env,
-                cwd=run_cwd,
-                creationflags=subprocess.CREATE_NEW_CONSOLE,
-                startupinfo=si,
-            )
+            # subprocess.Popen with stdout=None forwards launcher's std
+            # handle 1 to the child via _get_osfhandle(1). If launcher is
+            # a CLI process that called _attach_parent_console, std handle
+            # 1 is a valid PowerShell handle, so ComfyUI's print runs to
+            # PowerShell and the new conhost window stays blank.
+            # In the original GUI launcher this didn't happen because the
+            # GUI process has no console and std handle 1 is NULL. NULL
+            # std handles make Windows allocate fresh ones from the
+            # child's new console (CREATE_NEW_CONSOLE).
+            # Fix: temporarily set launcher std handles 1/2 to NULL right
+            # before spawn, then restore. launcher's own prints go through
+            # sys.stdout (CONOUT$ fd), not via std handle 1/2, so this
+            # does not affect launcher output.
+            _k32 = None
+            _so = _se = None
+            try:
+                import ctypes as _ct
+                _k32 = _ct.windll.kernel32
+                _so = _k32.GetStdHandle(-11)
+                _se = _k32.GetStdHandle(-12)
+                _k32.SetStdHandle(-11, None)
+                _k32.SetStdHandle(-12, None)
+            except Exception:
+                pass
+            try:
+                pm.comfyui_process = subprocess.Popen(
+                    cmd,
+                    env=env,
+                    cwd=run_cwd,
+                    creationflags=subprocess.CREATE_NEW_CONSOLE,
+                    startupinfo=si,
+                )
+            finally:
+                if _k32 is not None:
+                    try:
+                        _k32.SetStdHandle(-11, _so)
+                        _k32.SetStdHandle(-12, _se)
+                    except Exception:
+                        pass
         else:
             si.wShowWindow = subprocess.SW_HIDE
             pm.comfyui_process = subprocess.Popen(

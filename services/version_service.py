@@ -161,6 +161,11 @@ class VersionService(IVersionService):
             popen_kwargs["startupinfo"] = si
             popen_kwargs["creationflags"] = subprocess.CREATE_NO_WINDOW
 
+        # Popen with stdout/stderr=PIPE must set stdin=DEVNULL explicitly,
+        # otherwise subprocess._get_handles() inherits a stale stdin handle
+        # from the GUI process and raises WinError 6. run_hidden already
+        # covers the subprocess.run path; this Popen path was missing it.
+        popen_kwargs["stdin"] = subprocess.DEVNULL
         popen_kwargs["stdout"] = subprocess.PIPE
         popen_kwargs["stderr"] = subprocess.PIPE
         popen_kwargs["cwd"] = cwd

@@ -31,11 +31,12 @@ def cli_start(app):
             si.wShowWindow = subprocess.SW_HIDE
             process = subprocess.Popen(
                 cmd, env=env, cwd=run_cwd,
+                stdin=subprocess.DEVNULL,
                 creationflags=subprocess.CREATE_NO_WINDOW,
                 startupinfo=si,
             )
         else:
-            process = subprocess.Popen(cmd, env=env, cwd=run_cwd)
+            process = subprocess.Popen(cmd, env=env, cwd=run_cwd, stdin=subprocess.DEVNULL)
     except Exception as e:
         print(f"Error starting ComfyUI: {e}")
         return None

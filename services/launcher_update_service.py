@@ -513,6 +513,7 @@ exit
 
             subprocess.Popen(
                 f'cmd /c "{bat_path}"',
+                stdin=subprocess.DEVNULL,
                 shell=True,
                 cwd=str(bat_path.parent),
                 creationflags=subprocess.DETACHED_PROCESS

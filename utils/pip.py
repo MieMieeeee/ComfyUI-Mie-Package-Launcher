@@ -216,8 +216,11 @@ def _run_pip_streaming(cmd, logger, on_progress):
     if logger:
         logger.info("执行 pip requirements 安装（流式）: %s", " ".join(map(str, cmd)))
 
+    # GUI 进程下，子进程必须显式给 stdin 一个 NUL 句柄，否则
+    # subprocess._get_handles() 继承 GUI 的无效 stdin 报 WinError 6。
     proc = subprocess.Popen(
         cmd,
+        stdin=subprocess.DEVNULL,
         stdout=subprocess.PIPE,
         stderr=subprocess.PIPE,
         startupinfo=si,
