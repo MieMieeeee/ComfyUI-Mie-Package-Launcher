@@ -19,7 +19,7 @@ def _wait_for(predicate, timeout=2.0, interval=0.02):
 
 class TestLogTailerEmits(unittest.TestCase):
     def test_emits_existing_lines_when_start_from_beginning(self):
-        with self._tmpfile("a\nb\nc\n") as path:
+        with _tmpfile("a\nb\nc\n") as path:
             received = []
             ev = threading.Event()
             tailer = LogTailer(path, on_line=received.append, start_from_beginning=True)
@@ -31,7 +31,7 @@ class TestLogTailerEmits(unittest.TestCase):
                 tailer.stop()
 
     def test_emits_only_new_lines_when_start_from_end(self):
-        with self._tmpfile("a\nb\n") as path:
+        with _tmpfile("a\nb\n") as path:
             received = []
             tailer = LogTailer(path, on_line=received.append, start_from_beginning=False)
             tailer.start()
@@ -49,7 +49,7 @@ class TestLogTailerEmits(unittest.TestCase):
                 tailer.stop()
 
     def test_emits_lines_appended_in_chunks(self):
-        with self._tmpfile("") as path:
+        with _tmpfile("") as path:
             received = []
             tailer = LogTailer(path, on_line=received.append, start_from_beginning=True)
             tailer.start()
@@ -62,7 +62,7 @@ class TestLogTailerEmits(unittest.TestCase):
                 tailer.stop()
 
     def test_partial_line_buffered_until_newline(self):
-        with self._tmpfile("") as path:
+        with _tmpfile("") as path:
             received = []
             tailer = LogTailer(path, on_line=received.append, start_from_beginning=True)
             tailer.start()
@@ -81,7 +81,7 @@ class TestLogTailerEmits(unittest.TestCase):
                 tailer.stop()
 
     def test_unicode_lines_emit_unchanged(self):
-        with self._tmpfile("") as path:
+        with _tmpfile("") as path:
             received = []
             tailer = LogTailer(path, on_line=received.append, start_from_beginning=True)
             tailer.start()
@@ -97,7 +97,7 @@ class TestLogTailerEmits(unittest.TestCase):
 
 class TestLogTailerLifecycle(unittest.TestCase):
     def test_stop_terminates_thread(self):
-        with self._tmpfile("") as path:
+        with _tmpfile("") as path:
             received = []
             tailer = LogTailer(path, on_line=received.append, start_from_beginning=True)
             tailer.start()
@@ -107,7 +107,7 @@ class TestLogTailerLifecycle(unittest.TestCase):
                             "thread should terminate after stop()")
 
     def test_double_stop_is_safe(self):
-        with self._tmpfile("") as path:
+        with _tmpfile("") as path:
             tailer = LogTailer(path, on_line=lambda l: None, start_from_beginning=True)
             tailer.start()
             tailer.stop()
@@ -115,7 +115,7 @@ class TestLogTailerLifecycle(unittest.TestCase):
             self.assertFalse(tailer.is_alive())
 
     def test_callback_runs_on_daemon_thread(self):
-        with self._tmpfile("") as path:
+        with _tmpfile("") as path:
             main_thread_ident = threading.get_ident()
             callback_thread_ident = [None]
             ev = threading.Event()
@@ -140,7 +140,7 @@ class TestLogTailerLifecycle(unittest.TestCase):
 class TestLogTailerResilience(unittest.TestCase):
     def test_waits_for_file_to_appear(self):
         # 文件暂不存在,LogTailer 应当等待(不抛),文件出现后正常 emit
-        tmpdir = Path(self._tmpdir())
+        tmpdir = Path(_tmpdir())
         path = tmpdir / "later.log"
         received = []
         tailer = LogTailer(path, on_line=received.append, start_from_beginning=True)
@@ -157,7 +157,7 @@ class TestLogTailerResilience(unittest.TestCase):
             tailer.stop()
 
     def test_recovers_from_truncation(self):
-        with self._tmpfile("first\n") as path:
+        with _tmpfile("first\n") as path:
             received = []
             tailer = LogTailer(path, on_line=received.append, start_from_beginning=True)
             tailer.start()
@@ -173,27 +173,28 @@ class TestLogTailerResilience(unittest.TestCase):
 
     # ----- 临时文件辅助 -----
 
-    def _tmpdir(self):
-        import tempfile
-        return tempfile.mkdtemp()
+def _tmpdir():
+    import tempfile
+    return tempfile.mkdtemp()
 
-    def _tmpfile(self, content):
-        """返回上下文管理器,exit 时清理临时文件。"""
-        import tempfile
-        from contextlib import contextmanager
 
-        @contextmanager
-        def _ctx():
-            tmpdir = Path(tempfile.mkdtemp())
-            p = tmpdir / "test.log"
-            p.write_text(content, encoding="utf-8")
-            try:
-                yield p
-            finally:
-                import shutil
-                shutil.rmtree(tmpdir, ignore_errors=True)
+def _tmpfile(content):
+    """返回上下文管理器,exit 时清理临时文件。"""
+    import tempfile
+    import shutil
+    from contextlib import contextmanager
 
-        return _ctx()
+    @contextmanager
+    def _ctx():
+        tmpdir = Path(tempfile.mkdtemp())
+        p = tmpdir / "test.log"
+        p.write_text(content, encoding="utf-8")
+        try:
+            yield p
+        finally:
+            shutil.rmtree(tmpdir, ignore_errors=True)
+
+    return _ctx()
 
 
 if __name__ == "__main__":

@@ -41,6 +41,7 @@ from ui_qt.pages.about_launcher_page import AboutLauncherPage
 from ui_qt.pages.plugins_page import PluginsPage, PluginController
 from ui_qt.pages.system_settings_page import SystemSettingsPage
 from ui_qt.widgets.tray_icon import LauncherTray
+from ui_qt.log_viewer import LogViewerPage
 
 
 class Var:
@@ -2118,6 +2119,7 @@ class PyQtLauncher(QtWidgets.QMainWindow, process_events.ProcessCallback):
 
         btns = {
             "launch": NavBtn("🚀 启动与更新"),
+            "logs": NavBtn("📋 ComfyUI 实时日志"),
             "plugins": NavBtn("🧩 插件管理"),
             "version": NavBtn("🧬 内核版本管理"),
             "models": NavBtn("📂 外置模型库管理"),
@@ -2131,6 +2133,8 @@ class PyQtLauncher(QtWidgets.QMainWindow, process_events.ProcessCallback):
         # 为导航按钮添加工具提示和存储完整文字
         btns["launch"].setToolTip("启动、停止ComfyUI，查看运行状态")
         btns["launch"].setProperty("full_text", "🚀 启动与更新")
+        btns["logs"].setToolTip("实时显示 ComfyUI 运行日志")
+        btns["logs"].setProperty("full_text", "📋 ComfyUI 实时日志")
         btns["version"].setToolTip("管理ComfyUI内核版本，切换提交")
         btns["version"].setProperty("full_text", "🧬 内核版本管理")
         btns["models"].setToolTip("管理外置模型库路径配置")
@@ -2342,7 +2346,10 @@ class PyQtLauncher(QtWidgets.QMainWindow, process_events.ProcessCallback):
 
         # Create page instances using new refactored pages
         page_launch = LaunchPage(app=self, theme_manager=self.theme_manager)
-        self._launch_page = page_launch  # 保存引用，用于后续更新显示
+        self._launch_page = page_launch
+        # 日志页:实时 tail ComfyUI 日志
+        page_logs = LogViewerPage(theme_manager=self.theme_manager)
+        self._log_viewer_page = page_logs  # 保存引用，用于后续更新显示
         try:
             if hasattr(self, "big_btn"):
                 self.big_btn.attach(
@@ -2392,6 +2399,7 @@ class PyQtLauncher(QtWidgets.QMainWindow, process_events.ProcessCallback):
         # Store references for theme updates
         self._new_pages = {
             "launch": page_launch,
+            "logs": page_logs,
             "version": page_version,
             "models": page_models,
             "settings": page_settings,
@@ -2467,6 +2475,7 @@ class PyQtLauncher(QtWidgets.QMainWindow, process_events.ProcessCallback):
             return scroll
 
         content.addWidget(wrap_in_scroll(page_launch))
+        content.addWidget(wrap_in_scroll(page_logs))
         content.addWidget(wrap_in_scroll(page_plugins))
         content.addWidget(wrap_in_scroll(page_version))
         content.addWidget(wrap_in_scroll(page_models))
@@ -2478,6 +2487,7 @@ class PyQtLauncher(QtWidgets.QMainWindow, process_events.ProcessCallback):
         # Navigation actions
         pages = {
             "launch": page_launch,
+            "logs": page_logs,
             "plugins": page_plugins,
             "version": page_version,
             "models": page_models,
@@ -2506,6 +2516,18 @@ class PyQtLauncher(QtWidgets.QMainWindow, process_events.ProcessCallback):
         for key, b in btns.items():
             b.clicked.connect(lambda _, k=key: _select_tab(k))
         _select_tab("launch")
+
+        # 日志页:启动 tailer。日志路径 <comfyui_root>/user/comfyui.log;
+        # log 文件尚未生成时 tailer 会阻塞等待,不影响启动。
+        try:
+            from utils import paths as _PATHS
+            _root = self.config.get("paths", {}).get("comfyui_root")
+            if _root:
+                _log_path = _PATHS.logs_file(Path(_root))
+                page_logs.set_log_path(_log_path)
+                page_logs.start_tailing(start_from_beginning=False)
+        except Exception as _e:
+            print(f"[LogViewer] failed to start tailing: {_e}", flush=True)
 
         # 插件页控制器：页面信号 → PluginService（后台线程 + UiInvoker 派回 UI 线程）。
         # 控制器必须被持有，否则 GC 后信号连接失效；存在 self._plugin_controller 上。
