@@ -6,7 +6,7 @@ from typing import Callable, List, Tuple
 
 
 _TIMESTAMP_RE = re.compile(
-    r"^\[?(\d{4}-\d{2}-\d{2} \d{2}:\d{2}:\d{2}[.,]\d+)\]? (.*)$"
+    r"^\[?(\d{4}-\d{2}-\d{2} \d{2}:\d{2}:\d{2}(?:[.,]\d+)?)\]? (.*)$"
 )
 
 
@@ -194,6 +194,7 @@ class ProgressCollapseFilter:
 
 try:
     from PyQt5 import QtCore, QtGui, QtWidgets
+    from PyQt5.QtGui import QColor
     _HAS_QT = True
 except Exception:
     _HAS_QT = False
@@ -205,6 +206,54 @@ if _HAS_QT:
 
 
     class LogViewerPage(QtWidgets.QWidget):
+        _LEVEL_COLORS_DARK = {
+            "DEBUG": "#888888",
+            "INFO": "#cccccc",
+            "WARNING": "#f0c674",
+            "ERROR": "#ff6b6b",
+            "CRITICAL": "#ff6b6b",
+        }
+        _LEVEL_COLORS_LIGHT = {
+            "DEBUG": "#666666",
+            "INFO": "#333333",
+            "WARNING": "#b07a00",
+            "ERROR": "#cc0000",
+            "CRITICAL": "#cc0000",
+        }
+        _TIMESTAMP_COLOR_DARK = "#666666"
+        _TIMESTAMP_COLOR_LIGHT = "#888888"
+        _LEVEL_RE = re.compile(r"\[(DEBUG|INFO|WARNING|ERROR|CRITICAL)\]")
+
+        @classmethod
+        def _detect_level(cls, body: str) -> str:
+            """从 body 抽 [LEVEL] 标记;找不到默认 INFO。"""
+            m = cls._LEVEL_RE.search(body)
+            return m.group(1) if m else "INFO"
+
+        @classmethod
+        def _format_line_html(cls, line: str, is_dark: bool = True) -> str:
+            """返回带颜色 HTML 片段;空行返回空串。"""
+            if not line:
+                return ""
+            ts, body = parse_log_entry(line)
+            safe_body = (
+                body.replace("&", "&amp;").replace("<", "&lt;").replace(">", "&gt;")
+            )
+            safe_ts = (
+                ts.replace("&", "&amp;").replace("<", "&lt;").replace(">", "&gt;")
+            ) if ts else ""
+            level = cls._detect_level(body)
+            palette = cls._LEVEL_COLORS_DARK if is_dark else cls._LEVEL_COLORS_LIGHT
+            level_color = palette.get(level, palette["INFO"])
+            ts_color = cls._TIMESTAMP_COLOR_DARK if is_dark else cls._TIMESTAMP_COLOR_LIGHT
+            if ts:
+                return (
+                    f'<span style="color:{ts_color};">{safe_ts}</span> '
+                    f'<span style="color:{level_color};">{safe_body}</span>'
+                )
+            return f'<span style="color:{level_color};">{safe_body}</span>'
+
+
         """实时 tail ComfyUI 日志的可滚动只读视图。
 
         组件:
@@ -213,9 +262,12 @@ if _HAS_QT:
         - 后台 LogTailer 线程通过 QTimer.singleShot 把行投回 UI 线程
         """
 
-        def __init__(self, theme_manager=None, parent=None):
+        DEFAULT_MAX_LINES = 5000
+
+        def __init__(self, theme_manager=None, parent=None, max_lines=5000):
             super().__init__(parent)
             self.theme_manager = theme_manager
+            self._max_lines = int(max_lines) if max_lines else self.DEFAULT_MAX_LINES
             self._tailer = None  # type: LogTailer | None
             self._emitter = _LineEmitter()
             self._filter = ProgressCollapseFilter()
@@ -263,12 +315,15 @@ if _HAS_QT:
             layout.addLayout(controls)
 
             # 日志视图
-            self.text_edit = QtWidgets.QTextEdit()
+            self.text_edit = QtWidgets.QTextBrowser()
             self.text_edit.setReadOnly(True)
             font = QtGui.QFont("Consolas, Courier New", 10)
             font.setStyleHint(QtGui.QFont.Monospace)
             self.text_edit.setFont(font)
             self.text_edit.setLineWrapMode(QtWidgets.QTextEdit.NoWrap)
+            # 行数上限:Qt 在 block 数超过阈值时自动裁掉最早的 block,
+            # 避免几 MB 日志把 QTextEdit 撑爆
+            self.text_edit.document().setMaximumBlockCount(self._max_lines + 1)  # +1:Qt cap=N 实际只显示 N-1,留 1 块给光标
             layout.addWidget(self.text_edit)
 
         def set_log_path(self, path) -> None:
@@ -315,10 +370,31 @@ if _HAS_QT:
                 self._append_line(line)
 
         def _append_line(self, line: str) -> None:
-            self.text_edit.append(line)
+            if not line:
+                return
+            is_dark = bool(self.theme_manager and self.theme_manager.is_dark)
+            ts, body = parse_log_entry(line)
+            level = self._detect_level(body)
+            palette = self._LEVEL_COLORS_DARK if is_dark else self._LEVEL_COLORS_LIGHT
+            level_color = QColor(palette.get(level, palette["INFO"]))
+            ts_color = QColor(self._TIMESTAMP_COLOR_DARK if is_dark else self._TIMESTAMP_COLOR_LIGHT)
             cursor = self.text_edit.textCursor()
             cursor.movePosition(QtGui.QTextCursor.End)
-            self.text_edit.setTextCursor(cursor)
+            if ts:
+                fmt = cursor.charFormat()
+                fmt.setForeground(ts_color)
+                cursor.setCharFormat(fmt)
+                cursor.insertText(ts)
+                cursor.insertText(" ")
+            fmt = cursor.charFormat()
+            fmt.setForeground(level_color)
+            cursor.setCharFormat(fmt)
+            cursor.insertText(body)
+            cursor.insertText(chr(10))
+            # 滚到底
+            bar = self.text_edit.verticalScrollBar()
+            if bar is not None:
+                bar.setValue(bar.maximum())
 
         def _on_pause_toggled(self, checked: bool) -> None:
             self._paused = checked

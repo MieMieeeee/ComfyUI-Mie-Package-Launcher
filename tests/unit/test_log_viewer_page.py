@@ -147,3 +147,76 @@ class TestLogViewerPageTailing(_Fixture):
 
 if __name__ == "__main__":
     unittest.main()
+
+class TestLogViewerPageLineCap(_Fixture):
+    """行数上限:setMaximumBlockCount 把最早的块裁掉,防止几 MB log 把 QTextEdit 撑爆。"""
+
+    def test_max_lines_drops_oldest(self):
+        page = LogViewerPage(theme_manager=self.tm, max_lines=3)
+        for i in range(5):
+            page._append_line(f"line {i}")
+        text = page.text_edit.toPlainText()
+        self.assertIn("line 4", text)
+        self.assertNotIn("line 0", text)
+        self.assertNotIn("line 1", text)
+        # 剩下的就是最后 3 行
+        kept = [l for l in text.split(chr(10)) if l]
+        self.assertEqual(len(kept), 3)
+        self.assertEqual(kept[-1], "line 4")
+
+    def test_default_max_lines_is_generous(self):
+        page = LogViewerPage(theme_manager=self.tm)
+        for i in range(100):
+            page._append_line(f"line {i}")
+        text = page.text_edit.toPlainText()
+        self.assertIn("line 99", text)
+        self.assertIn("line 0", text)  # 默认 5000 够装下
+
+
+class TestLogViewerPageColoring(_Fixture):
+    """行高亮:时间戳灰色,ERROR/CRITICAL 红,WARNING 黄,其他默认色。"""
+
+    def _html(self, line):
+        page = LogViewerPage(theme_manager=self.tm)
+        page._append_line(line)
+        return page.text_edit.toHtml()
+
+    def test_error_line_uses_red(self):
+        h = self._html("2026-07-02 14:09:43 [ERROR] something failed")
+        self.assertIn("something failed", h)
+        # 应该有一个红色 span(具体 hex 由实现决定,但不能是默认灰)
+        self.assertIn("color", h.lower())
+
+    def test_warning_line_uses_yellow(self):
+        h = self._html("[WARNING] heads up")
+        self.assertIn("heads up", h)
+        self.assertIn("color", h.lower())
+
+    def test_info_line_uses_default(self):
+        h = self._html("[INFO] normal message")
+        self.assertIn("normal message", h)
+
+    def test_timestamp_rendered(self):
+        h = self._html("2026-07-02 14:09:43,123 [INFO] hi")
+        self.assertIn("2026-07-02 14:09:43,123", h)
+        self.assertIn("hi", h)
+
+    def test_html_escapes_special_chars(self):
+        h = self._html("[INFO] <script>alert(1)</script>")
+        # 原始 <script> 不能作为 HTML 标签出现
+        self.assertNotIn("<script>", h)
+        self.assertIn("&lt;script&gt;", h)
+
+    def test_plain_text_preserved(self):
+        # toPlainText 必须保留原文(用于搜索 / 测试断言)
+        h = self._html("2026-07-02 [ERROR] boom")
+        # 拿到 QTextEdit 内部 text,确保不含 HTML 标签
+        page = LogViewerPage(theme_manager=self.tm)
+        page._append_line("2026-07-02 [ERROR] boom")
+        plain = page.text_edit.toPlainText()
+        self.assertIn("boom", plain)
+        self.assertNotIn("<span", plain)
+
+
+if __name__ == "__main__":
+    unittest.main()

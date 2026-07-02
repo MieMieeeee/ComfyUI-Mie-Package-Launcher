@@ -42,5 +42,16 @@ class TestParseLogEntry(unittest.TestCase):
         self.assertEqual(body, "1234567890 some text")
 
 
+    def test_timestamp_without_milliseconds(self):
+        # 部分日志不带毫秒(子进程 stdout 重定向、stdout 简单 print 等)
+        ts, body = parse_log_entry("2026-07-02 14:09:43 [INFO] no millis")
+        self.assertEqual(ts, "2026-07-02 14:09:43")
+        self.assertEqual(body, "[INFO] no millis")
+
+    def test_timestamp_without_milliseconds_bracketed(self):
+        ts, body = parse_log_entry("[2026-07-02 14:09:43] also no millis")
+        self.assertEqual(ts, "2026-07-02 14:09:43")
+        self.assertEqual(body, "also no millis")
+
 if __name__ == "__main__":
     unittest.main()
