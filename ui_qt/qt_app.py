@@ -2517,15 +2517,19 @@ class PyQtLauncher(QtWidgets.QMainWindow, process_events.ProcessCallback):
             b.clicked.connect(lambda _, k=key: _select_tab(k))
         _select_tab("launch")
 
-        # 日志页:启动 tailer。日志路径 <comfyui_root>/user/comfyui.log;
-        # log 文件尚未生成时 tailer 会阻塞等待,不影响启动。
+        # 日志页:启动 tailer。comfy_root_from_config 返回 <comfyui_root>/ComfyUI
+        # (V8 包装目录里 ComfyUI 在子目录;真正的 main.py/user 在那),
+        # log 文件尚未生成时 tailer 阻塞等待,不影响启动。
         try:
-            from utils import paths as _PATHS
-            _root = self.config.get("paths", {}).get("comfyui_root")
-            if _root:
-                _log_path = _PATHS.logs_file(Path(_root))
+            from utils.paths import comfy_root_from_config, logs_file as _logs_file
+            _root = comfy_root_from_config(self.config)
+            _log_path = _logs_file(_root)
+            if _log_path.parent.exists() or _log_path.parent.parent.exists():
+                # log 文件或父目录存在才启动;否则连 user/ 都不存在
                 page_logs.set_log_path(_log_path)
-                page_logs.start_tailing(start_from_beginning=False)
+                page_logs.start_tailing(start_from_beginning=True)  # 打开页面时显示已有历史,之后跟随新行
+            else:
+                page_logs._path_label.setText("(ComfyUI 目录不存在: " + str(_log_path) + ")")
         except Exception as _e:
             print(f"[LogViewer] failed to start tailing: {_e}", flush=True)
 
