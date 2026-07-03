@@ -153,13 +153,13 @@ class TestLogViewerPageWrap(_Fixture):
         self.assertTrue(hasattr(page, "wrap_checkbox"))
         self.assertIsInstance(page.wrap_checkbox, QtWidgets.QCheckBox)
 
-    def test_wrap_default_is_off(self):
+    def test_wrap_default_is_on(self):
         page = LogViewerPage(theme_manager=self.tm)
-        self.assertFalse(page.wrap_checkbox.isChecked())
-        # text_edit 默认 NoWrap
+        self.assertTrue(page.wrap_checkbox.isChecked())
+        # text_edit 默认 WidgetWidth,窄窗口也能看全
         self.assertEqual(
             page.text_edit.lineWrapMode(),
-            QtWidgets.QTextEdit.NoWrap,
+            QtWidgets.QTextEdit.WidgetWidth,
         )
 
     def test_toggle_wrap_changes_mode(self):

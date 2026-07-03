@@ -296,7 +296,7 @@ if _HAS_QT:
             controls.addWidget(self.collapse_checkbox)
 
             self.wrap_checkbox = QtWidgets.QCheckBox("自动换行")
-            self.wrap_checkbox.setChecked(False)  # 默认不换行,日志行可能很长
+            self.wrap_checkbox.setChecked(True)  # 默认换行,窄窗口也能看全
             self.wrap_checkbox.toggled.connect(self._on_wrap_toggled)
             controls.addWidget(self.wrap_checkbox)
 
@@ -325,7 +325,7 @@ if _HAS_QT:
             font = QtGui.QFont("Consolas, Courier New", 10)
             font.setStyleHint(QtGui.QFont.Monospace)
             self.text_edit.setFont(font)
-            self.text_edit.setLineWrapMode(QtWidgets.QTextEdit.NoWrap)
+            self.text_edit.setLineWrapMode(QtWidgets.QTextEdit.WidgetWidth)
             # 行数上限:Qt 在 block 数超过阈值时自动裁掉最早的 block,
             # 避免几 MB 日志把 QTextEdit 撑爆
             self.text_edit.document().setMaximumBlockCount(self._max_lines + 1)  # +1:Qt cap=N 实际只显示 N-1,留 1 块给光标
