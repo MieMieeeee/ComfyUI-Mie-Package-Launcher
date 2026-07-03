@@ -3233,12 +3233,33 @@ class PyQtLauncher(QtWidgets.QMainWindow, process_events.ProcessCallback):
         try:
             from ui_qt.widgets.progress_dialog import ProgressDialog
 
+            # 注册后台任务(让“后台运行”按钮可用,任务面板能看到进度)
+            registry = getattr(self, "_bg_task_registry", None)
+            task_id = registry.register("更新 ComfyUI") if registry else None
+
             pd = ProgressDialog(
                 self,
                 title="正在更新",
                 theme_manager=getattr(self, "theme_manager", None),
                 show_cancel=True,
+                show_background=True,
             )
+            if registry and task_id:
+                registry.set_dialog(task_id, pd)
+                registry.update(task_id, status="正在检查更新...")
+
+            def _on_background():
+                # 同步注册表:面板上能看到状态变化
+                if registry and task_id:
+                    try:
+                        registry.update(task_id, status="已转入后台运行...")
+                    except Exception:
+                        pass
+                # 弹窗本身保持显示(_apply_progress 会跳过 UI 更新),
+                # 用户点“取消”能直接终止
+
+            pd.set_background_callback(_on_background)
+
             pd.set_status("正在检查更新...")
 
             # 设置取消回调：恢复按钮状态并终止后台 git 进程
@@ -3295,11 +3316,33 @@ class PyQtLauncher(QtWidgets.QMainWindow, process_events.ProcessCallback):
             def _apply_progress(text, percent):
                 if pd is None or pd.is_cancelled():
                     return
+                # 后台模式:只更新注册表(面板看得到),不动弹窗 UI
+                if pd.is_backgrounded():
+                    if registry and task_id:
+                        try:
+                            registry.update(
+                                task_id,
+                                status=text,
+                                progress=(percent, 100) if percent is not None else None,
+                            )
+                        except Exception:
+                            pass
+                    return
                 try:
                     pd.set_status(text)
                     pd.set_progress(percent if percent is not None else None)
                 except Exception:
                     pass
+                # 弹窗可见时也同步注册表,这样点“后台运行”时面板已经有最新状态
+                if registry and task_id:
+                    try:
+                        registry.update(
+                            task_id,
+                            status=text,
+                            progress=(percent, 100) if percent is not None else None,
+                        )
+                    except Exception:
+                        pass
 
             try:
                 # 检查是否已取消
@@ -3426,6 +3469,23 @@ class PyQtLauncher(QtWidgets.QMainWindow, process_events.ProcessCallback):
                 # _update_running / on_done 恢复（由 _force_update 自己负责），
                 # 否则按钮会被提前恢复、用户可再次点“更新”导致并发。
                 offered_force_update = False
+                # 后台任务收尾:先根据 core_res 状态打标签,
+                # 再 mark_complete 弹完成态(后台模式下由面板呈现)。
+                try:
+                    _ok = bool(core_res) and not (isinstance(core_res, dict) and core_res.get("error"))
+                    if registry and task_id:
+                        try:
+                            registry.complete(task_id, error=not _ok)
+                        except Exception:
+                            pass
+                    if pd:
+                        try:
+                            _label = "更新完成 ✓" if _ok else "更新完成(有失败项)"
+                            pd.mark_complete(_label)
+                        except Exception:
+                            pass
+                except Exception:
+                    pass
                 try:
                     # 关闭进度弹窗
                     try:
