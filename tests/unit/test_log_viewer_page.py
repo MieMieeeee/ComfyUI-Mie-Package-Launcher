@@ -145,6 +145,38 @@ class TestLogViewerPageTailing(_Fixture):
         self.assertNotIn("lines collapsed", text_raw)
 
 
+class TestLogViewerPageWrap(_Fixture):
+    """自动换行 checkbox:切换 text_edit 的 lineWrapMode。"""
+
+    def test_has_wrap_checkbox(self):
+        page = LogViewerPage(theme_manager=self.tm)
+        self.assertTrue(hasattr(page, "wrap_checkbox"))
+        self.assertIsInstance(page.wrap_checkbox, QtWidgets.QCheckBox)
+
+    def test_wrap_default_is_off(self):
+        page = LogViewerPage(theme_manager=self.tm)
+        self.assertFalse(page.wrap_checkbox.isChecked())
+        # text_edit 默认 NoWrap
+        self.assertEqual(
+            page.text_edit.lineWrapMode(),
+            QtWidgets.QTextEdit.NoWrap,
+        )
+
+    def test_toggle_wrap_changes_mode(self):
+        page = LogViewerPage(theme_manager=self.tm)
+        page.wrap_checkbox.setChecked(True)
+        self.app.processEvents()
+        self.assertEqual(
+            page.text_edit.lineWrapMode(),
+            QtWidgets.QTextEdit.WidgetWidth,
+        )
+        page.wrap_checkbox.setChecked(False)
+        self.app.processEvents()
+        self.assertEqual(
+            page.text_edit.lineWrapMode(),
+            QtWidgets.QTextEdit.NoWrap,
+        )
+
 if __name__ == "__main__":
     unittest.main()
 

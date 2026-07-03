@@ -295,6 +295,11 @@ if _HAS_QT:
             self.collapse_checkbox.toggled.connect(self._on_collapse_toggled)
             controls.addWidget(self.collapse_checkbox)
 
+            self.wrap_checkbox = QtWidgets.QCheckBox("自动换行")
+            self.wrap_checkbox.setChecked(False)  # 默认不换行,日志行可能很长
+            self.wrap_checkbox.toggled.connect(self._on_wrap_toggled)
+            controls.addWidget(self.wrap_checkbox)
+
             self.pause_btn = QtWidgets.QPushButton("暂停")
             self.pause_btn.setCheckable(True)
             self.pause_btn.toggled.connect(self._on_pause_toggled)
@@ -408,6 +413,13 @@ if _HAS_QT:
         def _on_collapse_toggled(self, checked: bool) -> None:
             # 切换折叠时重置 filter,避免陈旧 \r 计数
             self._filter = ProgressCollapseFilter()
+
+        def _on_wrap_toggled(self, checked: bool) -> None:
+            if checked:
+                # WidgetWidth:按控件宽度换行(窄窗口也能看全)
+                self.text_edit.setLineWrapMode(QtWidgets.QTextEdit.WidgetWidth)
+            else:
+                self.text_edit.setLineWrapMode(QtWidgets.QTextEdit.NoWrap)
 
         def _on_save_clicked(self) -> None:
             path, _ = QtWidgets.QFileDialog.getSaveFileName(
