@@ -373,8 +373,8 @@ class TestUpdateMapping:
         assert result is True
         assert yaml_path.exists()
 
-    def test_update_mapping_writes_comfyui_key(self, tmp_path):
-        """update_mapping should write 'comfyui' as top-level key."""
+    def test_update_mapping_writes_mie_launcher_block(self, tmp_path):
+        """update_mapping writes a mie_launcher_<id> top-level block (post-migration routing)."""
         from services.model_path_service import ModelPathService
 
         app = MagicMock()
@@ -395,7 +395,8 @@ class TestUpdateMapping:
         yaml_path = comfyui_dir / "extra_model_paths.yaml"
         content = yaml_path.read_text(encoding="utf-8")
         
-        assert content.startswith("comfyui:")
+        mie_blocks = [k for k in yaml.safe_load(content) if k.startswith("mie_launcher_")]
+        assert len(mie_blocks) == 1
 
     def test_update_mapping_includes_base_path(self, tmp_path):
         """update_mapping should include base_path in output."""

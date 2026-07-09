@@ -1,4 +1,5 @@
 import yaml
+import hashlib
 from pathlib import Path
 from typing import Dict, Any, List
 
@@ -34,9 +35,6 @@ class ModelPathService:
             ("model_patches", "models/model_patches/"),
         ]
 
-    def is_disabled(self) -> bool:
-        """Check if external model library is disabled via config."""
-        return bool(self.app.config.get("models", {}).get("disable_external", False))
 
     def _get_yaml_path(self) -> Path:
         base = Path(self.app.config.get("paths", {}).get("comfyui_root") or ".").resolve()
@@ -61,6 +59,11 @@ class ModelPathService:
             return {}
 
     def get_external_path(self) -> str:
+        # Prefer the multi-library data model: the default library's base_path.
+        for lib in self.get_libraries():
+            if lib.get("is_default"):
+                return lib.get("base_path", "")
+        # Legacy fallback: read whatever base_path the yaml currently exposes.
         data = self.load_current_config()
         # Prefer lowercase key first per ComfyUI docs
         cfg = data.get("comfyui", {})
@@ -165,6 +168,23 @@ class ModelPathService:
             
         # Resolve to the true base path
         base_path = self._resolve_base_path(base_path)
+
+        # Backward compat: keep config.models.external_libraries[] in sync.
+        # An existing release of the launcher only knew about a single base_path
+        # via config; we mirror it into the new multi-library data model so
+        # users on older configs see no observable change after upgrading.
+        try:
+            if self.find_library_by_base_path(base_path) is None:
+                self.add_library(base_path)
+        except Exception:
+            pass
+
+        # Post-migration routing: once external_libraries has any entry, switch
+        # to the multi-library writer so the yaml stays in the new shape. The
+        # cold-start path (no libraries yet) keeps the legacy single-key write
+        # so the first migration pass can recognize and rename the key.
+        if self.get_libraries():
+            return self.apply_libraries()
 
         yp = self._get_yaml_path()
 
@@ -360,3 +380,248 @@ class ModelPathService:
 
     def get_mappings(self) -> List[tuple]:
         return list(self.standard_map)
+
+    # --- yaml round-trip (新增) ------------------------------------------
+
+    LEGACY_TOP_KEYS = ("comfyui", "ComfyUI", "mie_external")
+    TOP_KEY_PREFIX = "mie_launcher_"
+
+    def load_yaml_data(self) -> dict:
+        yp = self._get_yaml_path()
+        if not yp.exists():
+            return {}
+        try:
+            with open(yp, "r", encoding="utf-8") as f:
+                data = yaml.safe_load(f) or {}
+            return data if isinstance(data, dict) else {}
+        except Exception:
+            return {}
+
+    def _make_library_block(self, lib: dict) -> dict:
+        """Compose the dict written under a single mie_launcher_<id> key."""
+        block = {}
+        block["base_path"] = lib["base_path"]
+        if lib.get("is_default"):
+            block["is_default"] = True
+        std_mappings = self._get_standard_mappings(lib["base_path"])
+        mapped_paths = set()
+        for key, value in std_mappings:
+            block[key] = value
+            for vline in value.split("\n"):
+                mapped_paths.add(vline.strip().rstrip("/"))
+        try:
+            extras = self._collect_extra_mappings(lib["base_path"], mapped_paths)
+            for name, mapped_value in extras:
+                block[name] = mapped_value
+        except Exception:
+            pass
+        return block
+
+    def apply_libraries(self) -> bool:
+        if self.is_disabled():
+            # Honor the legacy 'disable everything' opt-in: drop mie blocks,
+            # but keep any non-managed entries the user had by hand.
+            return self._write_yaml({})
+
+        data = self.load_yaml_data()
+        # Strip any block the launcher previously wrote, legacy or not.
+        to_drop = [k for k in list(data.keys()) if k.startswith(self.TOP_KEY_PREFIX)]
+        to_drop += [k for k in list(data.keys()) if k in self.LEGACY_TOP_KEYS]
+        for k in to_drop:
+            data.pop(k, None)
+
+        libs = [l for l in self.get_libraries() if l.get("enabled")]
+        # Default block first; the rest preserve insertion order.
+        libs.sort(key=lambda l: 0 if l.get("is_default") else 1)
+
+        for lib in libs:
+            block_key = f"{self.TOP_KEY_PREFIX}{lib['id']}"
+            data[block_key] = self._make_library_block(lib)
+
+        return self._write_yaml(data)
+
+    def _write_yaml(self, data: dict) -> bool:
+        import shutil
+        yp = self._get_yaml_path()
+        # Backup once per write if the file existed before.
+        if yp.exists():
+            try:
+                shutil.copy2(yp, yp.with_suffix(".yaml.bak"))
+            except Exception as e:
+                if hasattr(self.app, "logger"):
+                    self.app.logger.warning(f"Failed to backup yaml: {e}")
+        try:
+            yp.parent.mkdir(parents=True, exist_ok=True)
+            with open(yp, "w", encoding="utf-8") as f:
+                yaml.safe_dump(data, f, allow_unicode=True, sort_keys=False,
+                               default_flow_style=False, width=4096)
+            return True
+        except Exception as e:
+            if hasattr(self.app, "logger"):
+                self.app.logger.error(f"Failed to write yaml: {e}")
+            return False
+
+    def is_disabled(self) -> bool:
+        """Whole-feature disable: legacy flag OR every library is disabled."""
+        models = self.app.config.get("models", {})
+        if bool(models.get("disable_external", False)):
+            return True
+        libs = self.get_libraries()
+        if libs and not any(l.get("enabled") for l in libs):
+            return True
+        return False
+
+    @staticmethod
+    def _library_id_for(base_path: str) -> str:
+        """Stable 8-char id derived from the absolute resolved path."""
+        try:
+            resolved = str(Path(base_path).resolve())
+        except Exception:
+            resolved = base_path
+        digest = hashlib.sha1(resolved.encode("utf-8")).hexdigest()
+        return digest[:8]
+
+    def get_libraries(self) -> list:
+        libs = self.app.config.get("models", {}).get("external_libraries")
+        if isinstance(libs, list):
+            return libs
+        return []
+
+    def _ensure_models_section(self) -> dict:
+        return self.app.config.setdefault("models", {})
+
+    def add_library(self, base_path: str, name=None) -> dict:
+        if not base_path or not base_path.strip():
+            raise ValueError("base_path is required")
+
+        libs = self.get_libraries()
+        new_id = self._library_id_for(base_path)
+        for lib in libs:
+            if lib.get("id") == new_id:
+                return lib
+
+        if name is None:
+            name = Path(base_path).name or "library"
+
+        is_default = len(libs) == 0
+
+        lib = {
+            "id": new_id,
+            "name": name,
+            "base_path": base_path,
+            "enabled": True,
+            "is_default": is_default,
+        }
+        libs.append(lib)
+        self._ensure_models_section()["external_libraries"] = libs
+        return lib
+
+    def _find_library_index(self, library_id: str) -> int:
+        libs = self.get_libraries()
+        for i, lib in enumerate(libs):
+            if lib.get("id") == library_id:
+                return i
+        return -1
+
+    def remove_library(self, library_id: str) -> bool:
+        idx = self._find_library_index(library_id)
+        if idx < 0:
+            return False
+        libs = self.get_libraries()
+        removed = libs.pop(idx)
+        if removed.get("is_default") and libs:
+            libs[0]["is_default"] = True
+        self._ensure_models_section()["external_libraries"] = libs
+        return True
+
+    def set_default_library(self, library_id: str) -> bool:
+        idx = self._find_library_index(library_id)
+        if idx < 0:
+            return False
+        libs = self.get_libraries()
+        for lib in libs:
+            lib["is_default"] = (lib.get("id") == library_id)
+        self._ensure_models_section()["external_libraries"] = libs
+        return True
+
+    def enable_library(self, library_id: str, enabled: bool = True) -> bool:
+        idx = self._find_library_index(library_id)
+        if idx < 0:
+            return False
+        libs = self.get_libraries()
+        libs[idx]["enabled"] = bool(enabled)
+        self._ensure_models_section()["external_libraries"] = libs
+        return True
+
+    def update_library(self, library_id: str, **fields) -> bool:
+        idx = self._find_library_index(library_id)
+        if idx < 0:
+            return False
+        libs = self.get_libraries()
+        lib = libs[idx]
+        for k, v in fields.items():
+            if k == "id":
+                continue
+            lib[k] = v
+        self._ensure_models_section()["external_libraries"] = libs
+        return True
+
+    def find_library_by_base_path(self, base_path: str):
+        target = self._library_id_for(base_path)
+        for lib in self.get_libraries():
+            if lib.get("id") == target:
+                return lib
+
+    def migrate_legacy_yaml(self) -> dict:
+        """
+        Adopt the legacy single-base yaml (comfyui: / ComfyUI: / mie_external:)
+        into the new external_libraries[] data model. Idempotent: a second call
+        after success is a no-op. Returns { migrated: bool, count: int }.
+        """
+        if self.get_libraries():
+            return {"migrated": False, "count": 0}
+
+        data = self.load_yaml_data()
+        if not data:
+            return {"migrated": False, "count": 0}
+
+        legacy_key = None
+        for k in ("comfyui", "ComfyUI", "mie_external"):
+            if k in data and isinstance(data[k], dict) and data[k].get("base_path"):
+                legacy_key = k
+                break
+        if legacy_key is None:
+            return {"migrated": False, "count": 0}
+
+        legacy_block = data[legacy_key]
+        base_path = legacy_block["base_path"]
+        lib = self.add_library(base_path)
+
+        # Preserve legacy block content into the new block (best effort).
+        new_block_key = f"{self.TOP_KEY_PREFIX}{lib['id']}"
+        new_block = dict(legacy_block)
+        new_block["base_path"] = base_path
+        data.pop(legacy_key, None)
+        data[new_block_key] = new_block
+
+        # Back the pre-migration yaml up under a distinct name so users can roll back.
+        try:
+            import shutil
+            yp = self._get_yaml_path()
+            if yp.exists():
+                shutil.copy2(yp, yp.with_suffix(".yaml.user_bak"))
+        except Exception:
+            pass
+
+        self._write_yaml(data)
+        # Persist external_libraries so the next cold start finds the migration.
+        try:
+            svcs = getattr(self.app, "services", None)
+            cfg_svc = getattr(svcs, "config", None) if svcs else None
+            if cfg_svc and hasattr(cfg_svc, "save"):
+                cfg_svc.save(self.app.config)
+        except Exception:
+            pass
+        return {"migrated": True, "count": 1}
+        return None
+        return lib
