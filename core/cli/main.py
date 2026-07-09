@@ -60,6 +60,10 @@ def dispatch(args, app=None) -> int:
     if app is None:
         return EXIT_ERROR
 
+    # Adopt any legacy extra_model_paths.yaml produced by older launcher builds
+    # so subsequent commands (info, status, ...) see the migrated state.
+    _ensure_model_path_migrated(app)
+
     module = _DISPATCH[command]
     try:
         return int(module.run(args, app))
@@ -85,3 +89,15 @@ def main(argv: Optional[list] = None) -> int:
 
 if __name__ == "__main__":  # pragma: no cover
     sys.exit(main())
+
+
+def _ensure_model_path_migrated(app) -> None:
+    """Migrate the legacy external-model yaml on demand. Idempotent."""
+    try:
+        svc = getattr(app, "services", None)
+        mp = getattr(svc, "model_path", None) if svc else None
+        if mp and hasattr(mp, "migrate_legacy_yaml"):
+            mp.migrate_legacy_yaml()
+    except Exception:
+        pass
+

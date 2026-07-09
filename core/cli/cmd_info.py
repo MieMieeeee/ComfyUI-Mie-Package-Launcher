@@ -61,6 +61,11 @@ def run(args, app) -> int:
         "launch_options": dict(config.get("launch_options", {})),
         "proxy_settings": dict(config.get("proxy_settings", {})),
     }
+    models_cfg = config.get("models", {})
+    data["models"] = {
+        "external_libraries": list(models_cfg.get("external_libraries", []) or []),
+        "disable_external": bool(models_cfg.get("disable_external", False)),
+    }
 
     if getattr(args, "json", False):
         print(format_json(data))

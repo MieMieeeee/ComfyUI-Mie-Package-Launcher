@@ -3,6 +3,13 @@
 `comfyui-launcher` 内置 headless 命令行模式，复用 GUI 启动 / 停止路径，
 适合配合 systemd / NSSM / 任务计划程序做开机自启 / 监控 / CI。
 
+agent / 自动化场景推荐用 **ComfyUI-CLI.cmd**（仓库根目录）：
+
+- 行为与 `ComfyUI启动器.exe <cmd>` 完全等价（参数 + 退出码透传）
+- 名字带 -CLI，对监控 / NSSM / systemd / GitHub Actions 更友好
+- 无参数调用转发到 `help`（不弹 GUI 窗口）
+- 必须和 `ComfyUI启动器.exe` 同目录
+
 ## 概览
 
 ```
@@ -154,6 +161,8 @@ comfyui-launcher info [--json]
 - `paths.*` config 里的 paths 块
 - `launch_options.*` config 里的 launch_options 块
 - `proxy_settings.*` config 里的 proxy_settings 块
+- `models.external_libraries[]` 外置模型库列表，每项含 `id / name / base_path / enabled / is_default`
+- `models.disable_external (bool)` 全局禁用手写外置模型库的旧开关（向后兼容，新逻辑以 `external_libraries[]` 的 `enabled` 为准）
 
 ### logs
 

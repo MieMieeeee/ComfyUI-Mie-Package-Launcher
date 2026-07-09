@@ -983,8 +983,9 @@ class PyQtLauncher(QtWidgets.QMainWindow, process_events.ProcessCallback):
             self.custom_browser_path.set(
                 launch_cfg.get("custom_browser_path", self.custom_browser_path.get())
             )
+            _sc_val = launch_cfg.get("show_console", True)
             self.show_console.set(
-                launch_cfg.get("show_console", True)
+                _sc_val
             )
             try:
                 self.gpu_device.set(int(launch_cfg.get("gpu_device", -1)))
@@ -1144,6 +1145,11 @@ class PyQtLauncher(QtWidgets.QMainWindow, process_events.ProcessCallback):
         self.process_manager = ProcessManager(self)
         process_events.register_callback(self)
         self.services = ServiceContainer.from_app(self)
+        # Adopt any legacy extra_model_paths.yaml produced by older launcher builds.
+        try:
+            self.services.model_path.migrate_legacy_yaml()
+        except Exception:
+            pass
         self._setup_ui()
 
     def ui_post(self, fn):
@@ -2350,6 +2356,12 @@ class PyQtLauncher(QtWidgets.QMainWindow, process_events.ProcessCallback):
         # 日志页:实时 tail ComfyUI 日志
         page_logs = LogViewerPage(theme_manager=self.theme_manager)
         self._log_viewer_page = page_logs  # 保存引用，用于后续更新显示
+        # 新日志 → nav 按钮亮红点/绿点提示;切到日志页自动清零
+        self._logs_unread_level = ""
+        try:
+            page_logs.new_logs_received.connect(self._refresh_logs_nav)
+        except Exception:
+            pass
         try:
             if hasattr(self, "big_btn"):
                 self.big_btn.attach(
@@ -4411,8 +4423,42 @@ class PyQtLauncher(QtWidgets.QMainWindow, process_events.ProcessCallback):
         except Exception:
             pass
 
+    def _refresh_logs_nav(self, level: str = ""):
+        """LogViewerPage 收到新日志 → 在「实时日志」nav 按钮上做未读提示。
 
-    def _find_plugins_page(self):
+        - level == "__viewed__" / "__cleared__":用户切到了日志页,或关掉了
+          「新日志提醒」,清掉未读标记,恢复正常标题
+        - 否则:点亮未读标记(标题前加 🟢 / 🟡 / 🔴,按收到过的最高级别)
+
+        只在用户不在日志页时提示;到了日志页(showEvent)即清零。
+        """
+        try:
+            btn_map = getattr(self, "_nav_btn_map", None) or {}
+            btn = btn_map.get("logs")
+            if btn is None:
+                return
+            base = "📋 ComfyUI 实时日志"
+            if level in ("__viewed__", "__cleared__"):
+                btn.setText(base)
+                self._logs_unread_level = ""
+                return
+            # 取「最高级别」:ERROR/CRITICAL > WARNING > 其它
+            rank = {"CRITICAL": 3, "ERROR": 3, "WARNING": 2}
+            prev = getattr(self, "_logs_unread_level", "")
+            prev_rank = rank.get(prev, 1)
+            cur_rank = rank.get(level, 1)
+            self._logs_unread_level = level if cur_rank >= prev_rank else prev
+            hi = self._logs_unread_level
+            if hi in ("ERROR", "CRITICAL"):
+                btn.setText(f"🔴 {base}")
+            elif hi == "WARNING":
+                btn.setText(f"🟡 {base}")
+            else:
+                btn.setText(f"🟢 {base}")
+        except Exception:
+            pass
+
+
         """安全拿到 plugins page（outdated_reported 回推时用），找不到返回 None。"""
         try:
             return getattr(self, "_plugins_page", None)
