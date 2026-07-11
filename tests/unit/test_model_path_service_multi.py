@@ -392,13 +392,21 @@ class TestLegacyYamlMigration:
         assert svc.migrate_legacy_yaml()["migrated"] is True
         assert svc.get_libraries()[0]["base_path"] == "E:/Models/B"
 
-    def test_no_migration_when_already_migrated(self, tmp_path):
+    def test_migrate_rehydrates_when_yaml_has_mie_block_but_config_empty(self, tmp_path):
+        """Pre-emptive update: a mie_launcher_<id> block in yaml without a matching
+        external_libraries record means the previous run only rewrote yaml.
+        migrate_legacy_yaml must rebuild the config record from the yaml so users
+        no longer see an empty library list."""
         svc, yp = self._bootstrap(
             tmp_path,
             yaml_text="mie_launcher_abc12345:\n  base_path: E:/Models/C\n")
         result = svc.migrate_legacy_yaml()
-        assert result["migrated"] is False
-        assert svc.get_libraries() == []
+        assert result["migrated"] is False  # no legacy key adopted
+        assert result["rehydrated"] == 1
+        libs = svc.get_libraries()
+        assert len(libs) == 1
+        assert libs[0]["id"] == "abc12345"
+        assert libs[0]["base_path"] == "E:/Models/C"
 
     def test_no_migration_when_yaml_missing(self, tmp_path):
         svc, _ = self._bootstrap(tmp_path)
@@ -501,4 +509,61 @@ class TestUpdateMappingMigrationRouting:
         svc = ModelPathService(app)
         svc.migrate_legacy_yaml()
         cfg_svc.save.assert_called_once()
+
+
+class TestRehydrateFromMieLauncherBlocks:
+    """
+    When yaml already contains mie_launcher_<id>: blocks (e.g. migrated
+    by an older launcher build or a manual process) but config has no
+    external_libraries records, migrate_legacy_yaml must rebuild the
+    config side from the yaml so users do not see an empty library list.
+    """
+
+    def _bootstrap(self, tmp_path, yaml_text):
+        from services.model_path_service import ModelPathService
+        app = _make_app(tmp_path)
+        comfyui_dir = tmp_path / "ComfyUI"
+        comfyui_dir.mkdir(parents=True, exist_ok=True)
+        yp = comfyui_dir / "extra_model_paths.yaml"
+        yp.write_text(yaml_text, encoding="utf-8")
+        return ModelPathService(app), yp
+
+    def test_rehydrate_single_mie_launcher_block(self, tmp_path):
+        svc, _ = self._bootstrap(tmp_path,
+            "mie_launcher_2cff1773:\n  base_path: F:/Models\n  is_default: true\n")
+        r = svc.migrate_legacy_yaml()
+        assert r["rehydrated"] == 1
+        libs = svc.get_libraries()
+        assert len(libs) == 1
+        # id must align with the block id, not a fresh path hash.
+        assert libs[0]["id"] == "2cff1773"
+        assert libs[0]["base_path"] == "F:/Models"
+        assert libs[0]["is_default"] is True
+
+    def test_rehydrate_does_not_double_when_libraries_already_populated(self, tmp_path):
+        svc, _ = self._bootstrap(tmp_path,
+            "mie_launcher_2cff1773:\n  base_path: F:/Models\n")
+        svc.add_library("F:/Models")  # seed manually with id generated for this path
+        r = svc.migrate_legacy_yaml()
+        # Libraries were non-empty at entry, no-op
+        assert r.get("migrated") is False or r.get("rehydrated", 0) == 0
+        assert len(svc.get_libraries()) == 1
+
+    def test_rehydrate_preserves_user_written_a1111_block(self, tmp_path):
+        """The yaml-level coexist rule still holds: a1111: stays untouched."""
+        svc, yp = self._bootstrap(tmp_path,
+            "a1111:\n  base_path: G:/A1111\nmie_launcher_2cff1773:\n  base_path: F:/Models\n")
+        svc.migrate_legacy_yaml()
+        data = yaml.safe_load(yp.read_text(encoding="utf-8"))
+        assert "a1111" in data
+        assert data["a1111"]["base_path"] == "G:/A1111"
+
+    def test_legacy_adoption_still_works(self, tmp_path):
+        """The original single-base adoption path remains intact."""
+        svc, _ = self._bootstrap(tmp_path,
+            "comfyui:\n  base_path: E:/Legacy\n")
+        r = svc.migrate_legacy_yaml()
+        libs = svc.get_libraries()
+        assert len(libs) == 1
+        assert libs[0]["base_path"] == "E:/Legacy"
 

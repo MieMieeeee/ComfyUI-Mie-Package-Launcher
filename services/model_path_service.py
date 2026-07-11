@@ -472,6 +472,14 @@ class ModelPathService:
         return False
 
     @staticmethod
+    def _derive_lib_name(base_path: str) -> str:
+        """Best-effort library display name from a base path."""
+        try:
+            return Path(base_path).name or "library"
+        except Exception:
+            return "library"
+
+    @staticmethod
     def _library_id_for(base_path: str) -> str:
         """Stable 8-char id derived from the absolute resolved path."""
         try:
@@ -574,54 +582,95 @@ class ModelPathService:
 
     def migrate_legacy_yaml(self) -> dict:
         """
-        Adopt the legacy single-base yaml (comfyui: / ComfyUI: / mie_external:)
-        into the new external_libraries[] data model. Idempotent: a second call
-        after success is a no-op. Returns { migrated: bool, count: int }.
+        One-shot upgrade entry point. Idempotent.
+
+        Adopts legacy single-base yaml keys (comfyui: / ComfyUI: / mie_external:)
+        into external_libraries[]. Also "rehydrates" external_libraries[] from
+        any pre-existing mie_launcher_<id>: blocks, which covers users whose
+        yaml was migrated by a previous launcher build but whose config records
+        never made it to disk (so get_libraries() returns [] even though the
+        yaml already declares a block).
+
+        Returns { migrated: bool, adopted: int, rehydrated: int }.
         """
         if self.get_libraries():
-            return {"migrated": False, "count": 0}
+            return {"migrated": False, "adopted": 0, "rehydrated": 0}
 
         data = self.load_yaml_data()
         if not data:
-            return {"migrated": False, "count": 0}
+            return {"migrated": False, "adopted": 0, "rehydrated": 0}
 
+        adopted_count = 0
+        rewritten_yaml = False
+
+        # Step 1: adopt a legacy single-base yaml key, if any.
         legacy_key = None
         for k in ("comfyui", "ComfyUI", "mie_external"):
             if k in data and isinstance(data[k], dict) and data[k].get("base_path"):
                 legacy_key = k
                 break
-        if legacy_key is None:
-            return {"migrated": False, "count": 0}
 
-        legacy_block = data[legacy_key]
-        base_path = legacy_block["base_path"]
-        lib = self.add_library(base_path)
+        if legacy_key is not None:
+            legacy_block = data[legacy_key]
+            base_path = legacy_block["base_path"]
+            lib = self.add_library(base_path)
 
-        # Preserve legacy block content into the new block (best effort).
-        new_block_key = f"{self.TOP_KEY_PREFIX}{lib['id']}"
-        new_block = dict(legacy_block)
-        new_block["base_path"] = base_path
-        data.pop(legacy_key, None)
-        data[new_block_key] = new_block
+            new_block_key = f"{self.TOP_KEY_PREFIX}{lib['id']}"
+            new_block = dict(legacy_block)
+            new_block["base_path"] = base_path
+            data.pop(legacy_key, None)
+            data[new_block_key] = new_block
 
-        # Back the pre-migration yaml up under a distinct name so users can roll back.
-        try:
-            import shutil
-            yp = self._get_yaml_path()
-            if yp.exists():
-                shutil.copy2(yp, yp.with_suffix(".yaml.user_bak"))
-        except Exception:
-            pass
+            # Back the pre-migration yaml up so users can roll back.
+            try:
+                import shutil
+                yp = self._get_yaml_path()
+                if yp.exists():
+                    shutil.copy2(yp, yp.with_suffix(".yaml.user_bak"))
+            except Exception:
+                pass
 
-        self._write_yaml(data)
-        # Persist external_libraries so the next cold start finds the migration.
-        try:
-            svcs = getattr(self.app, "services", None)
-            cfg_svc = getattr(svcs, "config", None) if svcs else None
-            if cfg_svc and hasattr(cfg_svc, "save"):
-                cfg_svc.save(self.app.config)
-        except Exception:
-            pass
-        return {"migrated": True, "count": 1}
+            rewritten_yaml = True
+            adopted_count = 1
+
+        # Step 2: rehydrate from existing mie_launcher_<id>: blocks. Each block
+        # represents a library whose config record got lost somewhere along the
+        # way (older build, manual migration, restored backup, etc.).
+        rehydrated_count = 0
+        for k in list(data.keys()):
+            if not k.startswith(self.TOP_KEY_PREFIX):
+                continue
+            block = data[k]
+            if not isinstance(block, dict):
+                continue
+            base_path = block.get("base_path")
+            if not base_path:
+                continue
+            block_id = k[len(self.TOP_KEY_PREFIX):]
+            # Skip if external_libraries already has this id (idempotent).
+            if any(l.get("id") == block_id for l in self.get_libraries()):
+                continue
+            lib = self.add_library(base_path)
+            # align id with the yaml block so apply_libraries picks the same key.
+            lib["id"] = block_id
+            lib["name"] = block.get("name") or self._derive_lib_name(base_path)
+            lib["enabled"] = True
+            lib["is_default"] = bool(block.get("is_default"))
+            rehydrated_count += 1
+
+        if adopted_count or rehydrated_count:
+            if rewritten_yaml:
+                self._write_yaml(data)
+            # Persist external_libraries so the next cold start finds the records.
+            try:
+                svcs = getattr(self.app, "services", None)
+                cfg_svc = getattr(svcs, "config", None) if svcs else None
+                if cfg_svc and hasattr(cfg_svc, "save"):
+                    cfg_svc.save(self.app.config)
+            except Exception:
+                pass
+            return {"migrated": bool(adopted_count), "adopted": adopted_count, "rehydrated": rehydrated_count}
+
+        return {"migrated": False, "adopted": 0, "rehydrated": 0}
         return None
         return lib
