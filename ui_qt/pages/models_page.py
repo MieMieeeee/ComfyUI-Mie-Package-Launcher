@@ -29,6 +29,35 @@ class ModelsPage(BasePage):
         self.library_list.setMinimumWidth(220)
         self.library_list.setSelectionMode(QtWidgets.QAbstractItemView.SingleSelection)
         self.library_list.setUniformItemSizes(True)
+        # Theme-driven colors so the items stay legible in both light and dark modes.
+        # Default PyQt palette paints near-black on the launcher's dark surfaces,
+        # which is unreadable — we set the widget stylesheet + per-item foreground.
+        c = self.theme_manager.colors
+        label_color = c.get("label")
+        label_muted_color = c.get("label_muted")
+        content_bg = c.get("content_bg")
+        sidebar_border = c.get("sidebar_border")
+        self.library_list.setStyleSheet(
+            "QListWidget {"
+            " background: " + content_bg + ";"
+            " border: 1px solid " + sidebar_border + ";"
+            " color: " + label_color + ";"
+            " padding: 4px;"
+            "}"
+            "QListWidget::item {"
+            " color: " + label_color + ";"
+            " padding: 6px 4px;"
+            "}"
+            "QListWidget::item:selected {"
+            " background: rgba(120, 110, 220, 0.35);"
+            " color: " + label_color + ";"
+            "}"
+            "QListWidget::item:hover {"
+            " background: rgba(120, 110, 220, 0.18);"
+            "}"
+        )
+        self._label_color = label_color
+        self._label_muted_color = label_muted_color
 
         self.editor_panel = self._build_editor_panel()
         self.mapping_table = StyledTableWidget(self.theme_manager.styles)
@@ -244,6 +273,9 @@ class ModelsPage(BasePage):
         flag = "" if lib.get("enabled") else " (停用)"
         item.setText(f"{prefix}{lib.get('name', '(未命名)')}{flag}")
         item.setData(QtCore.Qt.UserRole, lib["id"])
+        # Per-item foreground so the row reads regardless of palette.
+        color = self._label_muted_color if not lib.get("enabled") else self._label_color
+        item.setForeground(QtGui.QBrush(QtGui.QColor(color)))
         tip = lib.get("base_path", "")
         item.setToolTip(tip)
         self.library_list.addItem(item)
