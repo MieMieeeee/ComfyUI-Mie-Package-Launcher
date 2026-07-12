@@ -92,16 +92,22 @@ class ModelsPage(BasePage):
             f"color: {self.theme_manager.colors.get('label_muted')};"
         )
 
-        # Global yaml-management buttons. They live in _global_actions_card
-        # (top of page) rather than in the per-library editor, because they
-        # operate on the shared extra_model_paths.yaml regardless of which
-        # library is selected in the left list.
+        # Global action buttons. They live in _global_actions_card (top of page)
+        # rather than in the per-library editor, because they manage either the
+        # global library list (添加库 / 移除所选) or the shared
+        # extra_model_paths.yaml (应用更改 / 打开 yaml) or the
+        # recovery actions (仅使用内置 / 恢复配置) — none of
+        # which depend on the currently selected library.
         self._btn_save = PrimaryButton("应用更改", self.theme_manager.styles)
         self._btn_open_yaml = SecondaryButton("打开 yaml", self.theme_manager.styles)
+        self._btn_add = PrimaryButton("添加库", self.theme_manager.styles)
+        self._btn_remove = SecondaryButton("移除所选", self.theme_manager.styles)
         self._btn_builtin = PrimaryButton("仅使用内置", self.theme_manager.styles)
         self._btn_restore = PrimaryButton("恢复配置", self.theme_manager.styles)
         self._btn_save.clicked.connect(self._save_current)
         self._btn_open_yaml.clicked.connect(self._open_yaml_file)
+        self._btn_add.clicked.connect(self._on_add_library)
+        self._btn_remove.clicked.connect(self._on_remove_library)
         self._btn_builtin.clicked.connect(self._on_use_builtin_only)
         self._btn_restore.clicked.connect(self._on_restore_config)
 
@@ -113,14 +119,19 @@ class ModelsPage(BasePage):
         self.editor_panel["default_check"].toggled.connect(self._on_default_toggled)
         self.editor_panel["name_edit"].editingFinished.connect(self._on_name_changed)
         self.editor_panel["open_dir_btn"].clicked.connect(self._open_model_dir)
-        self.editor_panel["add_btn"].clicked.connect(self._on_add_library)
-        self.editor_panel["remove_btn"].clicked.connect(self._on_remove_library)
 
 
 
         # status_label is now inside _global_actions_card (top of page); it uses
         # label_muted so it does not need to be in _page_title_refs (which tracks
         # label-color widgets for theme updates).
+
+        # 移除所选 starts disabled if no library is registered yet.
+        try:
+            has_lib = bool(self._model_path and self._model_path.get_libraries())
+        except Exception:
+            has_lib = False
+        self._btn_remove.setEnabled(has_lib)
 
         # First refresh.
         try:
@@ -152,14 +163,23 @@ class ModelsPage(BasePage):
         global_layout.addWidget(self.status_label)
         global_layout.addWidget(self.mapping_hint_label)
 
-        global_btn_row = QtWidgets.QHBoxLayout()
-        global_btn_row.setSpacing(8)
-        for b in (self._btn_save, self._btn_open_yaml,
-                  self._btn_builtin, self._btn_restore):
+        # Two rows of buttons so the recovery actions (仅使用内置 /
+        # 恢复配置) sit below the daily-use actions, less prominent.
+        primary_btn_row = QtWidgets.QHBoxLayout()
+        primary_btn_row.setSpacing(8)
+        for b in (self._btn_save, self._btn_add, self._btn_remove, self._btn_open_yaml):
             b.setFixedHeight(28)
-            global_btn_row.addWidget(b)
-        global_btn_row.addStretch(1)
-        global_layout.addLayout(global_btn_row)
+            primary_btn_row.addWidget(b)
+        primary_btn_row.addStretch(1)
+        global_layout.addLayout(primary_btn_row)
+
+        recovery_btn_row = QtWidgets.QHBoxLayout()
+        recovery_btn_row.setSpacing(8)
+        for b in (self._btn_builtin, self._btn_restore):
+            b.setFixedHeight(28)
+            recovery_btn_row.addWidget(b)
+        recovery_btn_row.addStretch(1)
+        global_layout.addLayout(recovery_btn_row)
         layout.addWidget(self._global_actions_card)
 
         # Main split
@@ -214,17 +234,14 @@ class ModelsPage(BasePage):
         toggle_row.addStretch(1)
         layout.addLayout(toggle_row)
 
-        # Per-library action buttons. Global yaml-management actions
-        # (应用更改 / 打开 yaml) live in the top-of-page
-        # _global_actions_card instead, since they operate on the shared
-        # extra_model_paths.yaml regardless of which library is selected.
+        # Per-library action button. All other action buttons (添加库 /
+        # 移除所选 / 应用更改 / 打开 yaml) live in the top
+        # _global_actions_card because they manage the global library list or
+        # the shared extra_model_paths.yaml.
         action_row = QtWidgets.QHBoxLayout()
         action_row.setSpacing(8)
-        add_btn = PrimaryButton("添加库", self.theme_manager.styles)
-        remove_btn = SecondaryButton("移除所选", self.theme_manager.styles)
         open_dir_btn = SecondaryButton("打开目录", self.theme_manager.styles)
-        for b in (add_btn, remove_btn, open_dir_btn):
-            action_row.addWidget(b)
+        action_row.addWidget(open_dir_btn)
         action_row.addStretch(1)
         layout.addLayout(action_row)
 
@@ -235,8 +252,6 @@ class ModelsPage(BasePage):
             "base_path_edit": base_path_edit,
             "enable_check": enable_check,
             "default_check": default_check,
-            "add_btn": add_btn,
-            "remove_btn": remove_btn,
             "open_dir_btn": open_dir_btn,
         }
 
@@ -328,10 +343,12 @@ class ModelsPage(BasePage):
     def _populate_editor(self, lib):
         self._is_silent = True
         try:
-            # 应用更改 / 打开 yaml are global and live in
-            # _global_actions_card, so they stay enabled regardless of selection.
+            # All remaining global action buttons (应用更改 / 添加库 /
+            # 打开 yaml / 仅使用内置 / 恢复配置) live in
+            # _global_actions_card and stay enabled regardless of selection.
+            # 移除所选 needs a selection, so it is toggled here.
             per_lib_keys = ("name_edit", "base_path_edit", "enable_check", "default_check",
-                            "remove_btn", "open_dir_btn")
+                            "open_dir_btn")
             if lib is None:
                 self.editor_panel["name_edit"].setText("")
                 self.editor_panel["base_path_edit"].setText("")
@@ -339,9 +356,11 @@ class ModelsPage(BasePage):
                 self.editor_panel["default_check"].setChecked(False)
                 for k in per_lib_keys:
                     self.editor_panel[k].setEnabled(False)
+                self._btn_remove.setEnabled(False)
                 return
             for k in per_lib_keys:
                 self.editor_panel[k].setEnabled(True)
+            self._btn_remove.setEnabled(True)
             self.editor_panel["name_edit"].setText(lib.get("name", ""))
             self.editor_panel["base_path_edit"].setText(lib.get("base_path", ""))
             self.editor_panel["enable_check"].setChecked(bool(lib.get("enabled")))

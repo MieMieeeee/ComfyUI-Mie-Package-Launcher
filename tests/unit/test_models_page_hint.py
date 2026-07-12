@@ -200,10 +200,89 @@ class TestGlobalActionsCard:
             assert walker is not right_widget,                 "status_label must not be a descendant of the right split pane"
             walker = walker.parentWidget()
 
+    def test_add_library_button_is_in_global_actions_card(self, qapp, tmp_path):
+        """添加库 does not depend on which library is selected — it opens
+        a directory picker — so it belongs in _global_actions_card."""
+        page = _make_page(qapp, tmp_path)
+        add_btn = next(
+            (w for w in page.findChildren(QtWidgets.QPushButton) if w.text() == "添加库"),
+            None,
+        )
+        assert add_btn is not None, "page must have a 添加库 button"
+        editor_card = page.editor_panel["card"]
+        walker = add_btn.parentWidget()
+        while walker is not None and walker is not page:
+            assert walker is not editor_card,                 "添加库 must not live inside the per-library editor card"
+            walker = walker.parentWidget()
+        walker = add_btn.parentWidget()
+        while walker is not None and walker is not page:
+            if walker is page._global_actions_card:
+                return
+            walker = walker.parentWidget()
+        pytest.fail("添加库 must live inside _global_actions_card")
+
+    def test_remove_selected_button_is_in_global_actions_card(self, qapp, tmp_path):
+        """移除所选 manages the global library list, so it also belongs
+        in _global_actions_card (it operates on whatever is currently selected)."""
+        page = _make_page(qapp, tmp_path)
+        rm_btn = next(
+            (w for w in page.findChildren(QtWidgets.QPushButton) if w.text() == "移除所选"),
+            None,
+        )
+        assert rm_btn is not None, "page must have a 移除所选 button"
+        editor_card = page.editor_panel["card"]
+        walker = rm_btn.parentWidget()
+        while walker is not None and walker is not page:
+            assert walker is not editor_card,                 "移除所选 must not live inside the per-library editor card"
+            walker = walker.parentWidget()
+        walker = rm_btn.parentWidget()
+        while walker is not None and walker is not page:
+            if walker is page._global_actions_card:
+                return
+            walker = walker.parentWidget()
+        pytest.fail("移除所选 must live inside _global_actions_card")
+
+    def test_remove_selected_button_disabled_when_no_library(self, qapp, tmp_path):
+        """With no library selected, 移除所选 must be disabled — it cannot
+        remove nothing. 添加库 stays enabled regardless (no selection needed)."""
+        page = _make_page(qapp, tmp_path)
+        rm_btn = next(
+            (w for w in page.findChildren(QtWidgets.QPushButton) if w.text() == "移除所选"),
+            None,
+        )
+        add_btn = next(
+            (w for w in page.findChildren(QtWidgets.QPushButton) if w.text() == "添加库"),
+            None,
+        )
+        assert rm_btn is not None and add_btn is not None
+        # No library added -> nothing selected
+        page.refresh_from_config()
+        assert page.library_list.count() == 0
+        assert not rm_btn.isEnabled(), "remove-selected must be disabled when no library is selected"
+        assert add_btn.isEnabled(), "add-library must always be enabled"
+
+    def test_remove_selected_button_enabled_when_library_selected(self, qapp, tmp_path):
+        """After a library is added, 移除所选 must enable (because the
+        selection is non-empty)."""
+        page = _make_page(qapp, tmp_path)
+        rm_btn = next(
+            (w for w in page.findChildren(QtWidgets.QPushButton) if w.text() == "移除所选"),
+            None,
+        )
+        assert rm_btn is not None
+        (tmp_path / "Alpha").mkdir()
+        page._model_path.add_library(str(tmp_path / "Alpha"))
+        page.refresh_from_config()
+        assert page.library_list.count() == 1
+        # Force population of the editor card for the selected library.
+        page._populate_editor(page._find_lib_by_id(page.selected_library_id()))
+        assert rm_btn.isEnabled(), "remove-selected must be enabled when a library is selected"
+
     def test_editor_panel_drops_global_buttons(self, qapp, tmp_path):
 
-        """The per-library editor card should no longer carry 应用更改 / 打开 yaml —
-        they belong to the global actions card now."""
+
+        """The per-library editor card should now carry only 打开目录 —
+        every other action button is global and lives in _global_actions_card."""
         page = _make_page(qapp, tmp_path)
         editor = page.editor_panel
         assert "save_btn" not in editor, \
@@ -212,12 +291,15 @@ class TestGlobalActionsCard:
             "editor_panel should no longer expose open_yaml_btn (moved to global actions card)"
         # And the editor card should only contain the per-library actions.
         editor_card = editor["card"]
-        editor_buttons = [
-            w for w in editor_card.findChildren(QtWidgets.QPushButton)
-            if w.text() in ("添加库", "移除所选", "打开目录")
-        ]
-        assert len(editor_buttons) == 3, \
-            f"editor card should have 3 per-library action buttons (添加库/移除所选/打开目录), found: {[b.text() for b in editor_buttons]}"
+        editor_button_texts = [w.text() for w in editor_card.findChildren(QtWidgets.QPushButton)]
+        # Per-library only: 打开目录.
+        # Global actions must NOT leak in: 添加库 / 移除所选 / 应用更改 / 打开 yaml.
+        forbidden = {"添加库", "移除所选", "应用更改", "打开 yaml"}
+        leaked = forbidden & set(editor_button_texts)
+        assert not leaked, \
+            f"editor card leaked global buttons: {leaked} (all button texts: {editor_button_texts})"
+        assert "打开目录" in editor_button_texts, \
+            f"editor card must still contain 打开目录 (per-library), got: {editor_button_texts}"
 
 
 class TestAddLibraryDialogMentionsFolderRefresh:
