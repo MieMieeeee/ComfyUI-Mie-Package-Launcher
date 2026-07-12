@@ -73,6 +73,20 @@ class ModelsPage(BasePage):
         header.setSectionResizeMode(0, QtWidgets.QHeaderView.ResizeToContents)
         header.setSectionResizeMode(1, QtWidgets.QHeaderView.Stretch)
 
+        # Persistent hint: the mapping table is a snapshot of disk. When the user
+        # adds or removes folders inside the external library directory, the yaml
+        # needs to be rewritten via "Apply Changes" to pick them up.
+        self.mapping_hint_label = QtWidgets.QLabel(
+            "提示：在外置库目录下新建或删除子文件夹后，请点击「应用更改」刷新映射并重写 yaml。"
+        )
+        self.mapping_hint_label.setWordWrap(True)
+        self.mapping_hint_label.setStyleSheet(
+            "color: " + self.theme_manager.colors.get("label_muted") + ";"
+            " background: transparent;"
+            " font: 9pt \"Microsoft YaHei UI\";"
+            " padding-top: 4px;"
+        )
+
         self.status_label = QtWidgets.QLabel("外置模型库: 0 / 启用: 0 / 默认: -")
         self.status_label.setStyleSheet(
             f"color: {self.theme_manager.colors.get('label_muted')};"
@@ -138,6 +152,7 @@ class ModelsPage(BasePage):
         right_layout.addWidget(self.editor_panel["container"])
         mapping_card = InfoCard("映射列表", self.theme_manager.styles)
         mapping_card.layout().addWidget(self.mapping_table)
+        mapping_card.layout().addWidget(self.mapping_hint_label)
         right_layout.addWidget(mapping_card)
         right_layout.addWidget(self.status_label)
         split.addWidget(right_widget)
@@ -388,7 +403,8 @@ class ModelsPage(BasePage):
             self._save_config()
             self.select_library(lib["id"])
             self.refresh_from_config()
-            DialogHelper.show_info(self, "已添加", f"已添加库: {lib['name']}\n请重启 ComfyUI 生效。")
+            DialogHelper.show_info(self, "已添加",
+                f"已添加库: {lib['name']}\n请重启 ComfyUI 生效。\n\n后续在外置库目录下新建或删除子文件夹，\n需要再次点击「应用更改」刷新映射。")
 
     def _on_remove_library(self):
         lib_id = self.selected_library_id()
