@@ -134,6 +134,12 @@ class ModelsPage(BasePage):
         layout.addWidget(title)
         self._page_title_refs.append(title)
 
+        # Persistent refresh hint: the mapping table is a snapshot of disk,
+        # so adding / removing folders inside the external library directory
+        # requires clicking 应用更改 to refresh the table and rewrite the yaml.
+        # Placed at the top of the page so users see it before interacting.
+        layout.addWidget(self.mapping_hint_label)
+
         # Top-row legacy buttons
         btn_row = QtWidgets.QHBoxLayout()
         for b in (self._btn_builtin, self._btn_restore):
@@ -152,7 +158,6 @@ class ModelsPage(BasePage):
         right_layout.addWidget(self.editor_panel["container"])
         mapping_card = InfoCard("映射列表", self.theme_manager.styles)
         mapping_card.layout().addWidget(self.mapping_table)
-        mapping_card.layout().addWidget(self.mapping_hint_label)
         right_layout.addWidget(mapping_card)
         right_layout.addWidget(self.status_label)
         split.addWidget(right_widget)

@@ -38,7 +38,7 @@ def _make_page(qapp, tmp_path):
     return page
 
 
-class TestMappingHintLabel:
+class TestRefreshHintLabel:
     """The models page exposes a persistent hint about re-applying after folder changes."""
 
     def test_hint_label_attribute_exists(self, qapp, tmp_path):
@@ -65,15 +65,53 @@ class TestMappingHintLabel:
         assert muted in css, \
             f"hint must use label_muted color so it stays muted in any theme: {css!r}"
 
-    def test_hint_label_is_sibling_of_mapping_table(self, qapp, tmp_path):
+    def test_hint_label_is_in_page_main_layout(self, qapp, tmp_path):
+        """The hint must be in the page'"'"'s own main layout, not tucked under the
+        mapping card at the bottom. We check by walking the page'"'"'s children
+        and asserting the hint is a direct child of the page (not nested in a card)."""
         page = _make_page(qapp, tmp_path)
-        parent = page.mapping_hint_label.parentWidget()
-        assert parent is not None
-        layout = parent.layout()
-        assert layout is not None
-        items = [layout.itemAt(i).widget() for i in range(layout.count())]
-        assert page.mapping_table in items, "table must be in same parent as hint"
-        assert page.mapping_hint_label in items, "hint must be in mapping card layout"
+        hint = page.mapping_hint_label
+        # parentWidget chain: hint -> ... -> page. Assert no InfoCard in between.
+        walker = hint.parentWidget()
+        found_card = False
+        while walker is not None and walker is not page:
+            if walker.objectName() == "InfoCard":
+                found_card = True
+                break
+            walker = walker.parentWidget()
+        assert not found_card, \
+            "hint should sit at the page level, not nested inside the 映射列表 InfoCard"
+
+    def test_hint_label_sits_above_legacy_buttons(self, qapp, tmp_path):
+        """The hint should appear visually above the legacy button row
+        (仅使用内置 / 恢复配置), so users see it before they reach the editor."""
+        page = _make_page(qapp, tmp_path)
+        layout = page.layout()
+
+        # Walk both widget items and sub-layouts so we can locate the hint
+        # (a direct widget child) and btn_row (a sub-layout containing the
+        # 仅使用内置 button) by their positions in the page main VBoxLayout.
+        hint_idx = -1
+        btn_row_idx = -1
+        for i in range(layout.count()):
+            item = layout.itemAt(i)
+            if item is None:
+                continue
+            if item.widget() is page.mapping_hint_label:
+                hint_idx = i
+                continue
+            sub = item.layout()
+            if sub is not None:
+                for j in range(sub.count()):
+                    child = sub.itemAt(j).widget()
+                    if child is not None and getattr(child, "text", lambda: "")() == "仅使用内置":
+                        btn_row_idx = i
+                        break
+
+        assert hint_idx >= 0, "hint must be a direct child of the page main layout"
+        assert btn_row_idx >= 0, "legacy button row must still be present"
+        assert hint_idx < btn_row_idx, \
+            f"hint (idx {hint_idx}) must appear above the legacy button row (idx {btn_row_idx})"
 
 
 class TestAddLibraryDialogMentionsFolderRefresh:
