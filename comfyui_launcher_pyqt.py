@@ -5,6 +5,14 @@ import warnings
 # Suppress sipPyTypeDict deprecation warning
 warnings.filterwarnings("ignore", category=DeprecationWarning, message=".*sipPyTypeDict.*")
 
+# 抑制 Qt DirectWrite 字体警告。
+# Windows 高 DPI(如 150% 缩放)下 Qt 枚举系统字体时会反复尝试解析 Fixedsys /
+# Modern / MS Sans Serif / MS Serif / Roman / Script 这些旧位图字体,DirectWrite
+# 无法处理,每次刷一行 "CreateFontFaceFromHDC() failed" 警告。这些警告无害
+# (字体最终会回退到正常字体),纯粹是噪音,通过 logging rule 关掉。
+# 必须在 import PyQt5 之前设置。
+os.environ.setdefault("QT_LOGGING_RULES", "qt.qpa.fonts.warning=false")
+
 from PyQt5 import QtWidgets, QtCore, QtGui
 
 # -----------------------------------------------------------------------------

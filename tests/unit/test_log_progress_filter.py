@@ -70,6 +70,45 @@ class TestCarriageReturnCollapse(unittest.TestCase):
         self.assertEqual(len(out), 1)
         self.assertIn("2 lines collapsed", out[0])
 
+    def test_single_line_multiple_cr_keeps_only_last_segment(self):
+        """tqdm 重定向到文件时,整段进度被压在一个物理行里,
+        81 个百分比之间全是 \\r。折叠器应:
+        - 按 \\r 个数累计刷新次数(81)
+        - 只保留最后一段文本(tracking: 100%|...|81/81)
+        - 不把整条含 \\r 的超长字符串塞进标记行(原 bug:emit 2KB 乱码)
+        """
+        f = ProgressCollapseFilter()
+        # 构造 81 个 \r 分隔的进度刷新
+        segments = [f"tracking: {i}%|{'█'*(i//10)}| {i}/81" for i in range(0, 82)]
+        progress_line = "\r".join(segments)
+        out = f.feed(progress_line)
+        self.assertEqual(out, [])  # 进度行被吞,等下一行总结
+        out = f.feed("done")
+        self.assertEqual(len(out), 2)
+        marker = out[0]
+        # 计数对(81 次刷新)
+        self.assertIn("81 lines collapsed", marker)
+        # 只保留最后一段(81/81),不含前面任何百分比
+        self.assertIn("81/81", marker)
+        self.assertNotIn("0/81", marker)
+        self.assertNotIn("40/81", marker)
+        # 关键:标记行不能是 2KB 超长串(原 bug 的 repr 把整条都塞进去了)
+        self.assertLess(len(marker), 200)
+        # 不应有 repr 的单引号包裹(原文应直接拼接)
+        self.assertTrue(marker.startswith("... 81 lines collapsed: "))
+        self.assertEqual(out[1], "done")
+
+    def test_single_line_trailing_cr_does_not_emit_empty_last(self):
+        """'a\\rb\\r' 末尾空段应忽略,回到上一个非空段 'b'。"""
+        f = ProgressCollapseFilter()
+        out = f.feed("a\rb\r")
+        self.assertEqual(out, [])
+        out = f.flush()
+        self.assertEqual(len(out), 1)
+        self.assertIn("b", out[0])
+        # 不应把空串当 last
+        self.assertNotIn("collapsed: \n", out[0] + "\n")
+
 
 class TestMarkerFormat(unittest.TestCase):
     def test_marker_prefix_uses_ellipsis(self):

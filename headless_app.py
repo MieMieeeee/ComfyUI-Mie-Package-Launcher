@@ -4,11 +4,38 @@ Provides the same attribute interface as the PyQt app object.
 """
 
 import json
+import re
 import sys
 from pathlib import Path
-from typing import Any, Optional
+from typing import Any, List, Optional, Tuple
 
 from config.manager import atomic_write_json
+
+
+_ENV_VAR_KEY_RE = re.compile(r"^[A-Za-z_][A-Za-z0-9_]*$")
+
+
+def _parse_user_env_string(raw: str) -> List[Tuple[str, str]]:
+    """Parse a 'K=V, K2=V2' style string into validated (key, value) tuples.
+
+    Whitespace around each segment is tolerated. Segments without '=' or
+    with an invalid key (must match ``[A-Za-z_][A-Za-z0-9_]*``) are
+    silently dropped. Values may contain '=' and other characters; only
+    the first '=' splits key from value.
+    """
+    out: List[Tuple[str, str]] = []
+    if not raw:
+        return out
+    for segment in raw.split(","):
+        part = segment.strip()
+        if not part or "=" not in part:
+            continue
+        key, _, value = part.partition("=")
+        key = key.strip()
+        if not _ENV_VAR_KEY_RE.match(key):
+            continue
+        out.append((key, value.strip()))
+    return out
 
 
 class StringVar:
@@ -154,6 +181,7 @@ class HeadlessAppContext:
         self.disable_api_nodes = BoolVar(launch_opts.get("disable_api_nodes", False))
         self.use_new_manager = BoolVar(False)
         self.extra_launch_args = StringVar(launch_opts.get("extra_args", ""))
+        self.user_env_vars = StringVar(launch_opts.get("env_vars", ""))
         self.attention_mode = StringVar(launch_opts.get("attention_mode", ""))
         self.browser_open_mode = StringVar(
             launch_opts.get("browser_open_mode", "default")
@@ -191,6 +219,23 @@ class HeadlessAppContext:
 
         # Services object (mock)
         self._services = _NoOpServices()
+
+    def get_user_env_vars(self):
+        """Return validated [(key, value), ...] from ``self.user_env_vars``.
+
+        The raw text lives in ``self.user_env_vars`` (StringVar). This
+        method parses it through ``_parse_user_env_string`` so tests and
+        runtime callers don't have to know the syntax. Returns an empty
+        list when the attribute is missing (e.g. older HeadlessAppContext).
+        """
+        raw = getattr(self, 'user_env_vars', None)
+        if raw is None:
+            return []
+        try:
+            text = raw.get() or ''
+        except Exception:
+            return []
+        return _parse_user_env_string(text)
 
     @property
     def services(self):

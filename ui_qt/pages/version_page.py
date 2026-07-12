@@ -2,6 +2,7 @@
 内核版本管理页面
 """
 
+import threading
 from pathlib import Path
 from PyQt5 import QtWidgets, QtCore, QtGui
 from .base_page import BasePage
@@ -11,6 +12,7 @@ from ui_qt.theme_styles import ThemeStyles
 from utils import common as COMMON
 from utils.common import run_hidden
 from ui_qt.widgets.progress_dialog import ProgressDialog
+from ui_qt.background_loader import BackgroundLoader
 
 
 class VersionPage(BasePage):
@@ -259,9 +261,10 @@ class VersionPage(BasePage):
         # 延迟刷新版本信息与提交历史（避免阻塞 UI 显示）
         try:
             QtCore.QTimer.singleShot(100, self._refresh_kernel_section)
-            # 启动时立即从本地加载提交历史（不发网络请求），填充表格
-            QtCore.QTimer.singleShot(500, self._load_local_commits_background)
-            # 后台静默 fetch，不阻塞界面
+            self._setup_loaders()
+            # 本地提交历史：启动后快速加载（无网络），先填满表格
+            QtCore.QTimer.singleShot(500, self._local_loader.load_if_not_loaded)
+            # 后台静默 fetch 增强：默认 30s，可由 version_preferences.background_fetch_delay_seconds 配置
             delay_seconds = 30
             try:
                 cfg = getattr(self.app, "config", None)
@@ -271,7 +274,7 @@ class VersionPage(BasePage):
                     delay_seconds = 0
             except Exception:
                 delay_seconds = 30
-            QtCore.QTimer.singleShot(int(delay_seconds * 1000), self._background_fetch)
+            QtCore.QTimer.singleShot(int(delay_seconds * 1000), self._fetch_loader.load)
         except Exception:
             pass
 
@@ -281,6 +284,216 @@ class VersionPage(BasePage):
             self.app.save_config()
         except Exception:
             pass
+
+    # ==================== BackgroundLoader 集成 ====================
+    # 两个 loader 收编原来三个手写 threading.Thread 的 git 任务：
+    #   _local_loader：本地 git log（快，无网络）—— 原 _load_local_commits_background
+    #   _fetch_loader：fetch + git log（慢，有网络，带可选进度框）—— 原 _background_fetch / _fetch_remote_and_refresh
+    # 两者共享 _on_commits_loaded 回调：后跑的覆盖先跑的缓存，实现「先本地后远端」渐进增强。
+
+    def _run_in_bg(self, fn):
+        """丢工作线程（注入给 BackgroundLoader）。"""
+        threading.Thread(target=fn, daemon=True).start()
+
+    def _post_to_ui(self, fn):
+        """派回 UI 线程（注入给 BackgroundLoader）。复用 app.ui_post 标准入口。"""
+        try:
+            self.app.ui_post(fn)
+        except Exception:
+            QtCore.QTimer.singleShot(0, fn)
+
+    def _setup_loaders(self):
+        """构造三个 loader。_setup_ui 末尾调一次。"""
+        self._local_loader = BackgroundLoader(
+            load_fn=lambda _report: self._load_local_commits_work(),
+            on_loaded=self._on_commits_loaded,
+            run_in_background=self._run_in_bg,
+            post_to_ui=self._post_to_ui,
+            on_error=lambda e: self._log("warning", "UI: 本地提交历史加载失败: %s", e),
+        )
+        self._fetch_loader = BackgroundLoader(
+            load_fn=self._fetch_and_load_work,
+            on_loaded=self._on_commits_loaded,
+            run_in_background=self._run_in_bg,
+            post_to_ui=self._post_to_ui,
+            on_progress=self._fetch_progress,
+            on_state_change=self._fetch_state_changed,
+            on_error=self._on_fetch_error,
+        )
+        # 内核版本检测（get_current_kernel_version：4 个同步 git 子进程，必须后台跑，
+        # 否则在 _refresh_kernel_section 的 singleShot 回调里冻死主线程——曾导致启动卡 54s）
+        self._kernel_version_loader = BackgroundLoader(
+            load_fn=lambda _report: self._detect_kernel_version_work(),
+            on_loaded=self._on_kernel_version_loaded,
+            run_in_background=self._run_in_bg,
+            post_to_ui=self._post_to_ui,
+            on_error=lambda e: self._log("warning", "UI: 内核版本检测失败: %s", e),
+        )
+
+    def _log(self, level, msg, *args):
+        try:
+            logger = getattr(self.app, "logger", None)
+            if logger:
+                getattr(logger, level, logger.info)(msg, *args)
+        except Exception:
+            pass
+
+    # ---- 内核版本检测 loader（后台跑 get_current_kernel_version，不阻塞主线程）----
+    def _detect_kernel_version_work(self):
+        """后台执行体：调 version service 跑 4 个 git 子进程，返回 display 字符串。
+
+        这段在主线程跑会冻死 UI（4×timeout=10s 串行 git，遇 dubious ownership 还翻倍），
+        故必须放后台线程。与 ComfyUIVersionWorker 做的事类似，但那条路径的信号更新的是
+        comfyui_version Var（启动页用），这里专门为 version 页的 lbl_kernel_version 标签服务。
+        """
+        try:
+            if hasattr(self.app, 'services') and hasattr(self.app.services, 'version'):
+                cur = self.app.services.version.get_current_kernel_version()
+                return cur.get("display_version") or "未知"
+        except Exception as e:
+            self._log("warning", "UI: 内核版本检测异常: %s", e)
+        return "未知"
+
+    def _on_kernel_version_loaded(self, display):
+        """UI 线程回调：后台内核版本检测完成 → 更新标签。"""
+        try:
+            self.lbl_kernel_version.setText(display)
+        except Exception:
+            pass
+
+    # ---- 两个 loader 的 load_fn（后台线程执行体）----
+    def _load_local_commits_work(self):
+        """本地 git log，无网络。对应原 _load_local_commits_background 的后台逻辑。"""
+        # 更新进行中不读，避免与更新的 fetch 竞争
+        if getattr(self.app, "_update_running", False):
+            return []
+        root = self._comfyui_root()
+        if not root or not root.exists():
+            return []
+        git = getattr(self.app, 'git_path', 'git') or "git"
+        commits = self._fetch_all_commits(root, git)
+        try:
+            self._log("info", "UI: 本地提交历史加载完成: %d 条, root=%s", len(commits), root)
+        except Exception:
+            pass
+        return commits
+
+    def _fetch_and_load_work(self, report):
+        """fetch + git log，有网络。对应原 _background_fetch / _fetch_remote_and_refresh 的后台逻辑。
+
+        report(status)：透传进度文字到 UI（带进度框时显示；后台静默 fetch 时无 on_progress 则空转）。
+        保留原 run_git_network 的 blocking=False 跳过逻辑（更新占用 git 锁时 returncode==2 跳过）。
+        """
+        root = self._comfyui_root()
+        if not root or not root.exists():
+            raise RuntimeError("ComfyUI目录不存在")
+        git = getattr(self.app, 'git_path', 'git') or "git"
+        is_shallow = (root / ".git" / "shallow").exists()
+        version_svc = getattr(getattr(self.app, "services", None), "version", None)
+        report("正在执行 git fetch...")
+        if is_shallow:
+            if version_svc and hasattr(version_svc, "run_git_network"):
+                r = version_svc.run_git_network(
+                    [git, "fetch", "--unshallow"],
+                    capture_output=True, text=True, timeout=120, cwd=str(root),
+                    blocking=False, busy_message="skip background fetch: update running",
+                )
+                if getattr(r, "returncode", 0) == 2:
+                    self._log("info", "UI: 后台fetch跳过（更新占用git锁）")
+                    return []  # 跳过：不刷新缓存，保留现有数据
+            else:
+                run_hidden([git, "fetch", "--unshallow"],
+                           capture_output=True, text=True, timeout=120, cwd=str(root))
+        else:
+            if version_svc and hasattr(version_svc, "run_git_network"):
+                r = version_svc.run_git_network(
+                    [git, "fetch"],
+                    capture_output=True, text=True, timeout=30, cwd=str(root),
+                    blocking=False, busy_message="skip background fetch: update running",
+                )
+                if getattr(r, "returncode", 0) == 2:
+                    self._log("info", "UI: 后台fetch跳过（更新占用git锁）")
+                    return []
+            else:
+                run_hidden([git, "fetch"],
+                           capture_output=True, text=True, timeout=30, cwd=str(root))
+        report("正在加载提交历史...")
+        commits = self._fetch_all_commits(root, git)
+        if hasattr(self.app, "logger"):
+            self.app.logger.info("UI: git log target=origin/HEAD")
+        return commits
+
+    def _comfyui_root(self):
+        """解析 ComfyUI 代码目录（config paths.comfyui_root + /ComfyUI）。失败返回 None。"""
+        try:
+            base = Path(self.app.config.get("paths", {}).get("comfyui_root") or ".").resolve()
+            return (base / "ComfyUI").resolve()
+        except Exception:
+            return None
+
+    # ---- 两个 loader 的 on_loaded / on_error / on_progress / on_state_change（UI 线程）----
+    def _on_commits_loaded(self, commits):
+        """统一的缓存写入 + 渲染回调（两个 loader 共享）。后跑的覆盖先跑的。
+
+        用户触发（有进度框）时额外刷新版本信息；后台静默 fetch 则只填表格不打扰。
+        """
+        if commits and not getattr(self.app, "_update_running", False):
+            self._all_commits_cache = commits
+            self._commit_page = 1
+            self._load_commit_history()
+        # 仅用户触发的 fetch（有进度框）才刷新版本信息 + 后续在关框时提示完成
+        if getattr(self, "_fetch_progress_dialog", None) is not None:
+            try:
+                self._refresh_kernel_section()
+                if hasattr(self.app, 'get_version_info'):
+                    self.app.get_version_info("core_only")
+            except Exception:
+                pass
+
+    def _fetch_progress(self, status):
+        """带进度框时（用户点「刷新提交历史(远端)」）更新状态文字。后台静默 fetch 无进度框，此回调空转。"""
+        pd = getattr(self, "_fetch_progress_dialog", None)
+        if pd:
+            try:
+                pd.set_status(status)
+            except Exception:
+                pass
+
+    def _fetch_state_changed(self, loading):
+        """仅当存在进度框时开关它（用户点按钮触发的那次）。后台 fetch 不建框，此回调空转。
+
+        loading=False（加载结束）时关框；若此前未走 on_error（即成功），提示「已刷新」。
+        """
+        pd = getattr(self, "_fetch_progress_dialog", None)
+        if pd and not loading:
+            try:
+                pd.close()
+            except Exception:
+                pass
+            self._fetch_progress_dialog = None
+            # 成功提示：on_error 不会同时触发（load 成功才走 on_loaded→state=False 路径），
+            # 失败时 on_error 已关框并置 None，这里 pd 已是 None 不会重复提示。
+            from ui_qt.widgets.dialog_helper import DialogHelper
+            DialogHelper.show_info(self, "完成", "已刷新提交历史")
+
+    def _on_fetch_error(self, exc):
+        """fetch 失败：关进度框（若有）并提示。后台静默 fetch 失败则静默（不弹框打扰）。"""
+        pd = getattr(self, "_fetch_progress_dialog", None)
+        had_dialog = pd is not None
+        if pd:
+            try:
+                pd.close()
+            except Exception:
+                pass
+            self._fetch_progress_dialog = None
+        if had_dialog:
+            try:
+                from ui_qt.widgets.dialog_helper import DialogHelper
+                DialogHelper.show_warning(self, "失败", str(exc))
+            except Exception:
+                pass
+        else:
+            self._log("warning", "UI: 后台fetch失败: %s", exc)
 
     def _upgrade_latest(self):
         """更新到最新版本"""
@@ -377,172 +590,28 @@ class VersionPage(BasePage):
             DialogHelper.show_warning(self, "切换失败", str(e))
 
     def _fetch_remote_and_refresh(self):
-        """从远程刷新提交历史"""
-        # 显示进度对话框
-        progress = ProgressDialog(parent=self, title="刷新提交历史中", theme_manager=self.theme_manager)
-        progress.set_status("正在从远程获取提交历史...")
-        progress.set_progress(0, maximum=0)
-        progress.show()
+        """从远程刷新提交历史（用户点「刷新提交历史(远端)」按钮）。
 
-        try:
+        走 _fetch_loader.load()（带进度框）：建进度框 → 触发后台 fetch+log →
+        on_progress 更新状态 → on_loaded 填表格 → on_state_change(False) 关框 + 提示完成。
+        与启动时的后台静默 fetch 共用同一个 loader（防重入：二者只跑一个）。
+        """
+        # 兜底校验：目录不存在直接提示，不进 loader（loader 的 on_error 也会兜，但这里更早）
+        root = self._comfyui_root()
+        if not root or not root.exists():
             from ui_qt.widgets.dialog_helper import DialogHelper
-            base = Path(self.app.config.get("paths", {}).get("comfyui_root") or ".").resolve()
-            root = (base / "ComfyUI").resolve()
-            if not root.exists():
-                progress.close()
-                DialogHelper.show_warning(self, "失败", "ComfyUI目录不存在")
-                return
-
-            # Fetch（若是浅克隆则补全），完成后重新加载缓存
-            progress.set_status("正在执行 git fetch...")
-            if hasattr(self.app, "logger"):
-                self.app.logger.info("UI: 正在执行 git fetch...")
-            git = getattr(self.app, 'git_path', 'git') or "git"
-            is_shallow = (root / ".git" / "shallow").exists()
-            version_svc = getattr(getattr(self.app, "services", None), "version", None)
-            if is_shallow:
-                if version_svc and hasattr(version_svc, "run_git_network"):
-                    version_svc.run_git_network(
-                        [git, "fetch", "--unshallow"],
-                        cwd=str(root),
-                        timeout=120,
-                    )
-                else:
-                    run_hidden([git, "fetch", "--unshallow"], cwd=str(root))
-            else:
-                if version_svc and hasattr(version_svc, "run_git_network"):
-                    version_svc.run_git_network(
-                        [git, "fetch"],
-                        cwd=str(root),
-                        timeout=30,
-                    )
-                else:
-                    run_hidden([git, "fetch"], cwd=str(root))
-
-            # 重新加载全部 commits 到缓存
-            self._all_commits_cache = self._fetch_all_commits(root, git)
-            self._commit_page = 1
-
-            # Refresh info
-            progress.set_status("正在刷新表格...")
-            self._refresh_kernel_section()
-
-            # Trigger version check
-            if hasattr(self.app, 'get_version_info'):
-                self.app.get_version_info("core_only")
-
-            progress.close()
-            DialogHelper.show_info(self, "完成", "已刷新提交历史")
-        except Exception as e:
-            progress.close()
-            DialogHelper.show_warning(self, "失败", str(e))
-
-    def _load_local_commits_background(self):
-        """后台加载本地提交历史（不发网络请求），启动时立即填充表格"""
-        if self._all_commits_cache:
+            DialogHelper.show_warning(self, "失败", "ComfyUI目录不存在")
             return
-        import threading
 
-        def _bg():
-            try:
-                # 更新进行中不写缓存，避免覆盖更新后的数据
-                if getattr(self.app, "_update_running", False):
-                    return
-                base = Path(self.app.config.get("paths", {}).get("comfyui_root") or ".").resolve()
-                root = (base / "ComfyUI").resolve()
-                if not root.exists():
-                    return
-                git = getattr(self.app, 'git_path', 'git') or "git"
-                commits = self._fetch_all_commits(root, git)
-                try:
-                    if hasattr(self.app, "logger"):
-                        self.app.logger.info(
-                            "UI: 本地提交历史加载完成: %d 条, root=%s",
-                            len(commits), root
-                        )
-                except Exception:
-                    pass
-                if commits and not self._all_commits_cache and not getattr(self.app, "_update_running", False):
-                    self._all_commits_cache = commits
-                    QtCore.QTimer.singleShot(0, self._on_cache_loaded)
-            except Exception as e:
-                try:
-                    if hasattr(self.app, "logger"):
-                        self.app.logger.warning("UI: 本地提交历史加载失败: %s", e)
-                except Exception:
-                    pass
+        # 建进度框，挂到实例字段供 loader 的 on_progress/on_state_change 回调操作。
+        # _on_commits_loaded / _fetch_state_changed 据「有无进度框」区分用户触发 vs 后台静默。
+        self._fetch_progress_dialog = ProgressDialog(
+            parent=self, title="刷新提交历史中", theme_manager=self.theme_manager)
+        self._fetch_progress_dialog.set_status("正在从远程获取提交历史...")
+        self._fetch_progress_dialog.set_progress(0, maximum=0)
+        self._fetch_progress_dialog.show()
 
-        threading.Thread(target=_bg, daemon=True).start()
-
-    def _background_fetch(self):
-        """后台 fetch 并预填充本地缓存，完成后刷新 UI"""
-        import threading
-
-        def _bg():
-            try:
-                base = Path(self.app.config.get("paths", {}).get("comfyui_root") or ".").resolve()
-                root = (base / "ComfyUI").resolve()
-                if not root.exists():
-                    return
-                git = getattr(self.app, 'git_path', 'git') or "git"
-                is_shallow = (root / ".git" / "shallow").exists()
-                version_svc = getattr(getattr(self.app, "services", None), "version", None)
-                if is_shallow:
-                    if version_svc and hasattr(version_svc, "run_git_network"):
-                        r = version_svc.run_git_network(
-                            [git, "fetch", "--unshallow"],
-                            capture_output=True,
-                            text=True,
-                            timeout=120,
-                            cwd=str(root),
-                            blocking=False,
-                            busy_message="skip background fetch: update running",
-                        )
-                        if getattr(r, "returncode", 0) == 2:
-                            if hasattr(self.app, "logger"):
-                                self.app.logger.info("UI: 后台fetch跳过（更新占用git锁）")
-                            return
-                    else:
-                        run_hidden(
-                            [git, "fetch", "--unshallow"],
-                            capture_output=True,
-                            text=True,
-                            timeout=120,
-                            cwd=str(root),
-                        )
-                else:
-                    if version_svc and hasattr(version_svc, "run_git_network"):
-                        r = version_svc.run_git_network(
-                            [git, "fetch"],
-                            capture_output=True,
-                            text=True,
-                            timeout=30,
-                            cwd=str(root),
-                            blocking=False,
-                            busy_message="skip background fetch: update running",
-                        )
-                        if getattr(r, "returncode", 0) == 2:
-                            if hasattr(self.app, "logger"):
-                                self.app.logger.info("UI: 后台fetch跳过（更新占用git锁）")
-                            return
-                    else:
-                        run_hidden(
-                            [git, "fetch"],
-                            capture_output=True,
-                            text=True,
-                            timeout=30,
-                            cwd=str(root),
-                        )
-
-                # 加载全部 commits 到缓存
-                commits = self._fetch_all_commits(root, git)
-                self._all_commits_cache = commits
-                # 回到 UI 线程刷新表格
-                QtCore.QTimer.singleShot(0, self._on_cache_loaded)
-            except Exception:
-                pass
-
-        threading.Thread(target=_bg, daemon=True).start()
+        self._fetch_loader.load()
 
     def _fetch_all_commits(self, root, git):
         """从本地 git 仓库获取全部提交记录"""
@@ -613,11 +682,6 @@ class VersionPage(BasePage):
         commits.sort(key=lambda c: c[1], reverse=True)
         return commits
 
-    def _on_cache_loaded(self):
-        """缓存加载完成后刷新 UI（必须在 UI 线程调用）"""
-        self._commit_page = 1
-        self._load_commit_history()
-
     def showEvent(self, event):
         """页面切换到前台时，若缓存有数据但表格为空则刷新"""
         super().showEvent(event)
@@ -639,22 +703,26 @@ class VersionPage(BasePage):
             self._load_commit_history()
 
     def _refresh_kernel_section(self, force_remote=False):
-        """刷新版本信息"""
+        """刷新内核版本信息 + 提交历史表格。
+
+        内核版本检测（get_current_kernel_version：4 个同步 git 子进程）丢后台 loader，
+        不在主线程跑——否则 singleShot 回调里会冻死 UI（曾导致启动卡 54s）。
+        提交历史渲染从内存缓存读，纯 CPU，留主线程（快）。
+        """
+        # 内核版本 → 后台检测，结果经 _on_kernel_version_loaded 回设标签
         try:
-            if hasattr(self.app, 'services') and hasattr(self.app.services, 'version'):
-                cur = self.app.services.version.get_current_kernel_version()
-                self.lbl_kernel_version.setText(cur.get("display_version") or "未知")
+            self._kernel_version_loader.load()
         except Exception:
             pass
 
-        # 加载提交历史（始终优先使用远端）
+        # 加载提交历史（始终优先使用远端）—— 从内存缓存渲染，不阻塞
         self._load_commit_history()
 
     def _load_commit_history(self):
         """从本地缓存加载提交历史（fetch 已预填充缓存）"""
         all_commits = self._all_commits_cache
         if not all_commits:
-            # 缓存尚未加载，等待 fetch 完成后的 _on_cache_loaded 刷新
+            # 缓存尚未加载，等待 loader 的 _on_commits_loaded 回调刷新
             return
 
         total = len(all_commits)

@@ -2539,7 +2539,10 @@ class PyQtLauncher(QtWidgets.QMainWindow, process_events.ProcessCallback):
             if _log_path.parent.exists() or _log_path.parent.parent.exists():
                 # log 文件或父目录存在才启动;否则连 user/ 都不存在
                 page_logs.set_log_path(_log_path)
-                page_logs.start_tailing(start_from_beginning=True)  # 打开页面时显示已有历史,之后跟随新行
+                # 启动时只从文件末尾跟随新行(start_from_beginning=False),不读历史——
+                # 避免把数万行历史一次性灌进主线程冻死 UI。历史在用户首次切到日志页时
+                # 由 showEvent → _load_recent_history 按需读最近 N 行回填。
+                page_logs.start_tailing(start_from_beginning=False)
             else:
                 page_logs._path_label.setText("(ComfyUI 目录不存在: " + str(_log_path) + ")")
         except Exception as _e:
@@ -2573,8 +2576,17 @@ class PyQtLauncher(QtWidgets.QMainWindow, process_events.ProcessCallback):
                 page_plugins.update_all_btn.clicked.connect(self._do_plugin_update_all)
             except Exception:
                 pass
-            # 启动后稍延迟首次拉取已装列表
-            QtCore.QTimer.singleShot(800, page_plugins.refresh_requested.emit)
+            # 启动后兜底扫描已装列表：延迟 15s，让窗口出现 + 版本检测 + 用户点启动等
+            # 高优先级先跑。若用户这期间已切到插件页（showEvent 触发过），loader 会跳过。
+            # 「切到插件页才扫 + 一直没进去就兜底扫」—— 启动主流程不碰 custom_nodes 的 git。
+            def _plugin_fallback_scan():
+                try:
+                    loader = getattr(self._plugin_controller, "_loader", None)
+                    if loader:
+                        loader.load_if_not_loaded()
+                except Exception:
+                    pass
+            QtCore.QTimer.singleShot(15000, _plugin_fallback_scan)
         except Exception:
             self._plugin_controller = None
 

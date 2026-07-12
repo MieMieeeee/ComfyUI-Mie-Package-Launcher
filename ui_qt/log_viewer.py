@@ -1,5 +1,8 @@
 """实时日志查看器:日志解析、进度折叠、文件 tail。"""
+import os
+import platform
 import re
+import subprocess
 import threading
 from pathlib import Path
 from typing import Callable, List, Tuple
@@ -8,6 +11,84 @@ from typing import Callable, List, Tuple
 _TIMESTAMP_RE = re.compile(
     r"^\[?(\d{4}-\d{2}-\d{2} \d{2}:\d{2}:\d{2}(?:[.,]\d+)?)\]? (.*)$"
 )
+
+
+# ANSI SGR 颜色码 → CSS 颜色(对应 8 色 + 亮色变体)。
+# ComfyUI / tqdm 重定向到文件时会保留 ESC[...m 序列(如 \x1b[32m 绿色)。
+# 解析后转成 <span style="color:..."> 片段,QTextBrowser 渲染时上色。
+_ANSI_PALETTE = {
+    30: "#000000", 31: "#cc0000", 32: "#4e9a06", 33: "#c4a000",
+    34: "#3465a4", 35: "#75507b", 36: "#06989a", 37: "#d3d7cf",
+    90: "#555753", 91: "#ef2929", 92: "#8ae234", 93: "#fce94f",
+    94: "#729fcf", 95: "#ad7fa8", 96: "#34e2e2", 97: "#eeeeec",
+}
+# 匹配 ANSI/VT100 转义序列(CSI): \x1b[ ... <字母>
+# 含 SGR 颜色码、光标移动、清屏等;非 SGR 的统一剥离掉(它们在重定向文件里
+# 没意义,留着只会让日志变成乱码)。
+_ANSI_ESCAPE_RE = re.compile(r"\x1b\[[0-9;]*[A-Za-z]")
+
+# 只剥掉非 SGR 的 CSI(光标移动/清屏: 末字母不是 m 的)。SGR(m 结尾)单独处理,
+# 因为要按颜色码上色。
+_NON_SGR_CSI_RE = re.compile(r"\x1b\[[0-9;]*[A-Za-ln-z]")
+# SGR 序列(以 m 结尾)
+_SGR_RE = re.compile(r"\x1b\[([0-9;]*)m")
+
+
+def ansi_to_html(text: str, default_color: str = "") -> str:
+    """把带 ANSI SGR 颜色码的文本转成带 <span style=color:...> 的 HTML 片段。
+
+    - 非 SGR 的 ANSI 转义序列(光标移动/清屏等)直接剥离
+    - HTML 转义先做(避免 < > & 被当标签)
+    - 嵌套 span 用闭合/重开实现;ANSI reset (\\x1b[0m) 关掉当前 span
+    """
+    # 先 HTML 转义,再处理 ANSI(否则 ANSI 处理里插入的 < 会被转义)
+    safe = (
+        text.replace("&", "&amp;").replace("<", "&lt;").replace(">", "&gt;")
+    )
+    # 1) 剥掉所有非 SGR 的 CSI(光标移动/清屏等)
+    safe = _NON_SGR_CSI_RE.sub("", safe)
+
+    out = []
+    open_span = False
+    pos = 0
+    for m in _SGR_RE.finditer(safe):
+        # m 之前的纯文本
+        out.append(safe[pos:m.start()])
+        pos = m.end()
+        codes = m.group(1)
+        # 解析 SGR 参数
+        parts = [c for c in codes.split(";") if c] if codes else []
+        # 关掉旧 span
+        if open_span:
+            out.append("</span>")
+            open_span = False
+        # 0 或空 = reset;其它非颜色码(bold=1 等)也按 reset 处理(简单起见)
+        color = None
+        if parts and parts != ["0"]:
+            for p in parts:
+                try:
+                    code = int(p)
+                except ValueError:
+                    continue
+                if code == 0:
+                    color = None
+                    break
+                if code in _ANSI_PALETTE:
+                    color = _ANSI_PALETTE[code]
+                    break
+        if color is not None:
+            out.append(f'<span style="color:{color};">')
+            open_span = True
+    # 末尾剩余文本
+    out.append(safe[pos:])
+    if open_span:
+        out.append("</span>")
+    return "".join(out)
+
+
+def strip_ansi(text: str) -> str:
+    """剥掉所有 ANSI 转义序列(给纯文本路径用,如 level 检测)。"""
+    return _ANSI_ESCAPE_RE.sub("", text)
 
 
 def parse_log_entry(line: str) -> Tuple[str, str]:
@@ -38,7 +119,37 @@ class LogTailer:
     """
 
     _POLL_INTERVAL = 0.05  # 50ms
-    _PEEK_BYTES = 4096     # 轮转检测时读这么多字节找首行
+
+    @staticmethod
+    def _open_shared(path):
+        """以共享只读模式打开文件,允许其它进程 rename/write/delete 同名文件。
+
+        Windows 上默认 open("rb") 的 share mode 不含 FILE_SHARE_DELETE,
+        会阻止 ComfyUI-Manager 的日志轮转(rename comfyui.log → comfyui.prev.log)
+        报 PermissionError [WinError 32]。用 CreateFile 指定全套 share flags
+        解决。其它平台直接 open。
+        """
+        if os.name != "nt":
+            return open(path, "rb")
+        import ctypes
+        from ctypes import wintypes
+        # FILE_SHARE_READ | FILE_SHARE_WRITE | FILE_SHARE_DELETE = 0x7
+        # OPEN_EXISTING = 3, GENERIC_READ = 0x80000000
+        # FILE_ATTRIBUTE_NORMAL = 0x80
+        k32 = ctypes.windll.kernel32
+        CreateFileW = k32.CreateFileW
+        CreateFileW.restype = wintypes.HANDLE
+        CreateFileW.argtypes = [
+            wintypes.LPCWSTR, wintypes.DWORD, wintypes.DWORD,
+            ctypes.c_void_p, wintypes.DWORD, wintypes.DWORD, wintypes.HANDLE,
+        ]
+        handle = CreateFileW(str(path), 0x80000000, 0x7, None, 3, 0x80, None)
+        if handle == -1 or handle == ctypes.c_void_p(-1).value:
+            raise OSError(f"CreateFileW failed for {path}")
+        # 把 Windows HANDLE 转成 C fd,再包成 Python file object
+        import msvcrt
+        fd = msvcrt.open_osfhandle(handle, 0)  # 0 = O_RDONLY
+        return os.fdopen(fd, "rb")
 
     def __init__(
         self,
@@ -77,18 +188,6 @@ class LogTailer:
     def is_alive(self) -> bool:
         return self._thread is not None and self._thread.is_alive()
 
-    def _read_first_line(self, f) -> bytes:
-        """从当前位置 peek 首行字节(seek 到 0 后读)。"""
-        try:
-            f.seek(0)
-            data = f.read(self._PEEK_BYTES)
-        except OSError:
-            return b""
-        nl = data.find(b"\n")
-        if nl >= 0:
-            return data[:nl]
-        return data
-
     def _run(self) -> None:
         path = self._path
         # 等待文件出现
@@ -99,7 +198,7 @@ class LogTailer:
         if self._stop_event.is_set():
             return
         try:
-            f = open(path, "rb")
+            f = self._open_shared(path)
         except OSError:
             return
         try:
@@ -110,22 +209,36 @@ class LogTailer:
                 f.seek(0, 2)
                 position = f.tell()
             self._buffer = b""
-            self._first_line = self._read_first_line(f)
+            # 记录打开时的文件实体标识(inode),用于轮转检测
+            opened_key = self._file_key(path)
             while not self._stop_event.is_set():
-                try:
-                    size = path.stat().st_size
-                except OSError:
-                    size = position
-                # 轮转检测:对比首行
-                current_first = self._read_first_line(f)
-                if current_first != self._first_line:
+                # 轮转检测:对比当前路径下文件的标识与打开时的标识
+                # - file_key 变化(st_dev+st_ino):文件被重命名后新建
+                #   (ComfyUI-Manager 的轮转:comfyui.log → comfyui.prev.log + 新建)
+                # - position > 当前文件 size:同一个文件被 truncate(open("w") 清空重写),
+                #   旧的读取位置已经超出新文件末尾,继续读只会读到空/错位的内容
+                # 任一情况都要重新 open 文件(或 seek 回 0),否则旧 fd 还指向被重命名的
+                # 旧文件,永远读不到新内容。注意:正常 append(size 增长)不算轮转。
+                current_key = self._file_key(path)
+                current_size = self._file_size(path)
+                rotated = False
+                if current_key and opened_key and current_key != opened_key:
+                    rotated = True
+                elif current_size is not None and position > current_size:
+                    rotated = True
+                if rotated:
                     try:
-                        f.seek(0)
+                        f.close()
+                    except Exception:
+                        pass
+                    try:
+                        f = self._open_shared(path)
                     except OSError:
                         return
                     position = 0
                     self._buffer = b""
-                    self._first_line = current_first
+                    opened_key = self._file_key(path)
+                    # 立即 fallthrough 读新文件内容
                 f.seek(position)
                 chunk = f.read()
                 if chunk:
@@ -152,45 +265,139 @@ class LogTailer:
             except Exception:
                 pass
 
+    @staticmethod
+    def _file_key(path) -> tuple:
+        """文件实体标识 (st_dev, st_ino)。
+
+        用于检测「同名文件被替换」(重命名 + 新建同名)。
+        - Unix: 重命名 + 新建后 inode 变化 → key 变化 → 触发重 open
+        - Windows: 文件被替换后 st_ino 通常也会变化(ntfs/generational),
+          即使部分 fs 返回 0,组合 st_dev 仍有区分度
+        不含 mtime/size:正常追加也会改这两个,不能用来判断轮转。
+        路径不存在 / stat 失败返回 ()。
+        """
+        try:
+            st = path.stat()
+            return (st.st_dev, st.st_ino)
+        except OSError:
+            return ()
+
+    @staticmethod
+    def _file_size(path):
+        try:
+            return path.stat().st_size
+        except OSError:
+            return None
+
+
+def read_tail_lines(path, n: int) -> List[str]:
+    """读文件最后 n 行(已剥 \r、UTF-8 解码)。文件不存在/为空返回 []。
+
+    用 deque(maxlen=n) 从头扫,只保留最后 n 行——对大文件(数万行)也是线性单遍,
+    不会把整个文件读进内存。供 LogViewerPage 首次进入时按需加载最近历史用。
+    """
+    from collections import deque
+    p = Path(path)
+    if not p.exists():
+        return []
+    buf = deque(maxlen=n)
+    with LogTailer._open_shared(p) as f:
+        chunk = b""
+        while True:
+            data = f.read(65536)
+            if not data:
+                break
+            chunk += data
+            while True:
+                idx = chunk.find(b"\n")
+                if idx < 0:
+                    break
+                line_bytes = chunk[:idx]
+                if line_bytes.endswith(b"\r"):
+                    line_bytes = line_bytes[:-1]
+                buf.append(line_bytes.decode("utf-8", errors="replace"))
+                chunk = chunk[idx + 1:]
+    return list(buf)
+
+
 class ProgressCollapseFilter:
-    """折叠 ComfyUI 日志中连续的 \r 进度行(典型来源:tqdm 进度条)。
+    """折叠 ComfyUI 日志中含 \\r 的进度刷新(典型来源:tqdm 进度条)。
 
-    tqdm 写到 conhost 时用 \r 重写同一行;重定向到文件时,每个百分比都
-    变成独立的一行(带 \r 字符)。直接 tail 这种文件会让 UI 滚动条
-    长到几百行。折叠器把连续 \r 行合并成一个标记行,只保留最后一行
-    原文,UI 显示为 "... N lines collapsed: <last>"。
+    tqdm 在 conhost 里用 \\r 重写同一行做进度动画;重定向到文件时,这些
+    \\r 刷新都被保留下来,有两种物理形态:
 
-    API 是流式的,每次 feed 一行,返回 emit 的行列表(0/1/2 行)。
-    调用方应该把所有 emit 行原样追加到 UI 控件。
+    1. **多行形态**:每个百分比占一行(行尾的 \\r 被 LogTailer 剥掉),
+       连续 N 行都是进度刷新。
+    2. **单行多刷新形态**(bug 场景):整段进度被压在了一个物理行里,
+       81 个百分比之间全是 \\r,只有最后一个 \\n 才换行。一行就有 80 个 \\r。
+
+    直接 tail 会把进度动画展开成长长的滚动条 / 一坨超长字符串。
+    折叠器把含 \\r 的内容当「同一进度的多次刷新」,只保留最后一次刷新的
+    文本,显示为简洁标记行: "... N lines collapsed: <last>"。
+
+    API 是流式的,每次 feed 一行(已去掉末尾换行),返回 emit 的行列表。
+    调用方把所有 emit 行原样追加到 UI 控件。
     """
 
     def __init__(self) -> None:
-        self._cr_count: int = 0
-        self._last_cr: str = ""
+        self._refresh_count: int = 0       # 累计的进度刷新次数(\r 个数)
+        self._last_refresh: str = ""       # 最后一次刷新的文本(已剥多余 \r)
+
+    @staticmethod
+    def _last_segment(line: str) -> str:
+        """从含 \\r 的行里取出最后一段(最后一次刷新的文本)。
+
+        "a\\rb\\rc" → "c"; "a\\rb\\r" → "a"(末尾空段忽略,回到上一个非空)。
+        全空段时返回空串。
+        """
+        # 按 \r 切,从后往前找第一个非空段
+        for seg in reversed(line.split("\r")):
+            if seg:
+                return seg
+        return ""
 
     def feed(self, line: str) -> List[str]:
         """输入一行,返回 emit 的行列表。"""
-        if "\r" in line:
-            self._cr_count += 1
-            self._last_cr = line
-            return []
-        if self._cr_count > 0:
-            count = self._cr_count
-            last = self._last_cr
-            self._cr_count = 0
-            self._last_cr = ""
-            return [f"... {count} lines collapsed: {last!r}", line]
-        return [line]
+        if "\r" not in line:
+            # 普通行:如果之前在折叠进度,先吐一个总结标记行,再吐本行
+            if self._refresh_count > 0:
+                count = self._refresh_count
+                last = self._last_refresh
+                self._refresh_count = 0
+                self._last_refresh = ""
+                return [self._summary(count, last), line]
+            return [line]
+        # 含 \r 的进度行:累计刷新次数,只记最后一次刷新文本
+        # 一行里多个 \r 算多次刷新(\r 个数 = 段数 - 1)
+        n_refresh_in_line = line.count("\r")
+        self._refresh_count += n_refresh_in_line
+        last_seg = self._last_segment(line)
+        if last_seg:
+            self._last_refresh = last_seg
+        # 进度刷新吞掉,不立即 emit(等遇到普通行或 flush 再总结)
+        return []
 
     def flush(self) -> List[str]:
-        """文件结束 / 停止 tail 时调用,返回剩余的折叠标记。"""
-        if self._cr_count > 0:
-            count = self._cr_count
-            last = self._last_cr
-            self._cr_count = 0
-            self._last_cr = ""
-            return [f"... {count} lines collapsed: {last!r}"]
+        """文件结束 / 停止 tail 时调用,返回剩余的折叠总结。"""
+        if self._refresh_count > 0:
+            count = self._refresh_count
+            last = self._last_refresh
+            self._refresh_count = 0
+            self._last_refresh = ""
+            return [self._summary(count, last)]
         return []
+
+    @classmethod
+    def _summary(cls, count: int, last: str) -> str:
+        """生成折叠总结行。
+
+        last 是最后一次刷新的原文(如 'tracking: 100%|████| 81/81')。
+        不用 repr()——repr 会把整串(含 unicode 块字符)包成乱码;
+        直接拼原文,UI 能正确渲染,保存为纯文本也干净。
+        """
+        if last:
+            return f"... {count} lines collapsed: {last}"
+        return f"... {count} lines collapsed"
 
 try:
     from PyQt5 import QtCore, QtGui, QtWidgets
@@ -206,52 +413,21 @@ if _HAS_QT:
 
 
     class LogViewerPage(QtWidgets.QWidget):
-        _LEVEL_COLORS_DARK = {
-            "DEBUG": "#888888",
-            "INFO": "#cccccc",
-            "WARNING": "#f0c674",
-            "ERROR": "#ff6b6b",
-            "CRITICAL": "#ff6b6b",
-        }
-        _LEVEL_COLORS_LIGHT = {
-            "DEBUG": "#666666",
-            "INFO": "#333333",
-            "WARNING": "#b07a00",
-            "ERROR": "#cc0000",
-            "CRITICAL": "#cc0000",
-        }
-        _TIMESTAMP_COLOR_DARK = "#666666"
-        _TIMESTAMP_COLOR_LIGHT = "#888888"
+        # 实时日志收到新内容时发此信号(level=DEBUG/INFO/WARNING/ERROR/CRITICAL),
+        # 主窗口据此在 nav 按钮上亮一个红点 badge,提示用户有未读日志。
+        # 仅当用户当前不在「日志页」时才需要提示。
+        new_logs_received = QtCore.pyqtSignal(str)
+
+        # level 仅用于未读红点级别判定(ERROR>WARNING>其它),不再参与日志文本着色
+        # (纯文本模式,移除了颜色标识以避免逐行 charFormat 的 O(n²) 富文本布局开销)。
         _LEVEL_RE = re.compile(r"\[(DEBUG|INFO|WARNING|ERROR|CRITICAL)\]")
 
         @classmethod
         def _detect_level(cls, body: str) -> str:
-            """从 body 抽 [LEVEL] 标记;找不到默认 INFO。"""
+            """从 body 抽 [LEVEL] 标记(仅用于未读红点级别);找不到默认 INFO。"""
             m = cls._LEVEL_RE.search(body)
             return m.group(1) if m else "INFO"
 
-        @classmethod
-        def _format_line_html(cls, line: str, is_dark: bool = True) -> str:
-            """返回带颜色 HTML 片段;空行返回空串。"""
-            if not line:
-                return ""
-            ts, body = parse_log_entry(line)
-            safe_body = (
-                body.replace("&", "&amp;").replace("<", "&lt;").replace(">", "&gt;")
-            )
-            safe_ts = (
-                ts.replace("&", "&amp;").replace("<", "&lt;").replace(">", "&gt;")
-            ) if ts else ""
-            level = cls._detect_level(body)
-            palette = cls._LEVEL_COLORS_DARK if is_dark else cls._LEVEL_COLORS_LIGHT
-            level_color = palette.get(level, palette["INFO"])
-            ts_color = cls._TIMESTAMP_COLOR_DARK if is_dark else cls._TIMESTAMP_COLOR_LIGHT
-            if ts:
-                return (
-                    f'<span style="color:{ts_color};">{safe_ts}</span> '
-                    f'<span style="color:{level_color};">{safe_body}</span>'
-                )
-            return f'<span style="color:{level_color};">{safe_body}</span>'
 
 
         """实时 tail ComfyUI 日志的可滚动只读视图。
@@ -273,7 +449,61 @@ if _HAS_QT:
             self._filter = ProgressCollapseFilter()
             self._paused = False
             self._log_path = None  # type: Path | None
+            # 自用户上次「看到」日志页后是否有新内容;页面可见时为 False。
+            # 配合 new_logs_received 信号,主窗口在 nav 按钮亮红点提示。
+            self._unread_since_view = False
+            # 历史日志按需加载:启动时 tailer 只从末尾跟随新行(start_from_beginning=False),
+            # 用户首次切到本页时才读最近 N 行填充。避免启动时把数万行历史灌进主线程冻死 UI。
+            self._history_loaded = False
+            # 批量渲染:行先进缓冲,定时器(50ms)批量 append 到 QTextEdit,
+            # 避免逐行 insertText 触发富文本 O(n²) 布局重算。
+            self._batch_buffer = []  # type: List[str]
+            self._batch_timer = None  # type: QtCore.QTimer | None
             self._setup_ui()
+
+        # 最近历史日志的行数上限(用户首次切到日志页时回填这么多行)。
+        # 太大→首次进入卡;太小→看不到上下文。500 行覆盖一次完整启动序列。
+        RECENT_HISTORY_LINES = 500
+        # 批量渲染 flush 间隔。tailer 每 50ms 读一次,这里也 50ms 攒一批,
+        # 让实时跟随的延迟感 < 100ms 且不逐行卡。
+        _BATCH_INTERVAL_MS = 50
+
+        def showEvent(self, event):
+            """页面切到前台:清未读标记 + 首次进入时按需加载最近历史。"""
+            try:
+                self._unread_since_view = False
+                self.new_logs_received.emit("__viewed__")
+            except Exception:
+                pass
+            # 首次切到本页才加载历史(之后靠 tailer 跟随,不重复读)
+            if not self._history_loaded:
+                self._history_loaded = True
+                try:
+                    self._load_recent_history()
+                except Exception:
+                    pass
+            super().showEvent(event)
+
+        def _load_recent_history(self):
+            """读日志文件最后 N 行,批量填进视图(用户首次进入日志页时调)。
+
+            在调用线程(主线程)同步读文件末尾——只读 N 行,毫秒级,不阻塞。
+            用批量 append(走 _enqueue_batch → 定时器 flush),一次写完。
+            """
+            if self._log_path is None:
+                return
+            try:
+                lines = read_tail_lines(self._log_path, self.RECENT_HISTORY_LINES)
+            except Exception:
+                return
+            for line in lines:
+                # 走折叠过滤器(与实时行一致),结果入批量缓冲
+                if self.collapse_checkbox.isChecked():
+                    for out in self._filter.feed(line):
+                        self._enqueue_batch(out)
+                else:
+                    self._enqueue_batch(line)
+            self._flush_batch()  # 历史一次性 flush,不等定时器
 
         def _setup_ui(self):
             layout = QtWidgets.QVBoxLayout(self)
@@ -313,6 +543,19 @@ if _HAS_QT:
             self.save_btn.clicked.connect(self._on_save_clicked)
             controls.addWidget(self.save_btn)
 
+            # 在文件管理器里打开并选中日志文件。实时日志只显示最近内容,
+            # 用户想看完整历史/翻旧日志时直接打开原文件最方便。
+            self.open_in_explorer_btn = QtWidgets.QPushButton("📁 打开日志文件")
+            self.open_in_explorer_btn.clicked.connect(self._on_open_in_explorer)
+            controls.addWidget(self.open_in_explorer_btn)
+
+            self.notify_checkbox = QtWidgets.QCheckBox("新日志提醒")
+            # 默认开启:有新日志且不在日志页时,nav 按钮亮带颜色的提示。
+            # 取消勾选则完全不发未读提示(适合常驻后台、不想被打扰)。
+            self.notify_checkbox.setChecked(True)
+            self.notify_checkbox.toggled.connect(self._on_notify_toggled)
+            controls.addWidget(self.notify_checkbox)
+
             controls.addStretch(1)
             self._path_label = QtWidgets.QLabel("(未选择日志)")
             self._path_label.setStyleSheet("color: #888;")
@@ -321,15 +564,52 @@ if _HAS_QT:
 
             # 日志视图
             self.text_edit = QtWidgets.QTextBrowser()
+            self.text_edit.setObjectName("LogViewEdit")  # 供全局 QSS 按 objectName 设主题色
             self.text_edit.setReadOnly(True)
-            font = QtGui.QFont("Consolas, Courier New", 10)
+            # 用 setFamilies 设置 fallback 列表(QFont 构造函数把整串当成单个
+            # family 名,导致 DirectWrite 反复尝试加载名为 "Consolas, Courier New"
+            # 的字体失败,并回退枚举 Fixedsys/Modern/MS Sans Serif 等旧字体,
+            # 启动时刷一堆 CreateFontFaceFromHDC() 警告)。
+            font = QtGui.QFont()
+            font.setFamilies(["Consolas", "Cascadia Mono", "Courier New", "Menlo", "DejaVu Sans Mono"])
+            font.setPointSize(10)
             font.setStyleHint(QtGui.QFont.Monospace)
             self.text_edit.setFont(font)
             self.text_edit.setLineWrapMode(QtWidgets.QTextEdit.WidgetWidth)
             # 行数上限:Qt 在 block 数超过阈值时自动裁掉最早的 block,
             # 避免几 MB 日志把 QTextEdit 撑爆
             self.text_edit.document().setMaximumBlockCount(self._max_lines + 1)  # +1:Qt cap=N 实际只显示 N-1,留 1 块给光标
+            # 纯文本模式(移除了逐行着色)后,text_edit 的背景/前景必须显式设主题色——
+            # 否则 QTextBrowser 走 Qt 默认 palette(白底黑字),与深色主题格格不入。
+            self._apply_text_edit_theme()
             layout.addWidget(self.text_edit)
+
+        def _apply_text_edit_theme(self):
+            """据当前主题设日志视图的背景/前景色(随主题切换调)。
+
+            纯文本模式下文字没有逐行 charFormat,必须靠 stylesheet 保证对比度。
+            用 input_bg(深色 rgba(0,0,0,0.3) / 浅色 #FFFFFF)做背景,
+            input_text(深色 #E5E7EB / 浅色 #0F172A)做文字色,和输入框视觉一致。
+            """
+            try:
+                tm = self.theme_manager
+                colors = tm.colors if tm else None
+                bg = (colors.get("input_bg") if colors else None) or "rgba(0,0,0,0.3)"
+                fg = (colors.get("input_text") if colors else None) or "#E5E7EB"
+                border = (colors.get("input_border") if colors else None) or "#4B5563"
+                self.text_edit.setStyleSheet(
+                    f"QTextBrowser {{ background-color: {bg}; color: {fg};"
+                    f" border: 1px solid {border}; border-radius: 6px; padding: 6px; }}"
+                )
+            except Exception:
+                pass
+
+        def update_theme(self, _theme_styles=None):
+            """主题切换回调(qt_app._apply_theme 对 _new_pages 每页调)。
+
+            重新读 theme_manager.colors 刷日志视图背景/前景色。
+            """
+            self._apply_text_edit_theme()
 
         def set_log_path(self, path) -> None:
             self._log_path = Path(path)
@@ -375,31 +655,58 @@ if _HAS_QT:
                 self._append_line(line)
 
         def _append_line(self, line: str) -> None:
+            """处理一行日志:剥 ANSI、记录未读、入批量缓冲(不直接写 QTextEdit)。
+
+            纯文本模式(移除了颜色标识):剥掉 ANSI 转义码后原文进缓冲,
+            由 _flush_batch 定时器批量 append。不再逐行 insertText + charFormat
+            着色——那是 O(n²) 的富文本布局,数万行历史会冻死 UI。
+            level 仅用于未读红点级别判定,不参与着色。
+            """
             if not line:
                 return
-            is_dark = bool(self.theme_manager and self.theme_manager.is_dark)
-            ts, body = parse_log_entry(line)
-            level = self._detect_level(body)
-            palette = self._LEVEL_COLORS_DARK if is_dark else self._LEVEL_COLORS_LIGHT
-            level_color = QColor(palette.get(level, palette["INFO"]))
-            ts_color = QColor(self._TIMESTAMP_COLOR_DARK if is_dark else self._TIMESTAMP_COLOR_LIGHT)
+            # 页面不可见 + 用户开启「新日志提醒」时,标记未读并通知主窗口亮红点。
+            # 关闭提醒则完全不发信号,nav 按钮保持原文字。
+            if not self.isVisible() and self.notify_checkbox.isChecked():
+                try:
+                    if not self._unread_since_view:
+                        self._unread_since_view = True
+                    ts0, body0 = parse_log_entry(line)
+                    self.new_logs_received.emit(self._detect_level(strip_ansi(body0)))
+                except Exception:
+                    pass
+            # 剥 ANSI 后入缓冲(纯文本,不着色)
+            clean = strip_ansi(line)
+            self._enqueue_batch(clean)
+
+        def _enqueue_batch(self, line: str) -> None:
+            """行进批量缓冲,启动/重置 flush 定时器(攒满 _BATCH_INTERVAL_MS ms 再写)。"""
+            self._batch_buffer.append(line)
+            if self._batch_timer is None:
+                self._batch_timer = QtCore.QTimer(self)
+                self._batch_timer.setSingleShot(True)
+                self._batch_timer.timeout.connect(self._flush_batch)
+            if not self._batch_timer.isActive():
+                self._batch_timer.start(self._BATCH_INTERVAL_MS)
+
+        def _flush_batch(self) -> None:
+            """把缓冲里的行一次性 append 到 QTextEdit(一次 insertText,一次滚动)。
+
+            批量化是关键:把 N 次 insertText(每次触发富文本布局重算)合并成 1 次,
+            实时跟随(行流)和历史回填(几百行)都只做 O(1) 次 DOM 写入。
+            """
+            if not self._batch_buffer:
+                return
+            text = "\n".join(self._batch_buffer) + "\n"
+            self._batch_buffer.clear()
+            # moveCursor + insertText 一次写整批;document 的 maximumBlockCount 自动裁老的
             cursor = self.text_edit.textCursor()
             cursor.movePosition(QtGui.QTextCursor.End)
-            if ts:
-                fmt = cursor.charFormat()
-                fmt.setForeground(ts_color)
-                cursor.setCharFormat(fmt)
-                cursor.insertText(ts)
-                cursor.insertText(" ")
-            fmt = cursor.charFormat()
-            fmt.setForeground(level_color)
-            cursor.setCharFormat(fmt)
-            cursor.insertText(body)
-            cursor.insertText(chr(10))
-            # 滚到底
+            cursor.insertText(text)
+            # 滚到底(整批一次)
             bar = self.text_edit.verticalScrollBar()
             if bar is not None:
                 bar.setValue(bar.maximum())
+
 
         def _on_pause_toggled(self, checked: bool) -> None:
             self._paused = checked
@@ -421,6 +728,16 @@ if _HAS_QT:
             else:
                 self.text_edit.setLineWrapMode(QtWidgets.QTextEdit.NoWrap)
 
+        def _on_notify_toggled(self, checked: bool) -> None:
+            # 关闭提醒时,顺手清掉当前已经亮起的未读标记,
+            # 否则 nav 按钮会一直顶着 🟢/🟡/🔴 直到用户下次切进日志页。
+            if not checked:
+                try:
+                    self._unread_since_view = False
+                    self.new_logs_received.emit("__cleared__")
+                except Exception:
+                    pass
+
         def _on_save_clicked(self) -> None:
             path, _ = QtWidgets.QFileDialog.getSaveFileName(
                 self, "保存日志", "comfyui.log", "Log files (*.log);;All files (*)"
@@ -431,3 +748,30 @@ if _HAS_QT:
                 Path(path).write_text(self.text_edit.toPlainText(), encoding="utf-8")
             except Exception as e:
                 QtWidgets.QMessageBox.warning(self, "保存失败", str(e))
+
+        def _on_open_in_explorer(self) -> None:
+            """在系统文件管理器里打开并选中当前日志文件。
+
+            实时日志只显示最近内容(启动后新行 + 首次进入读的最近 500 行),
+            想看完整历史/翻旧日志时直接打开原文件最方便。用 explorer /select
+            在文件管理器里选中文件(而不是用关联程序打开)。
+            """
+            if self._log_path is None:
+                QtWidgets.QMessageBox.information(self, "提示", "未选择日志文件。")
+                return
+            path = Path(self._log_path)
+            if not path.exists():
+                QtWidgets.QMessageBox.information(self, "提示", f"日志文件尚未生成:\n{path}")
+                return
+            try:
+                if platform.system() == "Windows":
+                    # /select,<path> 在资源管理器里打开父目录并选中该文件
+                    subprocess.Popen(["explorer", "/select,", str(path)])
+                elif platform.system() == "Darwin":
+                    # macOS: 在 Finder 里揭示文件
+                    subprocess.Popen(["open", "-R", str(path)])
+                else:
+                    # Linux: 打开所在目录(无通用「选中」命令)
+                    subprocess.Popen(["xdg-open", str(path.parent)])
+            except Exception as e:
+                QtWidgets.QMessageBox.warning(self, "打开失败", str(e))

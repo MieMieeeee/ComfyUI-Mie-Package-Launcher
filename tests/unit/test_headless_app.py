@@ -428,6 +428,40 @@ class TestHeadlessAppContext(unittest.TestCase):
         self.assertIsInstance(context.use_new_manager, BoolVar)
         self.assertFalse(context.use_new_manager.get())
 
+    def test_user_env_vars_default_empty_when_config_missing(self):
+        """user_env_vars should default to '' when config has no env_vars key."""
+        context = HeadlessAppContext(self.tmp_dir)
+        self.assertIsInstance(context.user_env_vars, StringVar)
+        self.assertEqual(context.user_env_vars.get(), "")
+
+    def test_user_env_vars_reads_from_config(self):
+        """user_env_vars should pick up env_vars from launch_options."""
+        self.config_data["launch_options"]["env_vars"] = (
+            "POLARS_SKIP_CPU_CHECK=1, MY_VAR=foo"
+        )
+        config_file = self.config_dir / "config.json"
+        config_file.write_text(
+            json.dumps(self.config_data), encoding="utf-8"
+        )
+        context = HeadlessAppContext(self.tmp_dir)
+        self.assertEqual(
+            context.user_env_vars.get(),
+            "POLARS_SKIP_CPU_CHECK=1, MY_VAR=foo",
+        )
+
+    def test_user_env_vars_getter_returns_parsed_tuples(self):
+        """get_user_env_vars should turn the raw string into [(k, v), ...]."""
+        self.config_data["launch_options"]["env_vars"] = "A=1, B=2"
+        config_file = self.config_dir / "config.json"
+        config_file.write_text(
+            json.dumps(self.config_data), encoding="utf-8"
+        )
+        context = HeadlessAppContext(self.tmp_dir)
+        self.assertEqual(
+            context.get_user_env_vars(),
+            [("A", "1"), ("B", "2")],
+        )
+
 
 class TestGetHeadlessApp(unittest.TestCase):
     """Tests for get_headless_app factory function."""

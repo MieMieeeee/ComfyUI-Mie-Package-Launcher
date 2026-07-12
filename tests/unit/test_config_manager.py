@@ -209,6 +209,49 @@ class TestConfigManagerCharacterization(unittest.TestCase):
         self.assertEqual(self.read_json(), original_data)
         self.logger.error.assert_called()
 
+    def test_default_launch_options_includes_env_vars_field(self):
+        """Default config should expose launch_options.env_vars == ''."""
+        manager = ConfigManager(self.config_file, self.logger)
+        defaults = manager.get_default_config()
+        self.assertIn("env_vars", defaults["launch_options"])
+        self.assertEqual(defaults["launch_options"]["env_vars"], "")
+
+    def test_load_config_backfills_missing_env_vars_and_persists(self):
+        """Legacy config (no env_vars) should be backfilled and saved."""
+        legacy = {
+            "launch_options": {"default_port": "8188", "extra_args": ""},
+            "proxy_settings": {},
+        }
+        self.write_json(legacy)
+
+        manager = ConfigManager(self.config_file, self.logger)
+        loaded = manager.load_config()
+
+        self.assertEqual(loaded["launch_options"]["env_vars"], "")
+        persisted = self.read_json()
+        self.assertEqual(persisted["launch_options"]["env_vars"], "")
+
+    def test_load_config_preserves_existing_env_vars_value(self):
+        """Existing user-configured env_vars must not be overwritten by migration."""
+        self.write_json({
+            "launch_options": {
+                "default_port": "8188",
+                "env_vars": "POLARS_SKIP_CPU_CHECK=1",
+            },
+            "proxy_settings": {},
+        })
+
+        manager = ConfigManager(self.config_file, self.logger)
+        loaded = manager.load_config()
+
+        self.assertEqual(
+            loaded["launch_options"]["env_vars"], "POLARS_SKIP_CPU_CHECK=1"
+        )
+        self.assertEqual(
+            self.read_json()["launch_options"]["env_vars"],
+            "POLARS_SKIP_CPU_CHECK=1",
+        )
+
 
 if __name__ == "__main__":
     unittest.main(verbosity=2)

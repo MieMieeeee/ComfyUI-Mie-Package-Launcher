@@ -19,6 +19,7 @@ Phase 1：仅 update（update_all / update_selected）。
 from __future__ import annotations
 
 import os
+import concurrent.futures
 from pathlib import Path
 from typing import Any, Optional
 
@@ -117,7 +118,11 @@ class PluginService:
         cn_dir = PATHS.plugins_dir(self._comfyui_dir())
         if not cn_dir.exists():
             return []
-        results = []
+        # ---- 第一遍：纯文件系统探测（便宜，同步）----
+        # 先把每个插件的基本信息收齐（name/dir_name/kind/enabled + pyproject 的 version/remote_url），
+        # 记下哪些是 git 仓库需要第二遍跑 git 命令。结果按 dir_name 字典序（sorted iterdir 保证）。
+        results: list[dict[str, Any]] = []
+        pending_git: list[tuple[int, Path]] = []  # (results 下标, 插件目录) 第二遍并行处理
         for entry in sorted(cn_dir.iterdir()):
             if not entry.is_dir():
                 continue
@@ -148,18 +153,53 @@ class PluginService:
                 "remote_url": "",
                 "local_date": "",
             }
-            # version/remote_url：优先 pyproject（CNR 和多数 git 插件都有），回退 git 命令
+            # version/remote_url：优先 pyproject（CNR 和多数 git 插件都有），git 命令仅补缺失项
             if py:
                 rec["version"] = py.get("version", "")
                 rec["remote_url"] = py.get("repository", "")
-            if has_git:
-                if not rec["version"]:
-                    rec["version"] = self._git_short(entry)
-                if not rec["remote_url"]:
-                    rec["remote_url"] = self._git_remote(entry)
-                rec["local_date"] = self._git_date(entry)
             results.append(rec)
+            if has_git:
+                pending_git.append((len(results) - 1, entry))
+
+        # ---- 第二遍：git 信息并行回填（贵：每个仓库最多 3 条 git 命令）----
+        # 串行时 N 个仓库 ≈ N×3×0.5s；并行（4 worker）可压到约 1/4。失败回退串行，保契约不破。
+        self._fill_git_info(results, pending_git)
         return results
+
+    def _fill_git_info(
+        self, results: list[dict[str, Any]], pending_git: list[tuple[int, Path]]
+    ) -> None:
+        """对 pending_git 里的每个 git 仓库并行跑 rev-parse/remote/log，回填到 results。
+
+        线程池并行（max_workers=4，与 core/version_service 同款）。任一仓库的 git 调用
+        失败只影响该仓库（_git_out 返回空串，不抛）。线程池整体异常则回退串行保底。
+        线程安全：每个 task 只写 results 自己的下标，无共享写。
+        """
+        if not pending_git:
+            return
+
+        def _one(item: tuple[int, Path]) -> tuple[int, str, str, str]:
+            idx, d = item
+            return idx, self._git_short(d), self._git_remote(d), self._git_date(d)
+
+        try:
+            with concurrent.futures.ThreadPoolExecutor(max_workers=4) as ex:
+                for idx, ver, rem, date in ex.map(_one, pending_git):
+                    rec = results[idx]
+                    if not rec["version"]:
+                        rec["version"] = ver
+                    if not rec["remote_url"]:
+                        rec["remote_url"] = rem
+                    rec["local_date"] = date
+        except Exception:
+            # 并行调度整体失败（极罕见）→ 回退串行，保证返回结构完整
+            for idx, d in pending_git:
+                rec = results[idx]
+                if not rec["version"]:
+                    rec["version"] = self._git_short(d)
+                if not rec["remote_url"]:
+                    rec["remote_url"] = self._git_remote(d)
+                rec["local_date"] = self._git_date(d)
 
     def _read_pyproject(self, plugin_dir: Path) -> dict[str, str]:
         """读插件根目录的 pyproject.toml，取 version 和 project.urls.Repository。

@@ -14,6 +14,31 @@ try:
 except ImportError:
     fcntl = None
 
+# Windows named mutex support for SingletonLock. CreateMutexW on a named
+# mutex is the canonical way to enforce a single instance per named object
+# across processes on Windows; it cannot be circumvented by the file-truncate
+# race that plagues the legacy msvcrt.locking approach.
+try:
+    import ctypes
+    from ctypes import wintypes
+    _kernel32 = ctypes.WinDLL("kernel32", use_last_error=True)
+    _CreateMutexW = _kernel32.CreateMutexW
+    _CreateMutexW.argtypes = [wintypes.LPVOID, wintypes.BOOL, wintypes.LPCWSTR]
+    _CreateMutexW.restype = wintypes.HANDLE
+    _CloseHandle = _kernel32.CloseHandle
+    _CloseHandle.argtypes = [wintypes.HANDLE]
+    _CloseHandle.restype = wintypes.BOOL
+    _GetLastError = _kernel32.GetLastError
+    _GetLastError.argtypes = []
+    _GetLastError.restype = wintypes.DWORD
+    _ERROR_ALREADY_EXISTS = 183
+except Exception:
+    ctypes = None
+    _CreateMutexW = None
+    _CloseHandle = None
+    _GetLastError = None
+    _ERROR_ALREADY_EXISTS = 183
+
 logger = logging.getLogger("comfyui_launcher")
 RUNHIDDEN_SEQ = 0
 
@@ -172,11 +197,36 @@ class SingletonLock:
     def __init__(self, lock_file_name):
         self.lock_file_path = os.path.join(tempfile.gettempdir(), lock_file_name)
         self.lock_file = None
+        self._mutex_handle = None
+        self._mutex_name = "Local\\" + lock_file_name
 
     def acquire(self):
+        # Windows: use a named mutex via CreateMutexW. Two processes
+        # calling CreateMutexW with the same name race; the second call returns
+        # ERROR_ALREADY_EXISTS, which we treat as acquisition failure.
+        if os.name == "nt" and _CreateMutexW is not None:
+            try:
+                name = self._mutex_name
+                handle = _CreateMutexW(None, False, name)
+                if not handle:
+                    return False
+                if _GetLastError() == _ERROR_ALREADY_EXISTS:
+                    _CloseHandle(handle)
+                    return False
+                self._mutex_handle = handle
+                atexit.register(self.release)
+                return True
+            except Exception:
+                return False
+
+        # Non-Windows (or ctypes unavailable): use a lock file. The legacy
+        # implementation opened with 'w' (truncate) and called msvcrt.locking / fcntl.flock,
+        # which has a race when two processes truncate-then-lock. We open with
+        # "a+" (append, do not truncate) so an existing holder's file content
+        # is preserved and the OS-level lock can fail predictably.
         try:
-            self.lock_file = open(self.lock_file_path, 'w')
-            if os.name == 'nt' and msvcrt:
+            self.lock_file = open(self.lock_file_path, "a+")
+            if os.name == "nt" and msvcrt:
                 try:
                     msvcrt.locking(self.lock_file.fileno(), msvcrt.LK_NBLCK, 1)
                 except OSError:
@@ -191,25 +241,26 @@ class SingletonLock:
                     self.lock_file = None
                     return False
             else:
-                if os.path.exists(self.lock_file_path):
-                    self.lock_file.close()
-                    self.lock_file = None
-                    return False
-                else:
-                    self.lock_file.write(str(os.getpid()))
-                    self.lock_file.flush()
+                # Pure fallback: rely on file presence.
+                pass
             atexit.register(self.release)
             return True
         except Exception:
             if self.lock_file:
                 try:
                     self.lock_file.close()
-                except:
+                except Exception:
                     pass
             self.lock_file = None
             return False
 
     def release(self):
+        if self._mutex_handle is not None:
+            try:
+                _CloseHandle(self._mutex_handle)
+            except Exception:
+                pass
+            self._mutex_handle = None
         if self.lock_file:
             try:
                 self.lock_file.close()

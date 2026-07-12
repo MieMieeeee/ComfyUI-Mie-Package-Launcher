@@ -172,7 +172,7 @@ class TestStartService:
         fake_proc = MagicMock(pid=88888)
         fake_proc.poll.return_value = None
 
-        def fake_runner_start(a, pm, cmd, env, run_cwd):
+        def fake_runner_start(a, pm, cmd, env, run_cwd, log_path=None):
             pm.comfyui_process = fake_proc
             pm.on_start_success()
 
@@ -212,7 +212,7 @@ class TestStartService:
         fake_proc = MagicMock(pid=77777)
         fake_proc.poll.return_value = None
 
-        def fake_runner_start(a, pm, cmd, env, run_cwd):
+        def fake_runner_start(a, pm, cmd, env, run_cwd, log_path=None):
             pm.comfyui_process = fake_proc
             pm.on_start_failed("端口占用")
 
@@ -245,7 +245,7 @@ class TestStartService:
         fake_proc = MagicMock(pid=66666)
         fake_proc.poll.return_value = None
 
-        def fake_runner_start(a, pm, cmd, env, run_cwd):
+        def fake_runner_start(a, pm, cmd, env, run_cwd, log_path=None):
             pm.comfyui_process = fake_proc
             # 不调用 on_start_success：模拟 spawn 后还没就绪
 

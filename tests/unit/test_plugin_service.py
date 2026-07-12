@@ -691,3 +691,100 @@ def test_parse_version_semantic_comparison():
     assert _parse_version("1.0.0") > _parse_version("")  # 空串最小
     assert _parse_version("1.0.0") > _parse_version("nightly")  # nightly 当 0.0.0
 
+
+# ---- _fill_git_info 并行回填（list_installed 第二遍，收编自手写串行循环）----
+
+def test_list_installed_parallel_fill_writes_each_repo_to_its_own_index(tmp_path):
+    """多个 git 仓库并行回填：每条 git 结果必须落到自己对应的插件上，不能串味。
+
+    覆盖并行化的核心风险——竞态写错下标。用「每个仓库返回不同 commit/remote/date」
+    的 fake，验证最终 results 里每个插件的字段和它的目录名一一对应。
+    """
+    cn = tmp_path / "ComfyUI" / "custom_nodes"
+    cn.mkdir(parents=True)
+    for name in ("PluginA", "PluginB", "PluginC"):
+        (cn / name).mkdir()
+        (cn / name / ".git").mkdir()
+
+    svc = PluginService(_app())
+
+    def fake_run_hidden(cmd, **kwargs):
+        cwd = str(kwargs.get("cwd", ""))
+        # 据被操作目录返回对应内容，保证并行下也不会混淆
+        if "PluginA" in cwd:
+            tag, remote, date = "aaa1111", "https://github.com/x/PluginA", "2025-01-01"
+        elif "PluginB" in cwd:
+            tag, remote, date = "bbb2222", "https://github.com/x/PluginB", "2025-02-02"
+        else:
+            tag, remote, date = "ccc3333", "https://github.com/x/PluginC", "2025-03-03"
+        r = MagicMock()
+        r.stderr = ""
+        r.returncode = 0
+        if "rev-parse" in cmd:
+            r.stdout = tag + "\n"
+        elif "get-url" in cmd:
+            r.stdout = remote + "\n"
+        elif "log" in cmd:
+            r.stdout = date + "\n"
+        else:
+            r.stdout = ""
+        return r
+
+    with patch.object(svc, "_comfyui_dir", return_value=tmp_path / "ComfyUI"), \
+         patch("services.plugin_service.run_hidden", side_effect=fake_run_hidden):
+        result = {r["name"]: r for r in svc.list_installed()}
+
+    assert result["PluginA"]["version"] == "aaa1111"
+    assert result["PluginA"]["remote_url"] == "https://github.com/x/PluginA"
+    assert result["PluginA"]["local_date"] == "2025-01-01"
+    assert result["PluginB"]["version"] == "bbb2222"
+    assert result["PluginB"]["local_date"] == "2025-02-02"
+    assert result["PluginC"]["version"] == "ccc3333"
+    assert result["PluginC"]["local_date"] == "2025-03-03"
+
+
+def test_fill_git_info_falls_back_to_serial_on_executor_failure(tmp_path):
+    """_fill_git_info 的 ThreadPoolExecutor 整体异常时回退串行，保证返回结构完整。
+
+    让 ThreadPoolExecutor 构造抛异常（模拟极罕见的资源耗尽），验证回退路径仍逐个填好。
+    """
+    cn = tmp_path / "ComfyUI" / "custom_nodes"
+    cn.mkdir(parents=True)
+    (cn / "Solo").mkdir()
+    (cn / "Solo" / ".git").mkdir()
+
+    svc = PluginService(_app())
+
+    def fake_run_hidden(cmd, **kwargs):
+        r = MagicMock()
+        r.stderr = ""
+        r.returncode = 0
+        if "rev-parse" in cmd:
+            r.stdout = "solo0000\n"
+        elif "get-url" in cmd:
+            r.stdout = "https://github.com/x/Solo\n"
+        elif "log" in cmd:
+            r.stdout = "2025-05-05\n"
+        else:
+            r.stdout = ""
+        return r
+
+    results = [{"name": "Solo", "version": "", "remote_url": "", "local_date": ""}]
+    pending = [(0, cn / "Solo")]
+    with patch("services.plugin_service.concurrent.futures.ThreadPoolExecutor",
+               side_effect=RuntimeError("no resources")), \
+         patch("services.plugin_service.run_hidden", side_effect=fake_run_hidden):
+        svc._fill_git_info(results, pending)
+
+    assert results[0]["version"] == "solo0000"
+    assert results[0]["remote_url"] == "https://github.com/x/Solo"
+    assert results[0]["local_date"] == "2025-05-05"
+
+
+def test_fill_git_info_noop_when_no_git_plugins():
+    """无 git 仓库时 _fill_git_info 直接返回，不建线程池。"""
+    svc = PluginService(_app())
+    results = [{"name": "plain", "version": "", "remote_url": "", "local_date": ""}]
+    svc._fill_git_info(results, [])  # 不抛、不改
+    assert results[0]["version"] == ""
+

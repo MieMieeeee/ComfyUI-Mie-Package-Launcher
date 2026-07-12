@@ -62,3 +62,10 @@ nuitka-crash-report.xml
 
 # Diagnostic leftover from manual CLI testing
 status_out.txt
+
+# Local AI tooling state
+.zcode/
+
+# Stray temp/scratch files
+$
+_test_combo.py

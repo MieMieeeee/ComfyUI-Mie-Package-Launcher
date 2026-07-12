@@ -62,6 +62,7 @@ class ConfigManager:
                 "enable_cors": True,
                 "listen_all": True,
                 "extra_args": "",
+                "env_vars": "",
                 "attention_mode": "",
                 "browser_open_mode": "default",
                 "custom_browser_path": "",
@@ -156,6 +157,8 @@ class ConfigManager:
                     ann = self.config.setdefault("announcement", {})
                     for k, v in default_config.get("announcement", {}).items():
                         ann.setdefault(k, v)
+                    launch = self.config.setdefault("launch_options", {})
+                    launch.setdefault("env_vars", "")
                     ui = self.config.setdefault("ui_settings", {})
                     ui.setdefault("minimize_to_tray_on_close", False)
                     ui.setdefault("minimize_to_tray_ask_every_time", True)

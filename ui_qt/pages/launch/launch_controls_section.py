@@ -465,7 +465,10 @@ class LaunchControlsSection(QtWidgets.QWidget):
         cb_console = QtWidgets.QCheckBox("显示ComfyUI命令行窗口")
         if hasattr(self.app, 'show_console'):
             cb_console.setChecked(self.app.show_console.get())
-            cb_console.toggled.connect(lambda v: (self.app.show_console.set(v), self._save_config()))
+            cb_console.toggled.connect(lambda v: (
+                self.app.show_console.set(v),
+                self._save_config()
+            ))
         cb_console.setToolTip("启动时是否显示ComfyUI的命令行窗口（关闭后ComfyUI在后台运行）")
 
         hbox_opts.addWidget(cb_fast)
@@ -473,9 +476,9 @@ class LaunchControlsSection(QtWidgets.QWidget):
         hbox_opts.addWidget(cb_nodes)
         hbox_opts.addWidget(cb_console)
         hbox_opts.addStretch(1)
-        form_layout.addLayout(hbox_opts, 3, 0, 1, 4)
+        form_layout.addLayout(hbox_opts, 4, 0, 1, 4)
 
-        # ============== 额外选项 ==============
+        # ============== 额外选项（左）==============
         extra_label = QtWidgets.QLabel("额外选项：")
         extra_label.setStyleSheet(lbl_style)
         extra_edit = QtWidgets.QLineEdit()
@@ -485,10 +488,30 @@ class LaunchControlsSection(QtWidgets.QWidget):
         if hasattr(self.app, 'extra_launch_args'):
             extra_edit.setText(self.app.extra_launch_args.get())
             extra_edit.textChanged.connect(lambda v: (self.app.extra_launch_args.set(v), self._save_config()))
-        extra_edit.setToolTip("传入额外的启动参数")
+        extra_edit.setToolTip("额外的 ComfyUI 启动参数，空格分隔")
 
-        form_layout.addWidget(extra_label, 4, 0)
-        form_layout.addWidget(extra_edit, 4, 1, 1, 3)
+        # ============== 环境变量（右列,与端口号/注意力优化/自动打开浏览器对齐）==============
+        env_label = QtWidgets.QLabel("环境变量：")
+        env_label.setStyleSheet(lbl_style)
+        env_edit = QtWidgets.QLineEdit()
+        env_edit.setPlaceholderText("POLARS_SKIP_CPU_CHECK=1, HF_HUB_OFFLINE=1")
+        env_edit.setStyleSheet(self._get_input_style())
+
+        if hasattr(self.app, 'user_env_vars'):
+            env_edit.setText(self.app.user_env_vars.get())
+            env_edit.textChanged.connect(lambda v: (self.app.user_env_vars.set(v), self._save_config()))
+        env_edit.setToolTip(
+            "注入到 ComfyUI 子进程的环境变量\n"
+            "格式: KEY=VALUE, KEY2=VALUE2\n"
+            "VALUE 含逗号请改用系统级 setx"
+        )
+
+        # 行 3: 左 = 额外选项(col 0-1),右 = 环境变量(col 2-3)
+        # 与上面端口号/注意力优化/自动打开浏览器 竖直对齐
+        form_layout.addWidget(extra_label, 3, 0)
+        form_layout.addWidget(extra_edit, 3, 1)
+        form_layout.addWidget(env_label, 3, 2)
+        form_layout.addWidget(env_edit, 3, 3)
 
     def _get_label_color(self):
         """获取标签颜色"""
@@ -540,7 +563,7 @@ class LaunchControlsSection(QtWidgets.QWidget):
             # 跳过 GroupBox 的标题
             if label.parent() and isinstance(label.parent(), QtWidgets.QGroupBox):
                 parent_title = label.parent().title()
-                if parent_title == "启动控制" and label.text() in ["运行模式：", "端口号：", "显存策略：", "注意力优化：", "显卡：", "自动打开浏览器：", "额外选项："]:
+                if parent_title == "启动控制" and label.text() in ["运行模式：", "端口号：", "显存策略：", "注意力优化：", "显卡：", "自动打开浏览器：", "额外选项：", "环境变量："]:
                     label.setStyleSheet(lbl_style)
         
         # 更新输入框样式

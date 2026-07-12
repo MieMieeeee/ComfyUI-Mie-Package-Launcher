@@ -179,7 +179,7 @@ def start_service(app, *, no_wait: bool = False, timeout: int = 60) -> dict:
     pm = CliProcessManager()
 
     try:
-        runner_start(app, pm, cmd, env, run_cwd)
+        runner_start(app, pm, cmd, env, run_cwd, log_path=log_path)
     except Exception as e:
         return _err_result(port, url, log_path, start_t, f"runner_start 抛异常: {e}")
 

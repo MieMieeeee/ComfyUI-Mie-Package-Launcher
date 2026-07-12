@@ -410,3 +410,77 @@ def test_controller_check_updates_emits_outdated_reported(qt_app):
     svc.remote_dates.assert_called_once_with(["Behind", "MieNodes.disabled"])
     assert reported == [(["Behind", "MieNodes.disabled"],
                          {"Behind": "2025-06-01", "MieNodes.disabled": "2025-05-20"})]
+
+
+# ---- showEvent + set_loading_state + load_if_not_loaded（BackgroundLoader 集成）----
+
+def _show_event(page):
+    """触发 showEvent，用真实 QShowEvent（super().showEvent 校验类型，MagicMock 会报错）。"""
+    from PyQt5 import QtGui
+    page.showEvent(QtGui.QShowEvent())
+
+
+def test_show_event_triggers_load_on_first_show(qt_app):
+    """首次 showEvent → loader.load_if_not_loaded 触发后台取列表 → 填充页面。"""
+    from ui_qt.pages.plugins_page import PluginsPage, PluginController
+
+    page = PluginsPage(theme_manager=_stub_theme())
+    svc = MagicMock()
+    svc.list_installed.return_value = [_plugin("FirstShow")]
+    run_bg, post_ui = _sync_runner()
+    ctrl = PluginController(page, svc, run_bg, post_ui)
+
+    assert page.list_widget.count() == 0  # 加载前为空
+    _show_event(page)  # 模拟切到本页
+    svc.list_installed.assert_called_once()
+    assert page.plugin_names() == ["FirstShow"]
+
+
+def test_show_event_skips_when_already_loaded(qt_app):
+    """已加载过 → 再次 showEvent 不重复触发 list_installed。"""
+    from ui_qt.pages.plugins_page import PluginsPage, PluginController
+
+    page = PluginsPage(theme_manager=_stub_theme())
+    svc = MagicMock()
+    svc.list_installed.return_value = [_plugin("Once")]
+    run_bg, post_ui = _sync_runner()
+    ctrl = PluginController(page, svc, run_bg, post_ui)
+
+    _show_event(page)  # 首次
+    _show_event(page)  # 再次
+    _show_event(page)  # 又再次
+    svc.list_installed.assert_called_once()  # 只加载一次
+
+
+def test_set_loading_state_shows_placeholder_when_loading(qt_app):
+    """加载中 + 列表为空 → 插入「正在获取插件列表…」占位 item。"""
+    from ui_qt.pages.plugins_page import PluginsPage
+
+    page = PluginsPage(theme_manager=_stub_theme())
+    assert page.list_widget.count() == 0
+    page.set_loading_state(True)
+    assert page.list_widget.count() == 1
+    assert "获取" in page.list_widget.item(0).text()
+
+
+def test_set_loading_state_clears_placeholder_when_done(qt_app):
+    """加载完成 → 不主动留占位（populate 的 clear() 会清；这里验证 loading=False 对已有占位无副作用）。"""
+    from ui_qt.pages.plugins_page import PluginsPage
+
+    page = PluginsPage(theme_manager=_stub_theme())
+    page.set_loading_state(True)   # 加占位
+    page.set_loading_state(False)  # 加载结束（占位仍在，等 populate clear）
+    # populate 会清掉占位并填真实数据
+    page.populate([_plugin("Real")])
+    assert page.plugin_names() == ["Real"]
+    assert page.list_widget.count() == 1
+
+
+def test_set_loading_state_noop_when_list_already_populated(qt_app):
+    """列表已有内容时不插占位（避免刷新已有数据时闪占位）。"""
+    from ui_qt.pages.plugins_page import PluginsPage
+
+    page = PluginsPage(theme_manager=_stub_theme())
+    page.populate([_plugin("Existing")])  # 已有 1 项
+    page.set_loading_state(True)           # 触发加载态
+    assert page.list_widget.count() == 1   # 没多插占位，还是 1 项

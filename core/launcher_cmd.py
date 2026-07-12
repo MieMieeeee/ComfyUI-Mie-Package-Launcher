@@ -168,6 +168,17 @@ def build_launch_params(app):
                 pass
     except Exception:
         pass
+    # 用户自定义环境变量（启动页「启动环境变量」input 配置）
+    # 顺序: 系统 < 启动器默认(HF/GITHUB/PATH/GIT) < 用户
+    # 故意放最后: 用户可以覆盖 HF_ENDPOINT 等启动器默认设置
+    try:
+        for k, v in app.get_user_env_vars():
+            env[str(k)] = str(v)
+    except Exception as e:
+        try:
+            app.logger.warning("应用用户环境变量失败: %s", e)
+        except Exception:
+            pass
     try:
         run_cwd = str(comfy_root)
     except Exception:

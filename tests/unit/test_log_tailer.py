@@ -157,19 +157,47 @@ class TestLogTailerResilience(unittest.TestCase):
             tailer.stop()
 
     def test_recovers_from_truncation(self):
-        with _tmpfile("first\n") as path:
+        """truncate 重写更短的内容(size 变小)→ position 超出新 size → 触发重 open"""
+        with _tmpfile("first line here\n") as path:
             received = []
             tailer = LogTailer(path, on_line=received.append, start_from_beginning=True)
             tailer.start()
             try:
-                self.assertTrue(_wait_for(lambda: received == ["first"]))
-                # 模拟日志轮转: 截断并重写
+                self.assertTrue(_wait_for(lambda: received == ["first line here"]))
+                # 模拟日志被 truncate 后重写更短的内容
                 with open(path, "w", encoding="utf-8") as f:
                     f.write("rotated\n")
-                self.assertTrue(_wait_for(lambda: received == ["first", "rotated"], timeout=3.0),
+                self.assertTrue(_wait_for(lambda: received == ["first line here", "rotated"], timeout=3.0),
                                 "should detect truncation and re-read")
             finally:
                 tailer.stop()
+
+    def test_recovers_from_rename_recreate(self):
+        """轮转(重命名 + 新建同名文件,ComfyUI-Manager 的方式)→ inode 变化 → 触发重 open。
+
+        关键:tailer 持有读 fd 时,用共享模式打开(允许 rename/delete),
+        这样 ComfyUI-Manager 才能 rename 旧文件。否则 Windows 上 rename 会
+        PermissionError [WinError 32]。
+        """
+        import os as _os
+        tmpdir = Path(_tmpdir())
+        path = tmpdir / "test.log"
+        path.write_text("old\n", encoding="utf-8")
+        received = []
+        tailer = LogTailer(path, on_line=received.append, start_from_beginning=True)
+        tailer.start()
+        try:
+            self.assertTrue(_wait_for(lambda: received == ["old"]))
+            # 模拟 ComfyUI-Manager 轮转: rename 旧文件 + 新建同名文件
+            # tailer 仍持有旧 fd,但用共享模式打开,所以 rename 能成功
+            prev = tmpdir / "test.prev.log"
+            _os.rename(path, prev)
+            with open(path, "w", encoding="utf-8") as f:
+                f.write("new after rotate\n")
+            self.assertTrue(_wait_for(lambda: received == ["old", "new after rotate"], timeout=3.0),
+                            "should detect rename+recreate and re-read new file")
+        finally:
+            tailer.stop()
 
     # ----- 临时文件辅助 -----
 

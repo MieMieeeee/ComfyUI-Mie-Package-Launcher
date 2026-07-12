@@ -420,7 +420,37 @@ class PluginsPage(BasePage):
         super().__init__(theme_manager, parent)
         self.app = app
         self._outdated_dir_names = set()  # 当前标记为「有更新」的 dir_name（populate 时清空）
+        self._loader = None  # 由 PluginController.set_loader 注入；showEvent 据它触发首次加载
         self._setup_ui()
+
+    def set_loader(self, loader):
+        """PluginController 构造时注入 BackgroundLoader，供 showEvent 触发首次加载。"""
+        self._loader = loader
+
+    def showEvent(self, event):
+        """首次切到本页 → 触发列表加载（若还没加载过）。已加载过则跳过。
+
+        仿 version_page / log_viewer 的 showEvent 范式。配合 qt_app 的兜底定时器
+        （15s 后若用户一直没进过本页则兜底扫一次），实现「切到才扫 + 不进也兜底」。
+        """
+        super().showEvent(event)
+        if self._loader is not None:
+            self._loader.load_if_not_loaded()
+
+    def set_loading_state(self, loading: bool):
+        """加载中显示占位 item；populate() 开头的 clear() 会自然清掉它。
+
+        on_state_change 回调（BackgroundLoader 注入）。只在列表为空时插入占位，
+        避免覆盖已有的列表内容（如刷新已有数据时不应闪占位）。
+        """
+        try:
+            if loading and self.list_widget.count() == 0:
+                item = QtWidgets.QListWidgetItem("正在获取插件列表…")
+                item.setForeground(QtGui.QBrush(QtGui.QColor(
+                    self.theme_manager.colors.get("label_dim", "#9CA3AF"))))
+                self.list_widget.addItem(item)
+        except Exception:
+            pass
 
     def _setup_ui(self):
         c = self.theme_manager.colors
@@ -730,6 +760,18 @@ class PluginController:
         # 强制更新后复用普通更新的「同步依赖库」流程；qt_app 注入（按 auto_update_deps_var
         # 网关调 update_service.sync_requirements_files）。None 则跳过。
         self._sync_deps = sync_deps
+        # 列表加载走通用 BackgroundLoader：后台跑 list_installed → post 回 UI 填充，
+        # 内置防重入 + loaded_once + 加载态回调（页面据此显隐「获取中」占位）。
+        from ui_qt.background_loader import BackgroundLoader
+        self._loader = BackgroundLoader(
+            load_fn=lambda _report: self.svc.list_installed(),
+            on_loaded=lambda plugins: self.page.populate(plugins),
+            run_in_background=run_in_background,
+            post_to_ui=post_to_ui,
+            on_state_change=self.page.set_loading_state,
+        )
+        # 把 loader 暴露给页面：showEvent 用 load_if_not_loaded 做首次进入触发
+        page.set_loader(self._loader)
         page.refresh_requested.connect(self._on_refresh)
         page.update_all_requested.connect(self._on_update_all)
         page.update_selected_requested.connect(self._on_update_selected)
@@ -738,10 +780,7 @@ class PluginController:
         page.check_updates_requested.connect(self._on_check_updates)
 
     def _on_refresh(self):
-        self._run_in_background(self._refresh_work)
-
-    def _refresh_work(self):
-        self._populate_from_service()
+        self._loader.load()
 
     def _on_update_all(self):
         self._run_in_background(self._update_all_work)
@@ -850,6 +889,10 @@ class PluginController:
         self._populate_from_service()
 
     def _populate_from_service(self):
-        """取最新已装列表并派回 UI 线程填充页面（刷新 / 更新后都用）。"""
-        plugins = self.svc.list_installed()
-        self._post_to_ui(lambda: self.page.populate(plugins))
+        """取最新已装列表并派回 UI 线程填充页面（刷新 / 更新后都用）。
+
+        走 loader.load()：复用通用加载路径，自带防重入（用户连点不会并发起多次扫描）。
+        注意：load() 的防重入对「操作刚完成想立即刷新」也生效——正常情况下操作串行执行，
+        调用时前一次加载已完成（is_loading=False），load() 会照常执行。
+        """
+        self._loader.load()

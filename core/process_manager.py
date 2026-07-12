@@ -45,15 +45,29 @@ class ProcessManager:
                 pass
 
     def toggle_comfyui(self):  #
-        # 防抖与状态保护：启动进行中时忽略重复点击
+        # 防抖与状态保护：启动进行中时弹窗确认是否取消启动(而非静默忽略),
+        # 让用户能中止一次误启动。停止过程中仍静默忽略(停止是幂等快速操作,
+        # 重复点没有意义,反而可能干扰)。
         try:
             if getattr(self.app, "_launching", False):
                 try:
-                    self.app.logger.warning("忽略重复点击：正在启动中")
+                    self.app.logger.info("启动中再次点击:询问用户是否取消启动")
                 except Exception:
                     pass
+                cancel = self._ask_yes_no(
+                    "正在启动中",
+                    "ComfyUI 正在启动中。\n\n是否取消本次启动?",
+                    default=False,
+                    event=ProcessEvent.STARTING,
+                )
+                if cancel:
+                    try:
+                        self.app.logger.info("用户确认取消启动,执行停止")
+                    except Exception:
+                        pass
+                    self.stop_comfyui()
                 return
-            # 新增：停止过程中也忽略点击
+            # 停止过程中静默忽略点击(停止幂等,重复点无意义)
             if getattr(self, "_stopping", False):
                 try:
                     self.app.logger.warning("忽略重复点击：正在停止中")
@@ -227,8 +241,16 @@ class ProcessManager:
             except Exception:
                 pass
             from core.runner_start import start as run_start
+            # 计算 ComfyUI 日志路径,让 spawn 时把 stdout/stderr 重定向过去
+            # LogViewerPage tail 同一个文件,实时日志才能看到内容
+            try:
+                from utils.paths import comfy_root_from_config, logs_file as _logs_file
+                _comfy_root = comfy_root_from_config(self.app.config)
+                _log_path = _logs_file(_comfy_root)
+            except Exception:
+                _log_path = None
 
-            run_start(self.app, self, cmd, env, run_cwd)
+            run_start(self.app, self, cmd, env, run_cwd, log_path=_log_path)
         except Exception as e:
             msg = str(e)
             try:
@@ -799,6 +821,15 @@ class ProcessManager:
         except Exception:
             pass
         self.comfyui_process = None
+        # 关闭 spawn 时挂在 pm 上的 log file handle,避免文件被锁住
+        try:
+            fh = getattr(self, "_log_file_handle", None)
+            if fh is not None:
+                fh.flush()
+                fh.close()
+                self._log_file_handle = None
+        except Exception:
+            pass
         self._invalidate_probe_cache()
         # 根据端口探测决定显示“停止”或“一键启动”
         try:
