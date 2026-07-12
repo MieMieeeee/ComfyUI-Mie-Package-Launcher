@@ -125,7 +125,7 @@ class TestGlobalActionsCard:
     def test_apply_button_is_in_global_actions_card(self, qapp, tmp_path):
         page = _make_page(qapp, tmp_path)
         apply_btn = next(
-            (w for w in page.findChildren(QtWidgets.QPushButton) if w.text() == "应用更改"),
+            (w for w in page.findChildren(QtWidgets.QPushButton) if w.text() == "刷新/应用更改"),
             None,
         )
         assert apply_btn is not None, "page must have an 应用更改 button"
@@ -147,7 +147,7 @@ class TestGlobalActionsCard:
     def test_open_yaml_button_is_in_global_actions_card(self, qapp, tmp_path):
         page = _make_page(qapp, tmp_path)
         yaml_btn = next(
-            (w for w in page.findChildren(QtWidgets.QPushButton) if w.text() == "打开 yaml"),
+            (w for w in page.findChildren(QtWidgets.QPushButton) if w.text() == "打开YAML文件"),
             None,
         )
         assert yaml_btn is not None, "page must have a 打开 yaml button"
@@ -278,7 +278,146 @@ class TestGlobalActionsCard:
         page._populate_editor(page._find_lib_by_id(page.selected_library_id()))
         assert rm_btn.isEnabled(), "remove-selected must be enabled when a library is selected"
 
+    def _buttons_in_order(self, page):
+        """Return the visible primary-row buttons in the order they appear
+        in the global card. Filters to QPushButton instances."""
+        from PyQt5 import QtWidgets
+        card = page._global_actions_card
+        layout = card.layout()
+        out = []
+        for i in range(layout.count()):
+            item = layout.itemAt(i)
+            if item is None:
+                continue
+            w = item.widget()
+            if isinstance(w, QtWidgets.QPushButton):
+                out.append(w)
+            sub = item.layout()
+            if sub is not None:
+                for j in range(sub.count()):
+                    child = sub.itemAt(j).widget()
+                    if isinstance(child, QtWidgets.QPushButton):
+                        out.append(child)
+        return out
+
+    def test_button_order_matches_user_spec(self, qapp, tmp_path):
+        """Buttons must appear in the order the user specified:
+        [刷新/应用更改] [打开YAML文件] [仅使用内置] [恢复配置] [添加库] [移除所选]
+        """
+        page = _make_page(qapp, tmp_path)
+        texts = [b.text() for b in self._buttons_in_order(page)]
+        expected = [
+            "刷新/应用更改",
+            "打开YAML文件",
+            "仅使用内置",
+            "恢复配置",
+            "添加库",
+            "移除所选",
+        ]
+        assert texts == expected, f"button order/text mismatch:\n  got:      {texts}\n  expected: {expected}"
+
+    def test_remove_selected_button_is_destructive_style(self, qapp, tmp_path):
+        """移除所选 must use the solid red destructive style, matching
+        the 退出启动器 confirm button in CustomConfirmDialog
+        (background-color #EF4444, hover #DC2626)."""
+        from PyQt5 import QtGui
+        page = _make_page(qapp, tmp_path)
+        rm_btn = next(
+            (w for w in page.findChildren(QtWidgets.QPushButton) if w.text() == "移除所选"),
+            None,
+        )
+        assert rm_btn is not None
+        css = rm_btn.styleSheet() or ""
+        # Destructive style hardcodes these hex colors.
+        assert "#EF4444" in css, f"\u79fb\u9664\u6240\u9009 must use solid red (#EF4444), got: {css!r}"
+        assert "#DC2626" in css, f"\u79fb\u9664\u6240\u9009 must hover to darker red (#DC2626), got: {css!r}"
+
+    def test_other_global_buttons_use_primary_style(self, qapp, tmp_path):
+        """The 5 non-destructive buttons must use the project'"'"'s PrimaryButton
+        (purple gradient) so they look the same as buttons elsewhere in the app."""
+        from PyQt5 import QtGui
+        page = _make_page(qapp, tmp_path)
+        from ui_qt.theme_styles import ThemeStyles
+        primary_css = page.theme_manager.styles.primary_button_style()
+        # The launcher primary gradient is #7F56D9 -> #9E77ED (purple).
+        # We assert each non-destructive button CSS contains one of these
+        # tokens (case-insensitive) rather than coupling to the exact stops.
+        for hex_token in ("#7f56d9", "#9e77ed"):
+            assert hex_token in primary_css.lower(), \
+                f"primary_button_style expected to contain {hex_token}, got: {primary_css!r}"
+        non_destructive = [
+            "刷新/应用更改",
+            "打开YAML文件",
+            "仅使用内置",
+            "恢复配置",
+            "添加库",
+        ]
+        for label in non_destructive:
+            btn = next(
+                (w for w in page.findChildren(QtWidgets.QPushButton) if w.text() == label),
+                None,
+            )
+            assert btn is not None, f"missing button: {label}"
+            css = (btn.styleSheet() or "").lower()
+            assert ("#7f56d9" in css) or ("#9e77ed" in css), \
+                f"{label} must use PrimaryButton (purple); css: {css!r}"
+            assert "#ef4444" not in css, \
+                f"{label} must NOT use destructive style; css: {css!r}"
+
+    def test_status_label_above_button_row(self, qapp, tmp_path):
+        """Status line (外置模型库: X | ...) must sit ABOVE the button
+        row inside _global_actions_card, not below."""
+        page = _make_page(qapp, tmp_path)
+        layout = page._global_actions_card.layout()
+        # Find index of status_label and of any button row.
+        status_idx = -1
+        first_btn_idx = -1
+        for i in range(layout.count()):
+            item = layout.itemAt(i)
+            if item is None:
+                continue
+            if item.widget() is page.status_label:
+                status_idx = i
+            sub = item.layout()
+            if sub is not None:
+                for j in range(sub.count()):
+                    w = sub.itemAt(j).widget()
+                    if w is not None and isinstance(w, QtWidgets.QPushButton):
+                        if first_btn_idx < 0:
+                            first_btn_idx = i
+                            break
+        assert status_idx >= 0 and first_btn_idx >= 0, \
+            "card must contain both status_label and at least one button row"
+        assert status_idx < first_btn_idx, \
+            f"status (idx {status_idx}) must sit above the button row (idx {first_btn_idx})"
+
+    def test_hint_label_below_button_row(self, qapp, tmp_path):
+        """Hint (提示: ...) must sit BELOW the button row inside
+        _global_actions_card, not above."""
+        page = _make_page(qapp, tmp_path)
+        layout = page._global_actions_card.layout()
+        # Find index of mapping_hint_label and of the last button row.
+        hint_idx = -1
+        last_btn_idx = -1
+        for i in range(layout.count()):
+            item = layout.itemAt(i)
+            if item is None:
+                continue
+            if item.widget() is page.mapping_hint_label:
+                hint_idx = i
+            sub = item.layout()
+            if sub is not None:
+                for j in range(sub.count()):
+                    w = sub.itemAt(j).widget()
+                    if w is not None and isinstance(w, QtWidgets.QPushButton):
+                        last_btn_idx = i  # keep updating; last wins
+        assert hint_idx >= 0 and last_btn_idx >= 0, \
+            "card must contain both hint_label and at least one button row"
+        assert hint_idx > last_btn_idx, \
+            f"hint (idx {hint_idx}) must sit below the button row (idx {last_btn_idx})"
+
     def test_editor_panel_drops_global_buttons(self, qapp, tmp_path):
+
 
 
         """The per-library editor card should now carry only 打开目录 —

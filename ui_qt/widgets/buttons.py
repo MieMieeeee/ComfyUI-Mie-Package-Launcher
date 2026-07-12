@@ -39,6 +39,25 @@ class SecondaryButton(QtWidgets.QPushButton):
         self._apply_style()
 
 
+class DestructiveButton(QtWidgets.QPushButton):
+    """破坏性按钮 - 实色红色与 CustomConfirmDialog 中的
+    退出启动器按钮一致，用于应用内必须明确
+    标记为高风险的操作。"""
+
+    def __init__(self, text: str, theme_styles: ThemeStyles, parent=None):
+        super().__init__(text, parent)
+        self.theme_styles = theme_styles
+        self.setObjectName("DestructiveBtn")
+        self._apply_style()
+
+    def _apply_style(self):
+        self.setStyleSheet(self.theme_styles.destructive_button_style())
+
+    def update_theme(self, theme_styles: ThemeStyles):
+        self.theme_styles = theme_styles
+        self._apply_style()
+
+
 class LinkButton(QtWidgets.QPushButton):
     """链接按钮 - 用于导航卡片"""
 

@@ -8,7 +8,8 @@ from PyQt5 import QtCore, QtGui, QtWidgets
 
 from .base_page import BasePage
 from ui_qt.widgets import (
-    InfoCard, PrimaryButton, SecondaryButton, StyledLineEdit, StyledTableWidget,
+    InfoCard, PrimaryButton, SecondaryButton, DestructiveButton,
+    StyledLineEdit, StyledTableWidget,
 )
 from ui_qt.widgets.dialog_helper import DialogHelper
 
@@ -98,12 +99,14 @@ class ModelsPage(BasePage):
         # extra_model_paths.yaml (应用更改 / 打开 yaml) or the
         # recovery actions (仅使用内置 / 恢复配置) — none of
         # which depend on the currently selected library.
-        self._btn_save = PrimaryButton("应用更改", self.theme_manager.styles)
-        self._btn_open_yaml = SecondaryButton("打开 yaml", self.theme_manager.styles)
-        self._btn_add = PrimaryButton("添加库", self.theme_manager.styles)
-        self._btn_remove = SecondaryButton("移除所选", self.theme_manager.styles)
-        self._btn_builtin = PrimaryButton("仅使用内置", self.theme_manager.styles)
-        self._btn_restore = PrimaryButton("恢复配置", self.theme_manager.styles)
+        self._btn_save = PrimaryButton("\u5237\u65b0/\u5e94\u7528\u66f4\u6539", self.theme_manager.styles)
+        self._btn_open_yaml = PrimaryButton("\u6253\u5f00YAML\u6587\u4ef6", self.theme_manager.styles)
+        self._btn_add = PrimaryButton("\u6dfb\u52a0\u5e93", self.theme_manager.styles)
+        # \u79fb\u9664\u6240\u9009 is destructive \u2014 solid red, matching the \u9000\u51fa\u542f\u52a8\u5668
+        # button in CustomConfirmDialog. Same color tokens as elsewhere in the app.
+        self._btn_remove = DestructiveButton("\u79fb\u9664\u6240\u9009", self.theme_manager.styles)
+        self._btn_builtin = PrimaryButton("\u4ec5\u4f7f\u7528\u5185\u7f6e", self.theme_manager.styles)
+        self._btn_restore = PrimaryButton("\u6062\u590d\u914d\u7f6e", self.theme_manager.styles)
         self._btn_save.clicked.connect(self._save_current)
         self._btn_open_yaml.clicked.connect(self._open_yaml_file)
         self._btn_add.clicked.connect(self._on_add_library)
@@ -159,27 +162,26 @@ class ModelsPage(BasePage):
         global_layout = self._global_actions_card.layout()
         global_layout.setSpacing(10)
         # Status row goes first: at-a-glance current state (total / enabled /
-        # default). The hint follows, then the action buttons.
+        # default). The button row follows, then the hint sits BELOW the buttons
+        # so the hint reads as a follow-up ("if you don't see what you expect,
+        # click the button above").
         global_layout.addWidget(self.status_label)
+
+        # Single button row in the order the user specified:
+        # [刷新/应用更改] [打开YAML文件] [仅使用内置] [恢复配置] [添加库] [移除所选]
+        # 5 primary (purple, same shape as elsewhere in the app) + 1 destructive
+        # (solid red, same shape as the 退出启动器 confirm button).
+        global_btn_row = QtWidgets.QHBoxLayout()
+        global_btn_row.setSpacing(8)
+        for b in (self._btn_save, self._btn_open_yaml,
+                  self._btn_builtin, self._btn_restore,
+                  self._btn_add, self._btn_remove):
+            b.setFixedHeight(28)
+            global_btn_row.addWidget(b)
+        global_btn_row.addStretch(1)
+        global_layout.addLayout(global_btn_row)
+
         global_layout.addWidget(self.mapping_hint_label)
-
-        # Two rows of buttons so the recovery actions (仅使用内置 /
-        # 恢复配置) sit below the daily-use actions, less prominent.
-        primary_btn_row = QtWidgets.QHBoxLayout()
-        primary_btn_row.setSpacing(8)
-        for b in (self._btn_save, self._btn_add, self._btn_remove, self._btn_open_yaml):
-            b.setFixedHeight(28)
-            primary_btn_row.addWidget(b)
-        primary_btn_row.addStretch(1)
-        global_layout.addLayout(primary_btn_row)
-
-        recovery_btn_row = QtWidgets.QHBoxLayout()
-        recovery_btn_row.setSpacing(8)
-        for b in (self._btn_builtin, self._btn_restore):
-            b.setFixedHeight(28)
-            recovery_btn_row.addWidget(b)
-        recovery_btn_row.addStretch(1)
-        global_layout.addLayout(recovery_btn_row)
         layout.addWidget(self._global_actions_card)
 
         # Main split
