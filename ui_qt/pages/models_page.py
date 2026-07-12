@@ -118,8 +118,9 @@ class ModelsPage(BasePage):
 
 
 
-        # Theme widget registration handled by app; expose here for tests.
-        self._page_title_refs.append(self.status_label)
+        # status_label is now inside _global_actions_card (top of page); it uses
+        # label_muted so it does not need to be in _page_title_refs (which tracks
+        # label-color widgets for theme updates).
 
         # First refresh.
         try:
@@ -146,6 +147,9 @@ class ModelsPage(BasePage):
         self._global_actions_card = InfoCard("全局操作", self.theme_manager.styles)
         global_layout = self._global_actions_card.layout()
         global_layout.setSpacing(10)
+        # Status row goes first: at-a-glance current state (total / enabled /
+        # default). The hint follows, then the action buttons.
+        global_layout.addWidget(self.status_label)
         global_layout.addWidget(self.mapping_hint_label)
 
         global_btn_row = QtWidgets.QHBoxLayout()
@@ -169,7 +173,6 @@ class ModelsPage(BasePage):
         mapping_card = InfoCard("映射列表", self.theme_manager.styles)
         mapping_card.layout().addWidget(self.mapping_table)
         right_layout.addWidget(mapping_card)
-        right_layout.addWidget(self.status_label)
         split.addWidget(right_widget)
         split.setStretchFactor(0, 0)
         split.setStretchFactor(1, 1)

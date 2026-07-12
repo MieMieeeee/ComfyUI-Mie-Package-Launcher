@@ -164,7 +164,44 @@ class TestGlobalActionsCard:
             walker = walker.parentWidget()
         pytest.fail("打开 yaml must live inside _global_actions_card")
 
+    def test_status_label_is_in_global_actions_card(self, qapp, tmp_path):
+        """The 外置模型库: X | 启用: Y | 默认: Z status line is global state, so
+        it should sit inside _global_actions_card alongside the hint and the
+        global action buttons, not at the bottom of the right-side layout."""
+        page = _make_page(qapp, tmp_path)
+        status = page.status_label
+        # Walk parent chain: status must be a descendant of _global_actions_card
+        walker = status.parentWidget()
+        while walker is not None and walker is not page:
+            if walker is page._global_actions_card:
+                return  # found
+            walker = walker.parentWidget()
+        pytest.fail("status_label must be a descendant of _global_actions_card")
+
+    def test_status_label_no_longer_in_right_side_bottom(self, qapp, tmp_path):
+        """After the move, status_label must NOT be a child of the right widget
+        that hosts the editor + mapping card. (It used to be appended at the
+        bottom of right_layout.)"""
+        page = _make_page(qapp, tmp_path)
+        status = page.status_label
+        walker = status.parentWidget()
+        # If status is inside _global_actions_card, the right-side widgets (editor,
+        # mapping card) must not appear in its ancestor chain.
+        right_widget = None
+        for w in page.findChildren(QtWidgets.QWidget):
+            # The right widget is the QSplitter'"'"'s index-1 child.
+            splitter = page.findChild(QtWidgets.QSplitter)
+            if splitter is not None and splitter.count() >= 2:
+                right_widget = splitter.widget(1)
+                break
+        assert right_widget is not None, "page must have a 2-pane QSplitter"
+        walker = status.parentWidget()
+        while walker is not None and walker is not page:
+            assert walker is not right_widget,                 "status_label must not be a descendant of the right split pane"
+            walker = walker.parentWidget()
+
     def test_editor_panel_drops_global_buttons(self, qapp, tmp_path):
+
         """The per-library editor card should no longer carry 应用更改 / 打开 yaml —
         they belong to the global actions card now."""
         page = _make_page(qapp, tmp_path)
