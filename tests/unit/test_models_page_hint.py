@@ -4,36 +4,15 @@ The models page must show a hint that informs the user: adding or removing
 folders inside the external library directory requires clicking "Apply
 Changes" to refresh the mapping table and rewrite extra_model_paths.yaml.
 
-These tests construct their own QApplication because pytest-qt is not
-installed in this environment; the project'"'"'s conftest.py qtbot fixture
-is broken (recursive self-dependency) so we sidestep both.
+Run with the project'"'"'s canonical interpreter (see pyproject.toml
+[project.optional-dependencies].test): .venv/Scripts/python.exe -m pytest ...
 """
-import sys
 from unittest.mock import MagicMock
 
 import pytest
 
 pytest.importorskip("PyQt5")
 
-
-# --- QApplication bootstrap --------------------------------------------------
-
-@pytest.fixture(scope="session")
-def _qapp_session():
-    from PyQt5 import QtWidgets
-    app = QtWidgets.QApplication.instance()
-    if app is None:
-        app = QtWidgets.QApplication(sys.argv)
-    return app
-
-
-@pytest.fixture
-def qapp(_qapp_session):
-    """Session-scoped QApplication, exposed as a per-test fixture."""
-    return _qapp_session
-
-
-# --- helpers ---------------------------------------------------------------
 
 def _make_app(tmp_path):
     from services.model_path_service import ModelPathService
@@ -58,8 +37,6 @@ def _make_page(qapp, tmp_path):
     qapp.processEvents()
     return page
 
-
-# --- tests -----------------------------------------------------------------
 
 class TestMappingHintLabel:
     """The models page exposes a persistent hint about re-applying after folder changes."""
