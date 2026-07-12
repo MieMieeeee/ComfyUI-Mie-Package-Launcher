@@ -567,3 +567,57 @@ class TestRehydrateFromMieLauncherBlocks:
         assert len(libs) == 1
         assert libs[0]["base_path"] == "E:/Legacy"
 
+
+class TestMappingsTolerateMissingDirs:
+    """
+    When the user picks a base directory whose layout does NOT match any
+    of the standard presets (no `models/`, no SD WebUI-style aliases), the
+    service must not emit phantom `models/<key>/` lines that point at
+    directories that don't exist. ComfyUI silently uses whatever we hand
+    it; a phantom mapping tells it to look in a folder that isn't there,
+    and the user has no good way to tell from the UI.
+    """
+
+    def _service(self, tmp_path):
+        from services.model_path_service import ModelPathService
+        return ModelPathService(_make_app(tmp_path))
+
+    def test_get_mappings_for_flat_dir_omits_unresolvable_keys(self, tmp_path):
+        base = tmp_path / "Flat"
+        base.mkdir()
+        (base / "text_encoders").mkdir()
+        (base / "diffusion_models").mkdir()
+        svc = self._service(tmp_path)
+        mappings = svc.get_mappings_for_base(str(base))
+        result = dict(mappings)
+        for k in ("checkpoints", "clip_vision", "configs", "controlnet",
+                  "embeddings", "loras", "upscale_models", "vae",
+                  "audio_encoders", "model_patches"):
+            assert k not in result, f"key should be omitted for a flat layout, got {k}={result.get(k)!r}"
+        assert result["text_encoders"].startswith("text_encoders")
+        assert result["diffusion_models"].startswith("diffusion_models")
+
+    def test_get_mappings_standard_layout_unchanged(self, tmp_path):
+        base = tmp_path / "Standard"
+        base.mkdir()
+        (base / "models" / "checkpoints").mkdir(parents=True)
+        (base / "models" / "loras").mkdir(parents=True)
+        svc = self._service(tmp_path)
+        result = dict(svc.get_mappings_for_base(str(base)))
+        assert result["checkpoints"] == "models/checkpoints/"
+        assert result["loras"] == "models/loras/"
+
+    def test_get_mappings_mixed_layout_picks_paths_that_exist(self, tmp_path):
+        base = tmp_path / "Mixed"
+        base.mkdir()
+        (base / "models" / "checkpoints").mkdir(parents=True)
+        (base / "loras").mkdir(parents=True)
+        svc = self._service(tmp_path)
+        result = dict(svc.get_mappings_for_base(str(base)))
+        assert result["checkpoints"] == "models/checkpoints/"
+        assert result["loras"] == "loras/"
+        for k in ("vae", "controlnet", "clip_vision", "configs",
+                  "embeddings", "upscale_models", "audio_encoders",
+                  "model_patches", "text_encoders", "diffusion_models"):
+            assert k not in result
+

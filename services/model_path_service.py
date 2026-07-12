@@ -146,14 +146,21 @@ class ModelPathService:
                         new_lines.append(short_vline + "/")
                         continue
 
-                    # 4. Fallback
-                    if base_is_models:
-                        new_lines.append(short_vline + "/")
-                    else:
-                        new_lines.append(vline)
+                    # 4. No real path matched. Skip emitting a phantom
+                    #    `models/<key>/` line — the user might have a layout that
+                    #    intentionally omits this category, and ComfyUI treats a
+                    #    missing directory as silent (no warning UI to disambiguate).
+                    pass
                 else:
+                    # base_path doesn't exist (cold start). Preserve the standard
+                    # mapping so the user sees the framework; they can refresh once
+                    # the directory is in place.
                     new_lines.append(vline)
 
+            # Drop keys whose paths could not be resolved on disk so the yaml we
+            # write reflects directories the launcher can actually point at.
+            if not new_lines:
+                continue
             adjusted_map.append((key, "\n".join(new_lines)))
         return adjusted_map
 

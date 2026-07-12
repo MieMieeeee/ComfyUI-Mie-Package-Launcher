@@ -501,41 +501,49 @@ class TestGetMappingsForBase:
     """Test get_mappings_for_base method."""
 
     def test_get_mappings_for_base_resolves_path(self, tmp_path):
-        """get_mappings_for_base should resolve the path before getting mappings."""
+        """Resolution should pick the child that actually holds the models,
+        then _get_standard_mappings drops keys whose paths are not on disk."""
         from services.model_path_service import ModelPathService
 
         app = MagicMock()
         service = ModelPathService(app)
-        
-        # Create nested structure that needs resolution
+
+        # Nested structure: parent has one child, child holds models/checkpoints.
         parent = tmp_path / "parent"
         parent.mkdir()
         child = parent / "child"
         child.mkdir()
-        (child / "models").mkdir()
-        
-        # Using parent path but it should resolve to child
-        result = service.get_mappings_for_base(str(parent))
-        
-        # Should return mappings based on resolved path (child)
-        assert len(result) > 0
+        (child / "models" / "checkpoints").mkdir(parents=True)
+
+        result = dict(service.get_mappings_for_base(str(parent)))
+
+        # Resolved to child; the only standard key with a real path is checkpoints.
+        assert result == {"checkpoints": "models/checkpoints/"}
 
     def test_get_mappings_for_base_returns_combined_mappings(self, tmp_path):
-        """get_mappings_for_base should return standard plus extra mappings."""
+        """Standard keys whose paths exist on disk plus any auto-discovered
+        non-standard extras; phantom keys (no real path) are omitted."""
         from services.model_path_service import ModelPathService
 
         app = MagicMock()
         service = ModelPathService(app)
-        
-        # Create base with extra folder
+
+        # Base dir is named "models" so short-path resolution (step 3) catches
+        # the bare checkpoints/ folder. extra_model is a non-standard extra.
         base_path = tmp_path / "models"
         base_path.mkdir()
+        (base_path / "checkpoints").mkdir()
         (base_path / "extra_model").mkdir()
-        
-        result = service.get_mappings_for_base(str(base_path))
-        
-        # Should have standard mappings plus extras
-        assert len(result) >= len(service.standard_map)
+
+        result = dict(service.get_mappings_for_base(str(base_path)))
+
+        assert result["checkpoints"] == "checkpoints/"
+        assert result["extra_model"] == "extra_model/"
+        for k in ("text_encoders", "clip_vision", "configs", "controlnet",
+                  "diffusion_models", "embeddings", "loras",
+                  "upscale_models", "vae", "audio_encoders",
+                  "model_patches"):
+            assert k not in result, f"phantom key leaked: {k}={result.get(k)!r}"
 
 
 class TestGetMappings:
