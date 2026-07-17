@@ -424,9 +424,12 @@ class VersionPage(BasePage):
         return commits
 
     def _comfyui_root(self):
-        """解析 ComfyUI 代码目录（config paths.comfyui_root + /ComfyUI）。失败返回 None。"""
+        """解析 ComfyUI 代码目录（激活环境 comfyui_root + /ComfyUI）。失败返回 None。"""
         try:
-            base = Path(self.app.config.get("paths", {}).get("comfyui_root") or ".").resolve()
+            # 多环境支持：读激活环境的 comfyui_root
+            paths = self.app.get_active_paths() if hasattr(self.app, "get_active_paths") \
+                else self.app.config.get("paths", {})
+            base = Path(paths.get("comfyui_root") or ".").resolve()
             return (base / "ComfyUI").resolve()
         except Exception:
             return None
@@ -562,7 +565,10 @@ class VersionPage(BasePage):
             if hasattr(self.app, "logger"):
                 self.app.logger.info(f"UI: 请求切换到提交 {commit_hash}")
 
-            base = Path(self.app.config.get("paths", {}).get("comfyui_root") or ".").resolve()
+            # 多环境支持：读激活环境的 comfyui_root
+            paths = self.app.get_active_paths() if hasattr(self.app, "get_active_paths") \
+                else self.app.config.get("paths", {})
+            base = Path(paths.get("comfyui_root") or ".").resolve()
             root = (base / "ComfyUI").resolve()
 
             # 执行git checkout

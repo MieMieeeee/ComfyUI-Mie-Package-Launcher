@@ -37,7 +37,10 @@ class ModelPathService:
 
 
     def _get_yaml_path(self) -> Path:
-        base = Path(self.app.config.get("paths", {}).get("comfyui_root") or ".").resolve()
+        # 多环境支持：读激活环境的 comfyui_root
+        paths = self.app.get_active_paths() if hasattr(self.app, "get_active_paths") \
+            else self.app.config.get("paths", {})
+        base = Path(paths.get("comfyui_root") or ".").resolve()
         comfy_root = (base / "ComfyUI").resolve()
         return comfy_root / "extra_model_paths.yaml"
 

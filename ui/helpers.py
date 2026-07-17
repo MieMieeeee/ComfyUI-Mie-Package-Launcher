@@ -17,7 +17,10 @@ def compute_elided_path_text(app, max_chars: int = 64) -> str:
         full = getattr(app, "_path_full_text", None)
         if not full:
             try:
-                full = app.config.get("paths", {}).get("comfyui_path", "")
+                # 多环境支持：读激活环境的 comfyui_root（老的 comfyui_path 是死字段）
+                paths = app.get_active_paths() if hasattr(app, "get_active_paths") \
+                    else app.config.get("paths", {})
+                full = paths.get("comfyui_root", "")
             except Exception:
                 full = ""
         if not full:

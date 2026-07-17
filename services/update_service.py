@@ -39,9 +39,12 @@ class UpdateService:
 
     def _resolve_python_exec(self):
         comfy_root = self._resolve_comfy_root()
+        # 多环境支持：读激活环境的 python_path
+        paths = self.app.get_active_paths() if hasattr(self.app, "get_active_paths") \
+            else self.app.config.get("paths", {})
         py_path = PATHS.resolve_python_exec(
             comfy_root,
-            self.app.config.get("paths", {}).get(
+            paths.get(
                 "python_path", "python_embeded/python.exe"
             ),
         )

@@ -8,7 +8,7 @@ from PyQt5 import QtWidgets, QtCore, QtGui
 from PyQt5.QtCore import Qt
 from .base_page import BasePage
 from ui_qt.theme_styles import ThemeStyles
-from ui_qt.pages.launch import LaunchControlsSection, EnvironmentSection, VersionSection
+from ui_qt.pages.launch import LaunchControlsSection, EnvironmentSection, EnvironmentSelector, VersionSection
 
 
 class LaunchPage(BasePage):
@@ -25,6 +25,42 @@ class LaunchPage(BasePage):
         """与旧版兼容的占位方法：实际状态由 ProcessManager 通过 BigBtnProxy 控制"""
         pass
 
+    def _on_env_switched(self, env_id):
+        """环境下拉切换成功后的刷新槽。
+
+        由 EnvironmentSelector.env_switched 信号触发。统一调 app 的
+        refresh_after_env_switch，集中刷新所有依赖环境路径的页面（版本信息、
+        版本页、模型页、插件页、日志页）。
+        """
+        try:
+            if hasattr(self.app, 'refresh_after_env_switch'):
+                self.app.refresh_after_env_switch()
+        except Exception:
+            pass
+
+    def _goto_settings_env(self):
+        """点"管理…"按钮 → 跳转到设置页的环境管理卡片。
+
+        通过模拟点击侧边栏的 settings 导航按钮触发页面切换（复用现有的
+        _select_tab 逻辑），然后刷新环境列表。
+        """
+        try:
+            nav_map = getattr(self.app, "_nav_btn_map", None) or {}
+            btn = nav_map.get("settings")
+            if btn is not None:
+                btn.click()
+        except Exception:
+            pass
+        # 切到设置页后，刷新环境列表（可能在别处被改动过）
+        try:
+            settings_page = getattr(self.app, "_new_pages", {}).get("settings")
+            if settings_page is not None:
+                mgr = getattr(settings_page, "env_manager_section", None)
+                if mgr is not None:
+                    mgr.reload()
+        except Exception:
+            pass
+
     def _setup_ui(self):
         """设置 UI"""
         layout = QtWidgets.QVBoxLayout(self)
@@ -38,6 +74,14 @@ class LaunchPage(BasePage):
                 self.app.logger.info("LaunchPage 初始化: comfyui_root=%s", comfy_root)
         except Exception:
             pass
+
+        # ============== 环境选择器（多环境支持） ==============
+        # 放在最顶部：用户先选环境，再启动。切换环境前会检查是否在跑。
+        self.environment_selector = EnvironmentSelector(
+            app_context=self.app,
+            theme_manager=self.theme_manager,
+        )
+        layout.addWidget(self.environment_selector)
 
         # ============== 启动控制区块 ==============
         top_row = QtWidgets.QHBoxLayout()
@@ -143,6 +187,15 @@ class LaunchPage(BasePage):
         )
         layout.addWidget(self.environment_section)
 
+        # 多环境：下拉切换环境后，刷新环境配置区块的路径显示 + 版本信息
+        self.environment_selector.env_switched.connect(self._on_env_switched)
+        # 多环境：点"管理…"按钮跳转到设置页的环境管理卡片
+        self.environment_selector.manage_requested.connect(self._goto_settings_env)
+        # 多环境：用户在环境配置区块改了根目录/python 路径 → 刷新顶部摘要
+        self.environment_section.paths_changed.connect(
+            self.environment_selector._refresh_path_summary
+        )
+
         # ============== 版本与更新区块 ==============
         self.version_section = VersionSection(
             app_context=self.app,
@@ -157,8 +210,10 @@ class LaunchPage(BasePage):
 
         self._build_quick_dir(quick_layout)
 
-        # 将多余高度留给页面底部的弹性空白，而不是拉伸"版本与更新"等区块
-        layout.addStretch(1)
+        # 底部留白：用固定间距而非 addStretch(1)。之前用 stretch(1) 会把
+        # 快捷目录顶到视口外（加环境选择器后页面更高了）。固定间距保证
+        # 快捷目录始终在首屏可见范围内，超出部分由外层 ScrollArea 滚动。
+        layout.addSpacing(8)
 
         # 存储需要主题更新的组件
         self._styled_widgets = [self.launch_controls_section, self.environment_section, self.version_section]
@@ -206,7 +261,10 @@ class LaunchPage(BasePage):
             else:
                 from utils import paths as PATHS
                 try:
-                    root = PATHS.get_comfy_root(self.app.config.get("paths", {}))
+                    # 多环境支持：读激活环境的路径
+                    _paths = self.app.get_active_paths() if hasattr(self.app, "get_active_paths") \
+                        else self.app.config.get("paths", {})
+                    root = PATHS.get_comfy_root(_paths)
                     from utils.ui_actions import open_file as _open_file
                     _open_file(self.app, PATHS.logs_file(root))
                 except Exception:
@@ -298,7 +356,12 @@ class LaunchPage(BasePage):
                 return  # 拒绝应用无效目录
 
             if hasattr(self.app, 'config'):
-                self.app.config.setdefault('paths', {})['comfyui_root'] = d
+                # 多环境支持：写回当前激活环境的 comfyui_root
+                try:
+                    from config.migrations import update_active_env
+                    update_active_env(self.app.config, comfyui_root=d)
+                except Exception:
+                    self.app.config.setdefault('paths', {})['comfyui_root'] = d
                 try:
                     # 保存配置并同步更新app.config引用
                     saved_config = self.app.services.config.save(self.app.config)
@@ -325,14 +388,18 @@ class LaunchPage(BasePage):
                     comfy_path = (base / "ComfyUI").resolve()
                     try:
                         from utils import paths as PATHS
-                        configured = self.app.config.get("paths", {}).get("python_path", "python_embeded/python.exe")
+                        # 多环境支持：兜底用激活环境的 python_path
+                        _ap = self.app.get_active_paths() if hasattr(self.app, "get_active_paths") \
+                            else self.app.config.get("paths", {})
+                        configured = _ap.get("python_path", "python_embeded/python.exe")
                         py = PATHS.resolve_python_exec(comfy_path, configured)
                         self.app.python_exec = str(py)
                     except Exception:
                         pass
-                # 写入配置并更新显示
+                # 写入配置并更新显示（多环境：写激活环境的 python_path）
                 try:
-                    self.app.config.setdefault('paths', {})['python_path'] = self.app.python_exec
+                    from config.migrations import update_active_env
+                    update_active_env(self.app.config, python_path=self.app.python_exec)
                     if hasattr(self.app, 'services') and hasattr(self.app.services, 'config'):
                         saved_config = self.app.services.config.save(self.app.config)
                         if saved_config is not None:
@@ -363,7 +430,9 @@ class LaunchPage(BasePage):
         except Exception:
             pass
         try:
-            self.app.config.setdefault('paths', {})['python_path'] = p
+            # 多环境支持：写激活环境的 python_path
+            from config.migrations import update_active_env
+            update_active_env(self.app.config, python_path=p)
             if hasattr(self.app, 'services') and hasattr(self.app.services, 'config'):
                 saved_config = self.app.services.config.save(self.app.config)
                 if saved_config is not None:

@@ -25,28 +25,35 @@ def open_file(app, path: Path):
     else:
         DialogHelper.show_warning(None, "文件不存在", f"文件不存在: {path}")
 
+def _active_paths(app):
+    """多环境支持：读激活环境的 paths 子 dict。"""
+    if hasattr(app, "get_active_paths"):
+        return app.get_active_paths()
+    return app.config.get("paths", {}) if isinstance(getattr(app, "config", None), dict) else {}
+
+
 def open_root_dir(app):
-    root = PATHS.get_comfy_root(app.config.get("paths", {}))
+    root = PATHS.get_comfy_root(_active_paths(app))
     open_dir(app, root)
 
 def open_logs_file(app):
-    root = PATHS.get_comfy_root(app.config.get("paths", {}))
+    root = PATHS.get_comfy_root(_active_paths(app))
     open_file(app, PATHS.logs_file(root))
 
 def open_input_dir(app):
-    root = PATHS.get_comfy_root(app.config.get("paths", {}))
+    root = PATHS.get_comfy_root(_active_paths(app))
     open_dir(app, PATHS.input_dir(root))
 
 def open_output_dir(app):
-    root = PATHS.get_comfy_root(app.config.get("paths", {}))
+    root = PATHS.get_comfy_root(_active_paths(app))
     open_dir(app, PATHS.output_dir(root))
 
 def open_plugins_dir(app):
-    root = PATHS.get_comfy_root(app.config.get("paths", {}))
+    root = PATHS.get_comfy_root(_active_paths(app))
     open_dir(app, PATHS.plugins_dir(root))
 
 def open_workflows_dir(app):
-    base = PATHS.get_comfy_root(app.config.get("paths", {}))
+    base = PATHS.get_comfy_root(_active_paths(app))
     wf = PATHS.workflows_dir(base)
     try:
         app.logger.info("打开工作流目录: %s", str(wf))

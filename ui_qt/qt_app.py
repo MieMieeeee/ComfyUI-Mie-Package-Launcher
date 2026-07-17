@@ -8,6 +8,7 @@ from PyQt5.QtCore import Qt
 from utils import paths as PATHS
 from utils.logging import install_logging
 from config.manager import ConfigManager
+from config.migrations import resolve_active_paths
 from services.di import ServiceContainer
 from core.version_service import refresh_version_info
 from core.process_manager import ProcessManager
@@ -213,10 +214,12 @@ class VersionWorker(QtCore.QThread):
 
     def run(self):
         try:
+            # 多环境支持：读激活环境的路径
             paths = (
-                self.app.config.get("paths", {})
-                if isinstance(self.app.config, dict)
-                else {}
+                self.app.get_active_paths()
+                if hasattr(self.app, "get_active_paths")
+                else (self.app.config.get("paths", {})
+                      if isinstance(self.app.config, dict) else {})
             )
             base = Path(paths.get("comfyui_root") or ".").resolve()
             root = (base / "ComfyUI").resolve()
@@ -905,19 +908,22 @@ class PyQtLauncher(QtWidgets.QMainWindow, process_events.ProcessCallback):
         cfg_file = (Path.cwd() / "launcher" / "config.json").resolve()
         self.config_manager = ConfigManager(cfg_file, self.logger)
         self.config = self.config_manager.load_config()
+        # 多环境支持：用激活环境的路径解析 python_exec（get_active_paths 会
+        # 优先读 environments[active_env_id]，未迁移时回退老 config["paths"]）。
+        active_paths = self.get_active_paths()
         comfy_base = Path(
-            self.config.get("paths", {}).get("comfyui_root") or "."
+            active_paths.get("comfyui_root") or "."
         ).resolve()
         comfy_path = (comfy_base / "ComfyUI").resolve()
         py_exec = PATHS.resolve_python_exec(
             comfy_path,
-            self.config.get("paths", {}).get(
+            active_paths.get(
                 "python_path", "python_embeded/python.exe"
             ),
         )
         self.python_exec = str(py_exec)
-        self.config.setdefault("paths", {})
-        self.config["paths"]["python_path"] = self.python_exec
+        # 注意：多环境下不回写 config["paths"]["python_path"]（会污染其他环境）。
+        # 解析结果只存在 self.python_exec 内存里，build_launch_params 每次现解析。
         self.root = QtRootAdapter()
         # 历史上曾有 "directml" 选项，这里统一回退为 "gpu"
         self.compute_mode = Var("gpu")
@@ -1092,8 +1098,11 @@ class PyQtLauncher(QtWidgets.QMainWindow, process_events.ProcessCallback):
 
             def get_remote_url(self):
                 try:
+                    # 多环境支持：读激活环境的 comfyui_root
+                    _ap = self.app.get_active_paths() if hasattr(self.app, "get_active_paths") \
+                        else self.app.config.get("paths", {})
                     base = Path(
-                        self.app.config.get("paths", {}).get("comfyui_root") or "."
+                        _ap.get("comfyui_root") or "."
                     ).resolve()
                     root = (base / "ComfyUI").resolve()
                 except Exception:
@@ -2422,6 +2431,19 @@ class PyQtLauncher(QtWidgets.QMainWindow, process_events.ProcessCallback):
             "tasks": page_tasks,
         }
 
+        # 多环境：设置页改了环境列表 → 同步刷新启动页的环境下拉框 + 路径摘要。
+        # 两个组件在不同页面，通过信号跨页通信。
+        try:
+            env_mgr = getattr(page_settings, "env_manager_section", None)
+            env_selector = getattr(page_launch, "environment_selector", None)
+            if env_mgr is not None and env_selector is not None:
+                # 列表增删改 → 刷新下拉框选项
+                env_mgr.environments_changed.connect(env_selector.reload)
+                # 激活环境切换 → 集中刷新所有依赖环境路径的页面
+                env_mgr.active_env_changed.connect(self.refresh_after_env_switch)
+        except Exception:
+            pass
+
         def wrap_in_scroll(widget):
             # Ensure the widget inside scroll area is transparent
             widget.setAttribute(Qt.WA_StyledBackground, True)
@@ -2597,8 +2619,10 @@ class PyQtLauncher(QtWidgets.QMainWindow, process_events.ProcessCallback):
         try:
             from pathlib import Path as P
 
+            # 多环境支持：读激活环境的 comfyui_root
+            _ap = self.get_active_paths()
             comfy_root = Path(
-                self.config.get("paths", {}).get("comfyui_root") or "."
+                _ap.get("comfyui_root") or "."
             ).resolve()
             comfy_dir = comfy_root / "ComfyUI"
             python_path = (
@@ -2916,10 +2940,21 @@ class PyQtLauncher(QtWidgets.QMainWindow, process_events.ProcessCallback):
         try:
             if not hasattr(self, "_version_workers"):
                 self._version_workers = {}
+            if not hasattr(self, "_env_token"):
+                self._env_token = 0
 
             worker_id = f"{worker_type}_{attempt}"
             worker = worker_class(self, attempt)
-            worker.versionReady.connect(callback)
+            # 环境切换 token 校验：worker 启动时捕获当前 token，回调时若 token 已变
+            # （环境切换过），丢弃结果——避免旧环境的 worker 迟到结果覆盖新环境。
+            launch_token = self._env_token
+
+            def _guarded_callback(*args, **kwargs):
+                if self._env_token != launch_token:
+                    return  # 环境已切换，丢弃旧结果
+                callback(*args, **kwargs)
+
+            worker.versionReady.connect(_guarded_callback)
 
             # 连接重试信号
             def on_retry(attempt_num):
@@ -3140,6 +3175,107 @@ class PyQtLauncher(QtWidgets.QMainWindow, process_events.ProcessCallback):
                 refresh_version_info(self, scope)
             except Exception:
                 pass
+
+    def get_active_paths(self):
+        """Return the active environment's paths sub-dict.
+
+        多环境支持：解析 ``config["environments"]`` 里激活的那个环境，
+        返回形如 ``{"comfyui_root": ..., "python_path": ...}`` 的子 dict。
+        调用方（build_launch_params 等）应优先用这个，而不是直接读
+        ``config["paths"]``。未迁移时回退到老 paths 段。与 HeadlessAppContext
+        同名方法行为一致（鸭子类型约定）。
+        """
+        return resolve_active_paths(self.config)
+
+    def refresh_after_env_switch(self):
+        """切换激活环境后，集中刷新所有依赖环境路径的 UI。
+
+        多环境支持：环境切换会改变 comfyui_root / python_path，进而影响
+        版本信息、插件列表、模型库、日志文件路径等。这些页面各自缓存了
+        旧环境的数据，必须显式刷新。本方法是唯一的统一刷新入口，两个
+        切换入口（启动页下拉、设置页管理）都应调用它。
+
+        每项刷新都包在 try/except 里，单个页面刷新失败不影响其他页面。
+        """
+        # 自增环境 token：让正在跑的旧 version worker 回调时丢弃结果（P1 竞态防护）
+        try:
+            self._env_token = getattr(self, "_env_token", 0) + 1
+        except Exception:
+            pass
+
+        # 1. 启动页版本信息（Python/Torch/前端/内核/GPU 等）
+        try:
+            self.get_version_info("all")
+        except Exception:
+            pass
+
+        pages = getattr(self, "_new_pages", {}) or {}
+
+        # 2. 版本管理页：内核版本标签 + git 提交历史
+        try:
+            version_page = pages.get("version")
+            if version_page is not None and hasattr(version_page, "_refresh_kernel_section"):
+                version_page._refresh_kernel_section()
+        except Exception:
+            pass
+
+        # 3. 模型页：外置模型库列表（依赖 comfyui_root/extra_model_paths.yaml）
+        try:
+            models_page = pages.get("models")
+            if models_page is not None and hasattr(models_page, "refresh_from_config"):
+                models_page.refresh_from_config()
+        except Exception:
+            pass
+
+        # 4. 插件页：强制重扫 custom_nodes（loader 缓存了"已加载"状态，必须 load() 强制）
+        try:
+            ctrl = getattr(self, "_plugin_controller", None)
+            if ctrl is not None:
+                loader = getattr(ctrl, "_loader", None)
+                if loader is not None:
+                    loader.load()
+        except Exception:
+            pass
+
+        # 5. 日志页：重定向 tailer 到新环境的 comfyui.log
+        try:
+            page_logs = pages.get("logs")
+            if page_logs is not None:
+                from utils.paths import comfy_root_from_config, logs_file as _logs_file
+                _root = comfy_root_from_config(self.config)
+                _log_path = _logs_file(_root)
+                if hasattr(page_logs, "stop_tailing"):
+                    page_logs.stop_tailing()
+                page_logs.set_log_path(_log_path)
+                if hasattr(page_logs, "start_tailing"):
+                    page_logs.start_tailing(start_from_beginning=False)
+        except Exception:
+            pass
+
+    def has_active_background_tasks(self) -> bool:
+        """是否有进行中的后台任务（环境切换前检查用）。
+
+        后台任务基于当前环境路径操作（更新内核/插件、检查更新等），切换环境
+        会让正在跑的任务读到新路径，可能操作错误环境甚至写坏文件。所以切换前
+        若有活跃后台任务，应阻止切换（不像 ComfyUI 进程那样可以强行停——后台
+        任务涉及 git/cm-cli 子进程，强杀风险大）。
+
+        覆盖范围：
+        - BackgroundTaskRegistry 里显式注册的任务（检查更新/更新全部）
+        - _update_running 标志（核心更新流程）
+        """
+        try:
+            registry = getattr(self, "_bg_task_registry", None)
+            if registry is not None and registry.count_active() > 0:
+                return True
+        except Exception:
+            pass
+        try:
+            if getattr(self, "_update_running", False):
+                return True
+        except Exception:
+            pass
+        return False
 
     def save_config(self):
         try:
@@ -4709,8 +4845,8 @@ class PyQtLauncher(QtWidgets.QMainWindow, process_events.ProcessCallback):
                 self.logger.info(
                     "updateGeometry 后窗口大小: %dx%d", self.width(), self.height()
                 )
-                # 检查根目录配置
-                comfy_root = self.config.get("paths", {}).get("comfyui_root", "NOT_SET")
+                # 检查根目录配置（多环境：激活环境的 comfyui_root）
+                comfy_root = self.get_active_paths().get("comfyui_root", "NOT_SET")
                 self.logger.info("当前根目录配置: %s", comfy_root)
         except Exception:
             pass
@@ -4766,8 +4902,10 @@ class PyQtLauncher(QtWidgets.QMainWindow, process_events.ProcessCallback):
         from ui_qt.widgets.custom_confirm_dialog import CustomConfirmDialog
 
         while True:
+            # 多环境支持：读激活环境的 comfyui_root
+            _ap = self.get_active_paths()
             comfy_root = Path(
-                self.config.get("paths", {}).get("comfyui_root") or "."
+                _ap.get("comfyui_root") or "."
             ).resolve()
             comfy_dir = comfy_root / "ComfyUI"
 
@@ -4811,8 +4949,12 @@ class PyQtLauncher(QtWidgets.QMainWindow, process_events.ProcessCallback):
                     selected_comfy_dir.exists()
                     and (selected_comfy_dir / "main.py").exists()
                 ):
-                    # 验证通过，保存配置
-                    self.config.setdefault("paths", {})["comfyui_root"] = d
+                    # 验证通过，保存配置（多环境：写激活环境的 comfyui_root）
+                    try:
+                        from config.migrations import update_active_env
+                        update_active_env(self.config, comfyui_root=d)
+                    except Exception:
+                        self.config.setdefault("paths", {})["comfyui_root"] = d
                     try:
                         saved_config = self.services.config.save(self.config)
                         if saved_config is not None:
@@ -4830,16 +4972,22 @@ class PyQtLauncher(QtWidgets.QMainWindow, process_events.ProcessCallback):
                         else:
                             from utils import paths as PATHS
 
-                            configured = self.config.get("paths", {}).get(
+                            # 多环境支持：兜底用激活环境的 python_path
+                            configured = self.get_active_paths().get(
                                 "python_path", "python_embeded/python.exe"
                             )
                             py = PATHS.resolve_python_exec(
                                 selected_comfy_dir, configured
                             )
                             self.python_exec = str(py)
-                        self.config.setdefault("paths", {})["python_path"] = (
-                            self.python_exec
-                        )
+                        # 多环境支持：写激活环境的 python_path
+                        try:
+                            from config.migrations import update_active_env
+                            update_active_env(self.config, python_path=self.python_exec)
+                        except Exception:
+                            self.config.setdefault("paths", {})["python_path"] = (
+                                self.python_exec
+                            )
                         try:
                             self.services.config.save(self.config)
                         except Exception:

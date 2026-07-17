@@ -71,8 +71,10 @@ class PluginService:
 
     def _python_exec(self) -> Optional[str]:
         try:
-            cfg = getattr(self.app, "config", None) or {}
-            py_cfg = (cfg.get("paths", {}) or {}).get("python_path") or "python_embeded/python.exe"
+            # 多环境支持：读激活环境的 python_path
+            paths = self.app.get_active_paths() if hasattr(self.app, "get_active_paths") \
+                else (getattr(self.app, "config", None) or {}).get("paths", {})
+            py_cfg = (paths or {}).get("python_path") or "python_embeded/python.exe"
             return str(PATHS.resolve_python_exec(self._comfyui_dir(), py_cfg))
         except Exception:
             return None

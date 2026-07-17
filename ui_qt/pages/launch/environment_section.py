@@ -5,16 +5,20 @@
 
 from pathlib import Path
 from PyQt5 import QtWidgets, QtCore, QtGui
-from PyQt5.QtCore import Qt
+from PyQt5.QtCore import Qt, pyqtSignal
 from ui_qt.widgets.custom import NoWheelComboBox
 
 
 class EnvironmentSection(QtWidgets.QWidget):
     """
     环境配置区块控件
-    
+
     包含：HF镜像源、GitHub代理、PyPI代理、根目录选择、Python路径选择
     """
+
+    # 用户在本区块改了根目录 / python 路径后发出，供 LaunchPage 同步刷新
+    # 顶部环境选择器的路径摘要。
+    paths_changed = pyqtSignal()
 
     def __init__(self, app_context, theme_manager=None, parent=None):
         super().__init__(parent)
@@ -268,88 +272,9 @@ class EnvironmentSection(QtWidgets.QWidget):
         form_layout.addWidget(pypi_label, 2, 0)
         form_layout.addWidget(_add_pypi_container, 2, 1)
 
-        # ============== 分割线 ==============
-        div_line = QtWidgets.QFrame()
-        div_line.setFrameShape(QtWidgets.QFrame.HLine)
-        div_line.setFrameShadow(QtWidgets.QFrame.Plain)
-        div_line.setStyleSheet(self._get_divider_style())
-        form_layout.addWidget(div_line, 3, 0, 1, 2)
-
-        # ============== 根目录 ==============
-        root_show = QtWidgets.QLineEdit()
-        root_show.setReadOnly(True)
-        root_show.setStyleSheet(self._get_input_style())
-        root_show.setSizePolicy(QtWidgets.QSizePolicy.Expanding, QtWidgets.QSizePolicy.Fixed)
-        root_show.setMinimumWidth(520)
-        if hasattr(self.app, 'config'):
-            root_show.setText(str(Path(self.app.config.get('paths', {}).get('comfyui_root') or '.')))
-
-        root_btn = QtWidgets.QPushButton("选择")
-        root_btn.setCursor(Qt.PointingHandCursor)
-        root_btn.setStyleSheet(self._get_primary_button_style())
-        root_btn.clicked.connect(self._choose_root)
-        root_btn.setToolTip("选择ComfyUI安装根目录")
-
-        _add_root_container = QtWidgets.QWidget()
-        _add_root_layout = QtWidgets.QHBoxLayout(_add_root_container)
-        _add_root_layout.setContentsMargins(0, 0, 0, 0)
-        _add_root_layout.setSpacing(10)
-        _add_root_layout.addWidget(root_show)
-        _add_root_layout.addWidget(root_btn)
-        self._root_show = root_show
-
-        root_label = QtWidgets.QLabel("根目录：")
-        root_label.setStyleSheet(lbl_style)
-        root_label.setAlignment(Qt.AlignRight | Qt.AlignVCenter)
-        root_label.setFixedWidth(100)
-
-        form_layout.addWidget(root_label, 4, 0)
-        form_layout.addWidget(_add_root_container, 4, 1)
-
-        # ============== Python 路径选择 ==============
-        py_label = QtWidgets.QLabel("Python 路径：")
-        py_label.setStyleSheet(lbl_style)
-        py_label.setAlignment(Qt.AlignRight | Qt.AlignVCenter)
-        py_label.setFixedWidth(100)
-
-        py_show = QtWidgets.QLineEdit()
-        py_show.setReadOnly(True)
-        py_show.setStyleSheet(self._get_input_style())
-        py_show.setSizePolicy(QtWidgets.QSizePolicy.Expanding, QtWidgets.QSizePolicy.Fixed)
-        py_show.setMinimumWidth(520)
-        try:
-            if hasattr(self.app, 'config'):
-                from pathlib import Path as _P
-                py_val = self.app.config.get('paths', {}).get('python_path') or ''
-                if py_val:
-                    py_path = _P(py_val)
-                    # 只有当路径存在时才显示，否则显示"未设置"
-                    if py_path.exists():
-                        py_show.setText(str(py_path.resolve()))
-                    else:
-                        py_show.setText("未设置")
-                else:
-                    py_show.setText("未设置")
-        except Exception:
-            py_show.setText("未设置")
-
-        py_btn = QtWidgets.QPushButton("选择")
-        py_btn.setCursor(Qt.PointingHandCursor)
-        py_btn.setStyleSheet(self._get_primary_button_style())
-        py_btn.setToolTip("选择 Python 可执行文件")
-        py_btn.clicked.connect(lambda: self._choose_python(py_show))
-
-        _add_py_container = QtWidgets.QWidget()
-        _add_py_layout = QtWidgets.QHBoxLayout(_add_py_container)
-        _add_py_layout.setContentsMargins(0, 0, 0, 0)
-        _add_py_layout.setSpacing(10)
-        _add_py_layout.addWidget(py_show)
-        _add_py_layout.addWidget(py_btn)
-
-        self._py_show = py_show
-
-        form_layout.addWidget(py_label, 5, 0)
-        form_layout.addWidget(_add_py_container, 5, 1)
+        # 注：根目录 / Python 路径选择已移除 —— 它们属于「环境」定义，
+        # 现在由顶部环境栏（EnvironmentSelector）的路径摘要 + 管理弹窗统一展示和编辑，
+        # 不再在此重复。代理设置（HF/GitHub/PyPI）保留。
 
     def _get_label_color(self):
         """获取标签颜色"""
@@ -443,7 +368,12 @@ class EnvironmentSection(QtWidgets.QWidget):
                 return  # 拒绝应用无效目录
 
             if hasattr(self.app, 'config'):
-                self.app.config.setdefault('paths', {})['comfyui_root'] = d
+                # 多环境支持：写回当前激活环境的 comfyui_root（不污染老 paths 段）
+                try:
+                    from config.migrations import update_active_env
+                    update_active_env(self.app.config, comfyui_root=d)
+                except Exception:
+                    self.app.config.setdefault('paths', {})['comfyui_root'] = d
                 try:
                     # 保存配置并同步更新app.config引用
                     saved_config = self.app.services.config.save(self.app.config)
@@ -470,14 +400,18 @@ class EnvironmentSection(QtWidgets.QWidget):
                     comfy_path = (base / "ComfyUI").resolve()
                     try:
                         from utils import paths as PATHS
-                        configured = self.app.config.get("paths", {}).get("python_path", "python_embeded/python.exe")
+                        # 多环境支持：兜底用激活环境的 python_path
+                        _ap = self.app.get_active_paths() if hasattr(self.app, "get_active_paths") \
+                            else self.app.config.get("paths", {})
+                        configured = _ap.get("python_path", "python_embeded/python.exe")
                         py = PATHS.resolve_python_exec(comfy_path, configured)
                         self.app.python_exec = str(py)
                     except Exception:
                         pass
-                # 写入配置并更新显示
+                # 写入配置并更新显示（多环境：写激活环境的 python_path）
                 try:
-                    self.app.config.setdefault('paths', {})['python_path'] = self.app.python_exec
+                    from config.migrations import update_active_env
+                    update_active_env(self.app.config, python_path=self.app.python_exec)
                     if hasattr(self.app, 'services') and hasattr(self.app.services, 'config'):
                         saved_config = self.app.services.config.save(self.app.config)
                         if saved_config is not None:
@@ -493,6 +427,8 @@ class EnvironmentSection(QtWidgets.QWidget):
                 pass
             if hasattr(self.app, 'get_version_info'):
                 self.app.get_version_info("all")
+            # 通知顶部环境选择器刷新路径摘要
+            self.paths_changed.emit()
 
     def _choose_python(self, py_show: QtWidgets.QLineEdit):
         """选择 Python 可执行文件"""
@@ -509,7 +445,9 @@ class EnvironmentSection(QtWidgets.QWidget):
         except Exception:
             pass
         try:
-            self.app.config.setdefault('paths', {})['python_path'] = p
+            # 多环境支持：写激活环境的 python_path
+            from config.migrations import update_active_env
+            update_active_env(self.app.config, python_path=p)
             if hasattr(self.app, 'services') and hasattr(self.app.services, 'config'):
                 saved_config = self.app.services.config.save(self.app.config)
                 if saved_config is not None:
@@ -521,6 +459,8 @@ class EnvironmentSection(QtWidgets.QWidget):
                 self.app.get_version_info("all")
         except Exception:
             pass
+        # 通知顶部环境选择器刷新路径摘要
+        self.paths_changed.emit()
 
     def _on_theme_changed(self, theme_styles):
         """主题变更回调"""

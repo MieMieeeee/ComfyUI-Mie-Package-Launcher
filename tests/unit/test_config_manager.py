@@ -32,6 +32,10 @@ class TestConfigManagerCharacterization(unittest.TestCase):
         config_data["launch_options"]["default_compute_mode"] = "cpu"
         config_data["custom_top_level"] = {"keep": True}
         config_data["proxy_settings"]["custom_proxy_key"] = "https://example.com/proxy"
+        # load_config 会把老 paths 段迁移成 environments，预先迁移让往返等价
+        from config.migrations import migrate_environments
+
+        migrate_environments(config_data)
 
         saved = manager.save_config(config_data)
         loaded = ConfigManager(self.config_file, self.logger).load_config()

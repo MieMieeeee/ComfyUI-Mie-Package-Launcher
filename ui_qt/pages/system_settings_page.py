@@ -7,6 +7,7 @@
 from PyQt5 import QtCore, QtWidgets
 
 from .base_page import BasePage
+from .environment_manager_section import EnvironmentManagerSection
 from ui_qt.widgets import InfoCard
 
 
@@ -122,6 +123,17 @@ class SystemSettingsPage(BasePage):
         layout.addWidget(title)
         self._page_title_refs = [title]
 
+        # ----- 环境管理卡片（多环境支持）-----
+        env_card = InfoCard("环境管理", self.theme_manager.styles)
+        layout.addWidget(env_card)
+        env_card_layout = env_card.layout()
+        env_card_layout.setSpacing(4)
+        self.env_manager_section = EnvironmentManagerSection(
+            app_context=self.app,
+            theme_manager=self.theme_manager,
+        )
+        env_card_layout.addWidget(self.env_manager_section)
+
         # ----- \u7a97\u53e3\u4e0e\u6258\u76d8\u5361\u7247 -----
         card = InfoCard("\u7a97\u53e3\u4e0e\u6258\u76d8", self.theme_manager.styles)
         layout.addWidget(card)
@@ -160,7 +172,6 @@ class SystemSettingsPage(BasePage):
         tip_card = InfoCard("\u4f7f\u7528\u8bf4\u660e", self.theme_manager.styles)
         layout.addWidget(tip_card)
         tip_layout = tip_card.layout()
-        tip_layout.setContentsMargins(15, 12, 15, 12)
         tip_label = QtWidgets.QLabel(
             "\u2022 \u7a97\u53e3\u88ab\u9690\u85cf\u540e\uff0cComfyUI \u670d\u52a1\u5982\u679c\u6b63\u5728\u8fd0\u884c\u4f1a\u7ee7\u7eed\u540e\u53f0\u8fd0\u884c\uff0c\u4e0d\u4f1a\u88ab\u8bef\u5173\u3002\n"
             "\u2022 \u4ece\u6258\u76d8\u9009\u62e9\u300c\u9000\u51fa\u542f\u52a8\u5668\u300d\u624d\u4f1a\u771f\u6b63\u9000\u51fa\u3002\u5982\u679c\u9700\u8981\u540c\u65f6\u505c\u6b62 ComfyUI\uff0c"
@@ -176,7 +187,7 @@ class SystemSettingsPage(BasePage):
 
         layout.addStretch(1)
 
-        self._styled_widgets = [card, tip_card, self.row_minimize, self.row_ask]
+        self._styled_widgets = [env_card, card, tip_card, self.row_minimize, self.row_ask]
 
     def _load_from_config(self):
         cfg = self.app.config

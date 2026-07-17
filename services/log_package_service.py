@@ -25,7 +25,10 @@ _SOURCES: List[Tuple[str, str]] = [
 
 def _resolve_comfyui_log(app) -> Optional[Path]:
     try:
-        root = PATHS.get_comfy_root(app.config.get("paths", {}))
+        # 多环境支持：读激活环境的路径
+        paths = app.get_active_paths() if hasattr(app, "get_active_paths") \
+            else app.config.get("paths", {})
+        root = PATHS.get_comfy_root(paths)
         p = PATHS.logs_file(root)
         return p if p.exists() else None
     except Exception:

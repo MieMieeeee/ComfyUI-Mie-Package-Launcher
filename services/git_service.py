@@ -8,7 +8,10 @@ class GitService:
 
     def resolve_git(self):
         try:
-            base = Path(self.app.config.get("paths", {}).get("comfyui_root") or ".").resolve()
+            # 多环境支持：读激活环境的 comfyui_root
+            paths = self.app.get_active_paths() if hasattr(self.app, "get_active_paths") \
+                else self.app.config.get("paths", {})
+            base = Path(paths.get("comfyui_root") or ".").resolve()
         except Exception:
             base = Path(".").resolve()
         try:
@@ -51,7 +54,10 @@ class GitService:
             if not git_path:
                 return
             try:
-                base = Path(self.app.config["paths"].get("comfyui_root", "")).resolve()
+                # 多环境支持：读激活环境的 comfyui_root
+                paths = self.app.get_active_paths() if hasattr(self.app, "get_active_paths") \
+                    else self.app.config.get("paths", {})
+                base = Path(paths.get("comfyui_root", "")).resolve()
                 comfy_root = (base / "ComfyUI").resolve()
             except Exception:
                 comfy_root = None
