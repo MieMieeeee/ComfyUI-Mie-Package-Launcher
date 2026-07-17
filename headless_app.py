@@ -10,6 +10,7 @@ from pathlib import Path
 from typing import Any, List, Optional, Tuple
 
 from config.manager import atomic_write_json
+from config.migrations import migrate_environments, resolve_active_paths
 
 
 _ENV_VAR_KEY_RE = re.compile(r"^[A-Za-z_][A-Za-z0-9_]*$")
@@ -166,6 +167,15 @@ class HeadlessAppContext:
         with open(config_file, "r", encoding="utf-8") as f:
             self.config = json.load(f)
 
+        # CLI 不走 ConfigManager 的迁移路径，这里直接补一次多环境迁移，
+        # 把老 paths 段升级成 environments + active_env_id。失败不致命：
+        # resolve_active_paths 还能回退到老 paths 段。
+        try:
+            if migrate_environments(self.config):
+                self.save_config()
+        except Exception:
+            pass
+
         # Load launch_options with defaults
         launch_opts = self.config.get("launch_options", {})
 
@@ -201,7 +211,8 @@ class HeadlessAppContext:
         # Version manager proxy
         self.version_manager = _VersionManagerProxy(proxy_settings)
 
-        paths_cfg = self.config.get("paths", {})
+        # 多环境支持：读激活环境的 python_path（与 PyQtLauncher 启动逻辑对齐）
+        paths_cfg = self.get_active_paths()
         self.python_exec = str(paths_cfg.get("python_path") or sys.executable)
         self.git_path = "git"
 
@@ -236,6 +247,16 @@ class HeadlessAppContext:
         except Exception:
             return []
         return _parse_user_env_string(text)
+
+    def get_active_paths(self):
+        """Return the active environment's paths sub-dict.
+
+        多环境支持：解析 ``config["environments"]`` 里激活的那个环境，
+        返回形如 ``{"comfyui_root": ..., "python_path": ...}`` 的子 dict。
+        调用方（build_launch_params 等）应优先用这个，而不是直接读
+        ``config["paths"]``。未迁移时回退到老 paths 段。
+        """
+        return resolve_active_paths(self.config)
 
     @property
     def services(self):

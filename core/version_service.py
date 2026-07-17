@@ -70,7 +70,9 @@ def refresh_version_info(app, scope: str = "all"):
 
     def worker():
         try:
-            paths = app.config.get("paths", {}) if isinstance(app.config, dict) else {}
+            # 多环境支持：读激活环境的 comfyui_root
+            paths = app.get_active_paths() if hasattr(app, "get_active_paths") \
+                else (app.config.get("paths", {}) if isinstance(getattr(app, "config", None), dict) else {})
             base = Path(paths.get("comfyui_root") or ".").resolve()
             root = (base / "ComfyUI").resolve()
 

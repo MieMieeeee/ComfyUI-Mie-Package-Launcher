@@ -592,7 +592,9 @@ class ProcessManager:
                 if self.app._wmic_available:
                     # 避免路径访问异常导致整个方法中断
                     try:
-                        paths = self.app.config.get("paths", {})
+                        # 多环境支持：读激活环境的 comfyui_root
+                        paths = self.app.get_active_paths() if hasattr(self.app, "get_active_paths") \
+                            else self.app.config.get("paths", {})
                         base = Path(paths.get("comfyui_root") or ".").resolve()
                         comfy_root = str((base / "ComfyUI").resolve()).lower()
                     except Exception:

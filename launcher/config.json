@@ -13,7 +13,9 @@
     "vram_mode": "",
     "disable_api_nodes": false,
     "use_new_manager": false,
-    "show_console": true
+    "show_console": false,
+    "gpu_device": -1,
+    "env_vars": ""
   },
   "ui_settings": {
     "window_width": 800,
@@ -23,7 +25,9 @@
     "log_max_lines": 1000,
     "window_size": "500x650",
     "sidebar_collapsed": false,
-    "ui_scale": 0.8
+    "ui_scale": 0.8,
+    "minimize_to_tray_on_close": false,
+    "minimize_to_tray_ask_every_time": false
   },
   "paths": {
     "comfyui_root": "E:/FF/ComfyUI_Mie_2026_V8.0",
@@ -42,8 +46,8 @@
   "proxy_settings": {
     "git_proxy_mode": "gh-proxy",
     "git_proxy_url": "https://gh-proxy.com/",
-    "pypi_proxy_mode": "aliyun",
-    "pypi_proxy_url": "https://mirrors.aliyun.com/pypi/simple/",
+    "pypi_proxy_mode": "huaweicloud",
+    "pypi_proxy_url": "https://repo.huaweicloud.com/repository/pypi/simple/",
     "hf_mirror_url": "https://hf-mirror.com",
     "hf_mirror_mode": "hf-mirror"
   },
@@ -60,5 +64,44 @@
     "stable_only": false,
     "auto_update_deps": true,
     "update_timeout": 120
+  },
+  "environments": [
+    {
+      "id": "env_default",
+      "name": "默认环境",
+      "comfyui_root": "E:/FF/ComfyUI_Mie_2026_V8.0",
+      "python_path": "E:\\FF\\ComfyUI_Mie_2026_V8.0\\python_embeded\\python.exe"
+    },
+    {
+      "id": "env_v9",
+      "name": "V9",
+      "comfyui_root": "E:/HH/Package/ComfyUI_Mie_2026_V9.0",
+      "python_path": "E:\\HH\\Package\\ComfyUI_Mie_2026_V9.0\\python_embeded\\python.exe"
+    },
+    {
+      "id": "env_v9cu126",
+      "name": "V9cu126",
+      "comfyui_root": "E:/HH/Package/ComfyUI_Mie_2026_V9.0_cu126",
+      "python_path": "E:\\HH\\Package\\ComfyUI_Mie_2026_V9.0_cu126\\python_embeded\\python.exe"
+    }
+  ],
+  "active_env_id": "env_default",
+  "models": {
+    "external_libraries": [
+      {
+        "id": "2cff1773",
+        "name": "ComfyUI_Models",
+        "base_path": "F:\\ComfyUI_Models",
+        "enabled": true,
+        "is_default": true
+      },
+      {
+        "id": "1e17c54f",
+        "name": "ComfyUI_Models",
+        "base_path": "E:\\ComfyUI_Models",
+        "enabled": true,
+        "is_default": false
+      }
+    ]
   }
 }

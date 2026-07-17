@@ -268,7 +268,9 @@ class VersionService(IVersionService):
 
     def _repo_root(self) -> str:
         try:
-            paths = self.app.config.get("paths", {})
+            # 多环境支持：读激活环境的 comfyui_root
+            paths = self.app.get_active_paths() if hasattr(self.app, "get_active_paths") \
+                else self.app.config.get("paths", {})
             base = Path(paths.get("comfyui_root") or ".").resolve()
             return str((base / "ComfyUI").resolve())
         except Exception:

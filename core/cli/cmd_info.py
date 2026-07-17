@@ -20,20 +20,39 @@ def _resolve_version() -> str:
         return "unknown"
 
 
-def _resolve_comfy_path(app) -> str:
+def _resolve_paths(app, env_id=None) -> dict:
+    """取当前激活环境（或 --env 指定环境）的 paths 子 dict，兼容老 app 和 mock。"""
+    cfg = getattr(app, "config", None)
+    if isinstance(cfg, dict):
+        try:
+            if env_id:
+                from config.migrations import resolve_paths_for_env
+                return resolve_paths_for_env(cfg, env_id)
+        except Exception:
+            pass
     try:
-        root = PATHS.comfy_root_from_config(app.config.get("paths", {}))
+        if hasattr(app, "get_active_paths"):
+            paths = app.get_active_paths()
+            if isinstance(paths, dict):
+                return paths
+    except Exception:
+        pass
+    return cfg.get("paths", {}) if isinstance(cfg, dict) else {}
+
+
+def _resolve_comfy_path(app, env_id=None) -> str:
+    try:
+        root = PATHS.get_comfy_root(_resolve_paths(app, env_id))
         return str(root)
     except Exception:
         return "(not set)"
 
 
-def _resolve_python(app) -> str:
+def _resolve_python(app, env_id=None) -> str:
     try:
-        root = PATHS.comfy_root_from_config(app.config.get("paths", {}))
-        py = PATHS.resolve_python_exec(
-            root, app.config.get("paths", {}).get("python_path", "")
-        )
+        paths = _resolve_paths(app, env_id)
+        root = PATHS.get_comfy_root(paths)
+        py = PATHS.resolve_python_exec(root, paths.get("python_path", ""))
         return str(py)
     except Exception:
         return "(not set)"
@@ -52,14 +71,26 @@ def _resolve_port(app) -> int:
 
 def run(args, app) -> int:
     config = app.config or {}
+    env_id = getattr(args, "env", None)
+    active_env_id = config.get("active_env_id")
+    environments = config.get("environments", []) or []
+    active_env_name = ""
+    for env in environments:
+        if isinstance(env, dict) and env.get("id") == active_env_id:
+            active_env_name = env.get("name", "")
+            break
     data = {
         "launcher_version": _resolve_version(),
-        "comfyui_path": _resolve_comfy_path(app),
-        "python_path": _resolve_python(app),
+        "comfyui_path": _resolve_comfy_path(app, env_id),
+        "python_path": _resolve_python(app, env_id),
         "port": _resolve_port(app),
         "paths": dict(config.get("paths", {})),
         "launch_options": dict(config.get("launch_options", {})),
         "proxy_settings": dict(config.get("proxy_settings", {})),
+        # 多环境支持：暴露环境列表 + 当前激活环境
+        "environments": list(environments),
+        "active_env_id": active_env_id,
+        "active_env_name": active_env_name,
     }
     models_cfg = config.get("models", {})
     data["models"] = {

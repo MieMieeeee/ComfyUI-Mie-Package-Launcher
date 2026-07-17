@@ -95,7 +95,9 @@ def is_comfyui_pid(app, pid: int) -> bool:
             app._wmic_available = False
         if app._wmic_available:
             try:
-                paths = app.config.get("paths", {})
+                # 多环境支持：读激活环境的 comfyui_root
+                paths = app.get_active_paths() if hasattr(app, "get_active_paths") \
+                    else app.config.get("paths", {})
                 base = Path(paths.get("comfyui_root") or ".").resolve()
                 comfy_root = str((base / "ComfyUI").resolve()).lower()
             except Exception:

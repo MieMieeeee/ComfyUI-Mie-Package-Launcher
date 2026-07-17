@@ -3,16 +3,28 @@ import shlex
 from pathlib import Path
 from utils import paths as PATHS
 
-def build_launch_params(app):
-    paths = app.config.get("paths", {})
+def build_launch_params(app, env_id=None):
+    # 多环境支持：优先用 app.get_active_paths() 解析当前激活环境的路径。
+    # 若传了 env_id（CLI --env），则用指定环境覆盖（本次启动用，不改 config）。
+    # 兼容老 app 对象和 mock（没有该方法 / 返回非 dict 时退回 config["paths"]）。
+    paths = None
+    try:
+        if env_id and isinstance(getattr(app, "config", None), dict):
+            from config.migrations import resolve_paths_for_env
+            paths = resolve_paths_for_env(app.config, env_id)
+        if not isinstance(paths, dict) and hasattr(app, "get_active_paths"):
+            got = app.get_active_paths()
+            if isinstance(got, dict):
+                paths = got
+    except Exception:
+        paths = None
+    if not isinstance(paths, dict):
+        paths = app.config.get("paths", {}) if isinstance(getattr(app, "config", None), dict) else {}
     base = Path(paths.get("comfyui_root") or ".").resolve()
     comfy_root = (base / "ComfyUI").resolve()
-    py = PATHS.resolve_python_exec(comfy_root, app.config["paths"].get("python_path", "python_embeded/python.exe"))
-    try:
-        app.config["paths"]["python_path"] = str(py)
-        app.save_config()
-    except Exception:
-        pass
+    py = PATHS.resolve_python_exec(comfy_root, paths.get("python_path", "python_embeded/python.exe"))
+    # 注意：多环境下不能把解析后的绝对路径回写到全局 config（会污染其他环境），
+    # 解析结果 py 只在本次启动的内存中使用。
     main = comfy_root / "main.py"
     py_dir = str(Path(py).resolve().parent)
     cmd = [

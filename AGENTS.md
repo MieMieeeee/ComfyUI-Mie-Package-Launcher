@@ -7,6 +7,9 @@
 ComfyUI 启动器（PyQt5，Windows）。无参数启动 = GUI 图形界面；带子命令 = headless CLI，
 复用 GUI 同一套启动/停止路径，适合自动化、监控、开机自启。
 
+**支持多环境**：一个 ComfyUI 根目录 + python 路径的组合 = 一个「环境」，config 里可存多组。
+同时只能运行一个环境，切换前必须先停止当前服务（CLI 会拒绝重复 start，GUI 会提示）。
+
 ## 怎么调用
 
 **agent / 自动化推荐 `ComfyUI-CLI.cmd`**：和下面 `ComfyUI启动器.exe` 行为完全等价（参数 + 退出码透传），但名字带 -CLI，对监控脚本 / NSSM / systemd / GitHub Actions 更友好。必须和 `ComfyUI启动器.exe` 同目录。
@@ -27,13 +30,15 @@ python __main__.py <command> [--json] [-v]
 | 目的 | 命令 | 判断方式 |
 |---|---|---|
 | 健康检查 | `status --json` | 退出码 `0`=在跑 / `3`=未跑 / `1`=异常；或解析 `.running` |
-| 启动 | `start` | 阻塞到 `/system_stats` 就绪；加 `--no-wait` 立即返回 |
+| 启动 | `start [--env ENV_ID]` | 阻塞到 `/system_stats` 就绪；加 `--no-wait` 立即返回 |
 | 停止 | `stop` | 幂等，未跑也退 `0`；加 `--force` 直接 `taskkill /F` |
-| 重启 | `restart` | stop 旧 + start 新 |
-| 看配置 | `info --json` | `.comfyui_path` `.python_path` `.port` `.launcher_version` |
+| 重启 | `restart [--env ENV_ID]` | stop 旧 + start 新 |
+| 看配置 | `info --json` | `.comfyui_path` `.python_path` `.port` `.launcher_version` `.environments` `.active_env_id` |
 | 看日志 | `logs comfyui -n 100 --no-follow` | `comfyui` / `launcher` 二选一；**务必带 `--no-follow`** |
 | 更新内核 | `update comfyui --dry-run` 然后 `update comfyui` | 先 dry-run 看会做什么 |
 | 查帮助 | `help` / `help <command>` / `<command> --help` | — |
+
+`--env ENV_ID`（可选）：`start` / `restart` / `info` / `update` / `logs` 支持，指定用哪个环境，覆盖 config 的 `active_env_id`。不传则用激活环境。`status` / `stop` 不接受 `--env`（它们作用于「当前在跑的那个」）。
 
 典型自动化节奏：`status --json` 判断在不在跑 → 不在就 `start` → 失败就 `logs comfyui --no-follow` 排查。
 
@@ -56,12 +61,48 @@ python __main__.py <command> [--json] [-v]
 
 | 文件 | 含义 |
 |---|---|
-| `launcher/config.json` | 配置（端口、路径、启动选项）—— **机器本地，含绝对路径，勿提交运行时改动** |
+| `launcher/config.json` | 配置（端口、路径、环境列表、启动选项）—— **机器本地，含绝对路径，勿提交运行时改动** |
 | `launcher/launcher.log` | 启动器自身日志 |
 | `<comfyui_root>/user/comfyui.log` | ComfyUI 输出日志（`logs comfyui` 读这个） |
-| `launcher/comfyui.pid` | 跨进程 PID 协调（JSON：pid/port/started_at/log_path），stale 当不存在 |
+| `launcher/comfyui.pid` | 跨进程 PID 协调（JSON：pid/port/started_at/log_path/env_id），stale 当不存在 |
 
 端口默认 `8188`，来自 `config.json` 的 `launch_options.default_port`。
+
+### `config.json` 的多环境 schema
+
+```json
+{
+  "environments": [
+    {"id": "env_default", "name": "默认环境", "comfyui_root": "...", "python_path": "..."}
+  ],
+  "active_env_id": "env_default",
+  "paths": {"comfyui_root": "...", "python_path": "..."}
+}
+```
+
+- `environments[]`：环境数组，每项含 `id`（稳定标识，CLI `--env` 用）/ `name` / `comfyui_root`（ComfyUI 安装的**父目录**，launcher 拼 `root/ComfyUI/main.py`）/ `python_path`。
+- `active_env_id`：当前激活环境 id。
+- `paths`：**老 schema 的兼容回退**。`get_active_paths()` 优先读 `environments[active_env_id]`，为空才回退 `paths`。首次加载时老 `paths` 会自动迁移成 `environments[0]`（`config/migrations.py`）。
+
+### 多环境代码入口（agent 改路径相关逻辑时看这些）
+
+| 文件 | 含义 |
+|---|---|
+| `config/migrations.py` | 迁移 + 解析纯函数：`migrate_environments` / `resolve_active_paths` / `resolve_paths_for_env` / `find_env` / `update_active_env` |
+| `core/launcher_cmd.py` | `build_launch_params(app, env_id=None)` —— 启动命令构建，用激活环境（或 `--env` 指定）的路径 |
+| `utils/paths.py` | `comfy_root_from_config(config)` —— 内部已走 `resolve_active_paths`，传完整 config 即自动环境感知 |
+| `headless_app.py` / `ui_qt/qt_app.py` | 两个 app 类各实现 `get_active_paths()`（无共同基类，鸭子类型） |
+
+## 多环境（agent 操作要点）
+
+- **同时只能跑一个环境**。`start` 时若已有环境在跑（pidfile 有效），拒绝启动并返回当前在跑的 `running_env_id`；agent 应先 `stop` 再 `start --env <另一个>`。
+- **`--env` 是一次性的，不持久化**：`start --env env_b` 用 env_b 启动，但不改 config 的 `active_env_id`。要永久切换激活环境，改 config（GUI 的环境下拉 / 设置页管理，或直接写 `active_env_id`）。
+- **`--env <不存在的 id>` 报错**：返回 `error: "环境不存在: ..."`，退出码 1。agent 应先 `info --json` 拿 `.environments[].id` 确认可用 id。
+- **`stop` / `status` 不接受 `--env`**：它们作用于当前在跑的那个环境，跟环境选择无关。
+- **pidfile 记录 `env_id`**：`start` 写入时带上当前环境 id，`status` / `start` 的"已在跑"返回里含 `running_env_id`，便于 agent 判断冲突。
+- **`launch_options` 是全局的**，不 per-env（端口/GPU/监听所有环境共享，因为同时只跑一个）。
+- **有后台任务时禁止切换**：切换前会检查 `app.has_active_background_tasks()`（覆盖 BackgroundTaskRegistry 的活跃任务 + `_update_running` 核心更新标志）。有进行中任务时弹框阻止切换——因为 git/cm-cli 子进程不能安全强杀，中途换环境会操作错误仓库/目录甚至写坏文件。ComfyUI 服务进程则可以停（用户确认后自动 stop 再切）。
+- **version worker 竞态防护**：`refresh_after_env_switch` 会自增 `_env_token`，正在跑的旧 worker 回调时发现 token 变了就丢弃结果，避免旧环境的版本号迟到覆盖新环境。
 
 ## 坑（agent 易踩）
 
@@ -70,6 +111,8 @@ python __main__.py <command> [--json] [-v]
 - `--start` / `--stop` / `--status` 这类**老 flag 已废弃**（旧文档可能还写），现在是子命令：`start` / `stop` / `status`。
 - 配置改动会落到 `launcher/config.json`，里面是本机绝对路径——**不要把运行时生成的 config 改动提交进 git**。
 - 调试模式：在 `launcher/` 目录下建一个 `is_debug` 文件（内容随意），日志变详细。
+- **多环境：不要直接读写 `config["paths"]`**。老 `paths` 段是兼容回退，生产代码应走 `app.get_active_paths()`（GUI/CLI app 对象）或 `resolve_active_paths(config)`（纯 config）。详见上方「多环境代码入口」表。
+- **`comfyui_path` 是死字段**：老 config 里的 `paths.comfyui_path` 几乎无人读（实际驱动逻辑的是 `comfyui_root`），多环境迁移时已丢弃，别搬进 environment 对象。
 
 ## 深入
 

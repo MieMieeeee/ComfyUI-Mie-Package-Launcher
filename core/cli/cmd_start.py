@@ -9,7 +9,8 @@ __all__ = ["run", "start_service"]
 def run(args, app) -> int:
     no_wait = bool(getattr(args, "no_wait", False))
     timeout = int(getattr(args, "timeout", 60))
-    data = start_service(app, no_wait=no_wait, timeout=timeout)
+    env_id = getattr(args, "env", None)
+    data = start_service(app, no_wait=no_wait, timeout=timeout, env_id=env_id)
 
     if getattr(args, "json", False):
         print(format_json(data))

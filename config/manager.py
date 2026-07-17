@@ -10,6 +10,8 @@ import tempfile
 from pathlib import Path
 from typing import Dict, Any, Optional
 
+from config.migrations import migrate_environments
+
 
 def atomic_write_json(config_file: Path, data: Dict[str, Any]) -> None:
     """Atomically persist JSON data using temp file + fsync + replace."""
@@ -162,6 +164,11 @@ class ConfigManager:
                     ui = self.config.setdefault("ui_settings", {})
                     ui.setdefault("minimize_to_tray_on_close", False)
                     ui.setdefault("minimize_to_tray_ask_every_time", True)
+                    # 多环境迁移：老 paths 段 → environments 数组 + active_env_id
+                    try:
+                        migrate_environments(self.config)
+                    except Exception:
+                        pass
                     try:
                         self.save_config(self.config)
                     except Exception:

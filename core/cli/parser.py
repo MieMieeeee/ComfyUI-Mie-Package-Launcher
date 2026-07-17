@@ -227,6 +227,25 @@ def _make_subparser(sub, name: str, **kwargs) -> argparse.ArgumentParser:
     return sub.add_parser(name, **kwargs)
 
 
+# 多环境支持：以下子命令接受 --env <ENV_ID> 覆盖 config 里的激活环境。
+# 不放进 _global_parent（那是给 --json/-v 这类输出控制 flag 的），而是按需
+# 挂在会读路径的子命令上。stop / status 不挂：它们作用于「当前在跑的那个」，
+# 跟环境选择无关。
+_ENV_SUBCOMMANDS = {"start", "restart", "info", "logs", "update"}
+
+
+def _add_env_arg(sp: argparse.ArgumentParser) -> None:
+    """给子 parser 挂上 --env <ENV_ID>。"""
+    sp.add_argument(
+        "--env",
+        type=str,
+        default=None,
+        metavar="ENV_ID",
+        help="使用指定环境（覆盖 config 的 active_env_id）；"
+             "不传则用激活环境。",
+    )
+
+
 def build_parser() -> argparse.ArgumentParser:
     """构造顶层 argparse。返回的 parser 可直接 parse_args(argv) 使用。"""
     p = argparse.ArgumentParser(
@@ -276,6 +295,7 @@ def build_parser() -> argparse.ArgumentParser:
         metavar="SEC",
         help="等待 HTTP 就绪的最大秒数（默认 60）。",
     )
+    _add_env_arg(sp)
 
     # stop
     sp = _make_subparser(
@@ -327,15 +347,17 @@ def build_parser() -> argparse.ArgumentParser:
         metavar="SEC",
         help="等待新实例就绪的最大秒数（默认 60）。",
     )
+    _add_env_arg(sp)
 
     # info
-    _make_subparser(
+    sp = _make_subparser(
         sub, "info",
         help="打印当前生效的配置",
         description="读取 launcher/config.json 并把关键字段整理输出，不启动任何东西。",
         epilog=_INFO_EPILOG,
         formatter_class=argparse.RawDescriptionHelpFormatter,
     )
+    _add_env_arg(sp)
 
     # logs (有子目标)
     sp = _make_subparser(
@@ -364,6 +386,7 @@ def build_parser() -> argparse.ArgumentParser:
         default=True,
         help="持续跟踪新内容（默认开启，--no-follow 关闭）。",
     )
+    _add_env_arg(sp)
 
     # help
     sp = _make_subparser(
@@ -406,6 +429,7 @@ def build_parser() -> argparse.ArgumentParser:
         action="store_true",
         help="只打印会做什么，不实际执行。",
     )
+    _add_env_arg(sp)
 
     # plugins
     sp = _make_subparser(

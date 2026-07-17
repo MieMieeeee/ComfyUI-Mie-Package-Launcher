@@ -83,7 +83,18 @@ def _resolve_log_path(app, target: str) -> Optional[Path]:
     if target == "comfyui":
         try:
             from utils import paths as PATHS
-            comfy_root = PATHS.get_comfy_root(app.config.get("paths", {}))
+            # 多环境支持：优先用 app.get_active_paths() 解析激活环境
+            paths_cfg = None
+            try:
+                if hasattr(app, "get_active_paths"):
+                    got = app.get_active_paths()
+                    if isinstance(got, dict):
+                        paths_cfg = got
+            except Exception:
+                paths_cfg = None
+            if not isinstance(paths_cfg, dict):
+                paths_cfg = app.config.get("paths", {}) if isinstance(getattr(app, "config", None), dict) else {}
+            comfy_root = PATHS.get_comfy_root(paths_cfg)
             return PATHS.logs_file(comfy_root)
         except Exception:
             return None
@@ -123,7 +134,7 @@ def _is_http_reachable(app) -> bool:
 
 # ---------- start_service ----------
 
-def start_service(app, *, no_wait: bool = False, timeout: int = 60) -> dict:
+def start_service(app, *, no_wait: bool = False, timeout: int = 60, env_id=None) -> dict:
     """启动 ComfyUI（等价于 GUI 的 start 按钮）。
 
     流程：
@@ -135,6 +146,9 @@ def start_service(app, *, no_wait: bool = False, timeout: int = 60) -> dict:
     6. --no-wait：立刻返回，ready=False
        否则：阻塞等 pm.on_start_* 回调（最长 timeout 秒）
     7. 成功时写 pidfile
+
+    env_id: 多环境支持。传入则本次启动用该环境（覆盖 config 的激活环境），
+            不改 config。校验该 id 存在于 config["environments"]，否则报错。
     """
     from datetime import datetime
     start_t = time.time()
@@ -142,10 +156,25 @@ def start_service(app, *, no_wait: bool = False, timeout: int = 60) -> dict:
     url = _resolve_url(port)
     log_path = _resolve_log_path(app, "comfyui")
 
+    # 多环境：校验 --env <id> 存在；确定写进 pidfile 的 env_id
+    if env_id:
+        from config.migrations import find_env
+        env_obj = find_env(getattr(app, "config", {}) or {}, env_id)
+        if env_obj is None:
+            return _err_result(
+                port, url, log_path, start_t,
+                f"环境不存在: {env_id}（用 info --json 看 environments）",
+            )
+        effective_env_id = env_id
+    else:
+        cfg = getattr(app, "config", None)
+        effective_env_id = cfg.get("active_env_id") if isinstance(cfg, dict) else None
+
     # 已在跑？
     pid_data = read_pidfile(default_path(app._cwd))
     if pid_data is not None:
-        return {
+        running_env_id = pid_data.get("env_id")
+        result = {
             "started": False,
             "pid": pid_data.get("pid"),
             "port": pid_data.get("port", port),
@@ -154,11 +183,19 @@ def start_service(app, *, no_wait: bool = False, timeout: int = 60) -> dict:
             "elapsed_sec": time.time() - start_t,
             "log_path": pid_data.get("log_path"),
             "since": pid_data.get("started_at"),
+            "running_env_id": running_env_id,
         }
+        # 指定了 --env 但当前在跑的是另一个环境 → 明确提示要先 stop
+        if env_id and running_env_id and env_id != running_env_id:
+            result["error"] = (
+                f"当前在跑的是环境 {running_env_id}，无法同时启动 {env_id}；"
+                f"请先 stop 再 start --env {env_id}"
+            )
+        return result
 
-    # 解析 cmd / env / cwd
+    # 解析 cmd / env / cwd（传 env_id 让 build_launch_params 用指定环境）
     try:
-        cmd, env, run_cwd, py, main = build_launch_params(app)
+        cmd, env, run_cwd, py, main = build_launch_params(app, env_id=env_id)
     except Exception as e:
         return _err_result(port, url, log_path, start_t, f"build_launch_params 失败: {e}")
 
@@ -193,7 +230,7 @@ def start_service(app, *, no_wait: bool = False, timeout: int = 60) -> dict:
     if no_wait:
         # 写 pidfile（即使 ready=False，spawn 成功就要被 stop 找到）
         if pid and not read_pidfile(default_path(app._cwd)):
-            write_pidfile(default_path(app._cwd), pid, port, log_path)
+            write_pidfile(default_path(app._cwd), pid, port, log_path, env_id=effective_env_id)
         return {
             "started": pid is not None,
             "pid": pid,
@@ -202,6 +239,7 @@ def start_service(app, *, no_wait: bool = False, timeout: int = 60) -> dict:
             "ready": False,
             "elapsed_sec": time.time() - start_t,
             "log_path": str(log_path) if log_path else None,
+            "env_id": effective_env_id,
         }
 
     # 阻塞等就绪 / 失败
@@ -210,7 +248,7 @@ def start_service(app, *, no_wait: bool = False, timeout: int = 60) -> dict:
     pid = pm.comfyui_process.pid if pm.comfyui_process else pid
 
     if ready and pid and not read_pidfile(default_path(app._cwd)):
-        write_pidfile(default_path(app._cwd), pid, port, log_path)
+        write_pidfile(default_path(app._cwd), pid, port, log_path, env_id=effective_env_id)
 
     return {
         "started": pid is not None,
@@ -220,6 +258,7 @@ def start_service(app, *, no_wait: bool = False, timeout: int = 60) -> dict:
         "ready": ready,
         "elapsed_sec": time.time() - start_t,
         "log_path": str(log_path) if log_path else None,
+        "env_id": effective_env_id,
     }
 
 

@@ -63,14 +63,20 @@ def is_alive(pid: int) -> bool:
             return False
 
 
-def write(path: Path, pid: int, port: int, log_path: Optional[Path]) -> None:
-    """原子写入 pidfile。先写 .tmp 再 rename，避免读到半写状态。"""
+def write(path: Path, pid: int, port: int, log_path: Optional[Path], env_id: Optional[str] = None) -> None:
+    """原子写入 pidfile。先写 .tmp 再 rename，避免读到半写状态。
+
+    env_id 记录当前在跑的是哪个 ComfyUI 环境（多环境支持），
+    供 status / start 时提示用户「当前是环境 X，要切到 Y 请先 stop」。
+    老 pidfile 无此字段，read() 用 .get("env_id") 返回 None，向后兼容。
+    """
     path.parent.mkdir(parents=True, exist_ok=True)
     payload = {
         "pid": int(pid),
         "port": int(port),
         "started_at": datetime.now(timezone.utc).isoformat(),
         "log_path": str(log_path) if log_path is not None else None,
+        "env_id": env_id,
     }
     tmp = path.with_suffix(path.suffix + ".tmp")
     tmp.write_text(json.dumps(payload, ensure_ascii=False, indent=2), encoding="utf-8")

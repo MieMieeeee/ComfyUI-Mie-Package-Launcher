@@ -40,22 +40,20 @@ def workflows_dir(comfy_root: Path) -> Path:
 def comfy_root_from_config(app_config: dict | None) -> Path:
     """Resolve the ComfyUI root from a full application config.
 
-    This deduplicates the common pattern used in workers/services that need
-    to honour ``config["paths"]["comfyui_root"]`` while keeping existing
-    fallbacks intact:
+    多环境支持：优先用 ``resolve_active_paths`` 解析当前激活环境，
+    这样所有传完整 config 的调用者（version_workers / update_service /
+    plugin_service / process_manager 等）自动变成环境感知的，无需逐个改。
 
-    - When ``paths.comfyui_root`` is present, resolve it and append
-      ``ComfyUI``.
-    - On any error, fall back to ``Path(".").resolve() / "ComfyUI"``.
-
-    The behaviour matches the previous inline implementations in
-    ``core.version_workers.BaseVersionWorker._get_paths`` so that callers
-    can adopt this helper without changing observable behaviour.
+    - 优先级：``environments[active_env_id]`` → 失配退第一个 → 老的
+      ``config["paths"]`` → 默认。
+    - 解析出 comfyui_root 后，append ``ComfyUI``。
+    - 任何异常退回 ``Path(".").resolve() / "ComfyUI"``。
     """
     try:
-        paths = app_config.get("paths", {}) if isinstance(app_config, dict) else {}
+        from config.migrations import resolve_active_paths
+        paths = resolve_active_paths(app_config) if app_config else {}
     except Exception:
-        paths = {}
+        paths = app_config.get("paths", {}) if isinstance(app_config, dict) else {}
     try:
         base = Path(paths.get("comfyui_root") or ".").resolve()
         root = (base / "ComfyUI").resolve()
