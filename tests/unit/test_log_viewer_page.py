@@ -198,6 +198,119 @@ class TestLogViewerPageTailing(_Fixture):
         self.assertNotIn("updates", text_raw)
 
 
+class TestLogViewerPageNewLogSignal(_Fixture):
+    """新日志通知信号 new_logs_received 的语义。
+
+    历史上信号按 [LEVEL] 区分 INFO/WARNING/ERROR,主窗口据此显示绿/黄/红
+    三色灯。现在改成简单的 "*" 前缀,所以信号只发 "__new__" sentinel,
+    不再做日志级别解析。这里锁住这几个契约:
+
+    - 新日志(页面不可见 + notify 开启)-> emit "__new__"
+    - showEvent -> emit "__viewed__"
+    - 关掉 notify -> emit "__cleared__"
+    - 关掉 notify 后,新行不再 emit 信号(开关应该静默生效)
+    """
+
+    def _capture_emits(self, page):
+        """订阅 new_logs_received,返回 captures 列表"""
+        captures = []
+        page.new_logs_received.connect(lambda marker: captures.append(marker))
+        return captures
+
+    def test_new_line_emits_new_marker(self):
+        d = self._tmpdir()
+        log = d / "test.log"
+        log.write_text("", encoding="utf-8")
+        page = LogViewerPage(theme_manager=self.tm)
+        page.set_log_path(log)
+        captures = self._capture_emits(page)
+        page.start_tailing(start_from_beginning=True)
+        self.addCleanup(page.stop_tailing)
+        # 触发 showEvent(_unread_since_view 初始为 False,需要 view 一次)
+        page.showEvent(None)
+        self.app.processEvents()
+        # 模拟窗口隐藏(默认情况,因为我们没 show()) -> set isVisible False 后 emit
+        # 但测试环境下 page 实际是 visible 的,所以 _append_line 不会 emit。
+        # 改用 hide() 后再写行。
+        page.hide()
+        self.app.processEvents()
+        with open(log, "a", encoding="utf-8") as f:
+            f.write("[INFO] hello\n")
+        _process_events_for(0.5)
+        # 应该看到 "__new__" sentinel
+        self.assertIn("__new__", captures,
+                      f"expected __new__ marker, got {captures!r}")
+        # 不应该有 INFO/WARNING/ERROR 之类级别字符串
+        for marker in captures:
+            self.assertNotIn(marker, ("INFO", "WARNING", "ERROR", "DEBUG", "CRITICAL"),
+                             f"unexpected level marker leaked: {marker!r}")
+
+    def test_show_event_emits_viewed_marker(self):
+        page = LogViewerPage(theme_manager=self.tm)
+        captures = self._capture_emits(page)
+        page.showEvent(None)
+        self.app.processEvents()
+        self.assertEqual(captures, ["__viewed__"])
+
+    def test_notify_off_emits_cleared_marker(self):
+        page = LogViewerPage(theme_manager=self.tm)
+        captures = self._capture_emits(page)
+        # 默认开启 notify -> 关掉 -> emit __cleared__
+        self.assertTrue(page.notify_checkbox.isChecked())
+        page.notify_checkbox.setChecked(False)
+        self.app.processEvents()
+        self.assertIn("__cleared__", captures)
+
+    def test_notify_off_suppresses_further_emits(self):
+        """关掉 notify 后,新行不再 emit(信号通路完全静默)。"""
+        d = self._tmpdir()
+        log = d / "test.log"
+        log.write_text("", encoding="utf-8")
+        page = LogViewerPage(theme_manager=self.tm)
+        page.set_log_path(log)
+        captures = self._capture_emits(page)
+        page.start_tailing(start_from_beginning=True)
+        self.addCleanup(page.stop_tailing)
+        page.showEvent(None)
+        page.notify_checkbox.setChecked(False)
+        self.app.processEvents()
+        # 清空来自 __cleared__ 的 capture,只看后续新行
+        captures.clear()
+        page.hide()
+        self.app.processEvents()
+        with open(log, "a", encoding="utf-8") as f:
+            f.write("[WARN] should not emit\n")
+            f.write("[ERROR] also should not emit\n")
+        _process_events_for(0.5)
+        self.assertEqual(captures, [],
+                         f"expected no emits after notify off, got {captures!r}")
+
+    def test_no_level_parsing_in_signal(self):
+        """原始数据里包含 [ERROR] 时,信号也是 __new__,不带 ERROR 级别。
+        这是新语义的关键:不解析 level,只关心"有没有新"。"""
+        d = self._tmpdir()
+        log = d / "test.log"
+        log.write_text("", encoding="utf-8")
+        page = LogViewerPage(theme_manager=self.tm)
+        page.set_log_path(log)
+        captures = self._capture_emits(page)
+        page.start_tailing(start_from_beginning=True)
+        self.addCleanup(page.stop_tailing)
+        page.showEvent(None)
+        page.hide()
+        self.app.processEvents()
+        with open(log, "a", encoding="utf-8") as f:
+            f.write("[ERROR] oh no\n")
+            f.write("[CRITICAL] really bad\n")
+            f.write("plain line\n")
+        _process_events_for(0.8)
+        # 三行都该 emit __new__(旧实现会在第一条 emit ERROR)
+        self.assertEqual(captures.count("__new__"), 3,
+                         f"expected 3 __new__ emits, got {captures!r}")
+        self.assertNotIn("ERROR", captures)
+        self.assertNotIn("CRITICAL", captures)
+
+
 class TestLogViewerPageWrap(_Fixture):
     """自动换行 checkbox:切换 text_edit 的 lineWrapMode。"""
 

@@ -481,15 +481,10 @@ if _HAS_QT:
         # 仅当用户当前不在「日志页」时才需要提示。
         new_logs_received = QtCore.pyqtSignal(str)
 
-        # level 仅用于未读红点级别判定(ERROR>WARNING>其它),不再参与日志文本着色
-        # (纯文本模式,移除了颜色标识以避免逐行 charFormat 的 O(n²) 富文本布局开销)。
-        _LEVEL_RE = re.compile(r"\[(DEBUG|INFO|WARNING|ERROR|CRITICAL)\]")
-
-        @classmethod
-        def _detect_level(cls, body: str) -> str:
-            """从 body 抽 [LEVEL] 标记(仅用于未读红点级别);找不到默认 INFO。"""
-            m = cls._LEVEL_RE.search(body)
-            return m.group(1) if m else "INFO"
+        # 新日志通知在主窗口的 nav 按钮上显示一个简单的 "*" 前缀(无级别区分),
+        # 历史上按 [LEVEL] 区分 绿/黄/红 灯的逻辑已移除 —— 用户反馈太花式,
+        # 只要知道"有未读"就够。这里只 emit 一个 sentinel 字符串("__new__"),
+        # QtApp._refresh_logs_nav 收到非 __viewed__/__cleared__ 就会加星号。
 
 
 
@@ -532,7 +527,7 @@ if _HAS_QT:
         _BATCH_INTERVAL_MS = 50
 
         def showEvent(self, event):
-            """页面切到前台:清未读标记 + 首次进入时按需加载最近历史。"""
+            """页面切到前台:清未读标记("*") + 首次进入时按需加载最近历史。"""
             try:
                 self._unread_since_view = False
                 self.new_logs_received.emit("__viewed__")
@@ -723,18 +718,17 @@ if _HAS_QT:
             纯文本模式(移除了颜色标识):剥掉 ANSI 转义码后原文进缓冲,
             由 _flush_batch 定时器批量 append。不再逐行 insertText + charFormat
             着色——那是 O(n²) 的富文本布局,数万行历史会冻死 UI。
-            level 仅用于未读红点级别判定,不参与着色。
+            不再做日志级别(level)解析 —— nav 按钮只关心"有没有新",不再按级别配色。
             """
             if not line:
                 return
-            # 页面不可见 + 用户开启「新日志提醒」时,标记未读并通知主窗口亮红点。
+            # 页面不可见 + 用户开启「新日志提醒」时,标记未读并通知主窗口加 "*" 前缀。
             # 关闭提醒则完全不发信号,nav 按钮保持原文字。
             if not self.isVisible() and self.notify_checkbox.isChecked():
                 try:
                     if not self._unread_since_view:
                         self._unread_since_view = True
-                    ts0, body0 = parse_log_entry(line)
-                    self.new_logs_received.emit(self._detect_level(strip_ansi(body0)))
+                    self.new_logs_received.emit("__new__")
                 except Exception:
                     pass
             # 剥 ANSI 后入缓冲(纯文本,不着色)
