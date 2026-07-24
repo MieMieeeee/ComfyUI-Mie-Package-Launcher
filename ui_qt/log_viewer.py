@@ -251,11 +251,29 @@ class LogTailer:
                         line_bytes = self._buffer[:idx]
                         if line_bytes.endswith(b"\r"):
                             line_bytes = line_bytes[:-1]
-                        try:
-                            line = line_bytes.decode("utf-8", errors="replace")
-                        except Exception:
-                            line = ""
-                        self._on_line(line)
+                        # tqdm 重定向到文件时，整段进度压在一条物理行里，
+                        # 用 \r 分隔每次刷新，只在迭代末尾写 \n。
+                        # 如果不在这里按 \r 切段，LogTailer 会把整段积压在 buffer 等 \n，
+                        # 而任务可能跑几分钟才出 \n，期间用户看不到任何进度。
+                        # 切段后每段单独 emit（\r 标记保留给 Filter 识别），
+                        # Filter 再按新值/速率限决定是否实时显出。
+                        if b"\r" in line_bytes:
+                            for seg in line_bytes.split(b"\r"):
+                                if not seg:
+                                    # 连续 \r 之间的空段（tqdm 写新值前先 \r 把光标归位），
+                                    # 直接丢弃
+                                    continue
+                                try:
+                                    line = seg.decode("utf-8", errors="replace") + "\r"
+                                except Exception:
+                                    line = "\r"
+                                self._on_line(line)
+                        else:
+                            try:
+                                line = line_bytes.decode("utf-8", errors="replace")
+                            except Exception:
+                                line = ""
+                            self._on_line(line)
                         self._buffer = self._buffer[idx + 1:]
                 else:
                     self._stop_event.wait(self._POLL_INTERVAL)
@@ -321,33 +339,52 @@ def read_tail_lines(path, n: int) -> List[str]:
 
 
 class ProgressCollapseFilter:
-    """折叠 ComfyUI 日志中含 \\r 的进度刷新(典型来源:tqdm 进度条)。
+    """折叠 ComfyUI 日志中含 \r 的进度刷新(典型来源:tqdm 进度条)。
 
-    tqdm 在 conhost 里用 \\r 重写同一行做进度动画;重定向到文件时,这些
-    \\r 刷新都被保留下来,有两种物理形态:
+    tqdm 在 conhost 里用 \r 重写同一行做进度动画;重定向到文件时,这些
+    \r 刷新都被保留下来,有两种物理形态:
 
-    1. **多行形态**:每个百分比占一行(行尾的 \\r 被 LogTailer 剥掉),
+    1. **多行形态**:每个百分比占一行(行尾的 \r 被 LogTailer 剥掉),
        连续 N 行都是进度刷新。
     2. **单行多刷新形态**(bug 场景):整段进度被压在了一个物理行里,
-       81 个百分比之间全是 \\r,只有最后一个 \\n 才换行。一行就有 80 个 \\r。
+       81 个百分比之间全是 \r,只有最后一个 \n 才换行。一行就有 80 个 \r。
 
-    直接 tail 会把进度动画展开成长长的滚动条 / 一坨超长字符串。
-    折叠器把含 \\r 的内容当「同一进度的多次刷新」,只保留最后一次刷新的
-    文本,显示为简洁标记行: "... N lines collapsed: <last>"。
+    旧实现把整段折叠、留到下一个普通行才 emit 一个 "... N lines collapsed: <last>"
+    标记行 —— 但任务跑几分钟期间用户看不到任何进度,体验非常糟。
+    新实现改成「实时刷出」:
+
+    - 每次 feed 看到新值(与上次 live emit 的 segment 不同)且距上次 live emit
+      >= _LIVE_INTERVAL 秒,emit 一条 "[progress] <segment>" —— 让用户看到进度在动
+    - 同值重复 feed(典型场景:tqdm 在两个采样步骤之间重绘同一帧)不重复 emit
+    - 普通行到达时,先吐一条 "... N updates: <last>" 总结(标记这一段进度累计多少帧),
+      再吐本行,并清空状态 —— 下一次进度可以从 0 开始重新累计
+    - flush() 在 tail 结束时收尾:有累积就吐一条总结
+
+    速率限(_LIVE_INTERVAL)存在的意义:tqdm 一次写盘会把整段多帧压在一条物理行里,
+    LogTailer 切 \r 段后可能在毫秒级内连续 emit 几十条 "[progress]",速率限让 burst
+    情况只露第一帧,其余静默累计到 summary(避免 UI 闪屏)。tqdm 真实跨步刷新间隔
+    通常几百毫秒到几秒,远大于速率限,所以正常 sampling 期间每帧新值都能看到。
 
     API 是流式的,每次 feed 一行(已去掉末尾换行),返回 emit 的行列表。
     调用方把所有 emit 行原样追加到 UI 控件。
     """
 
+    # live emit 之间的最小时间间隔(秒)。tqdm 默认 mininterval 在非 tty 下
+    # 通常 >= 0.5s,这里取 0.3s 是为了 burst 场景下 millisecond 级连续 feed
+    # 也只 emit 一帧;真实跨步刷新不会受影响。
+    _LIVE_INTERVAL = 0.3
+
     def __init__(self) -> None:
-        self._refresh_count: int = 0       # 累计的进度刷新次数(\r 个数)
-        self._last_refresh: str = ""       # 最后一次刷新的文本(已剥多余 \r)
+        self._refresh_count: int = 0          # 累计的进度刷新次数(\r 个数)
+        self._last_refresh: str = ""          # 最后一次刷新的文本(已剥多余 \r)
+        self._last_live_segment: str = ""     # 上次 live emit 的 segment(同值不重复 emit)
+        self._last_live_emit_ts: float = 0.0  # 上次 live emit 的 monotonic 时间
 
     @staticmethod
     def _last_segment(line: str) -> str:
-        """从含 \\r 的行里取出最后一段(最后一次刷新的文本)。
+        """从含 \r 的行里取出最后一段(最后一次刷新的文本)。
 
-        "a\\rb\\rc" → "c"; "a\\rb\\r" → "a"(末尾空段忽略,回到上一个非空)。
+        "a\rb\rc" -> "c"; "a\rb\r" -> "a"(末尾空段忽略,回到上一个非空)。
         全空段时返回空串。
         """
         # 按 \r 切,从后往前找第一个非空段
@@ -359,12 +396,14 @@ class ProgressCollapseFilter:
     def feed(self, line: str) -> List[str]:
         """输入一行,返回 emit 的行列表。"""
         if "\r" not in line:
-            # 普通行:如果之前在折叠进度,先吐一个总结标记行,再吐本行
+            # 普通行:如果之前在折叠进度,先吐一个总结标记行,再吐本行,并清状态
             if self._refresh_count > 0:
                 count = self._refresh_count
                 last = self._last_refresh
                 self._refresh_count = 0
                 self._last_refresh = ""
+                self._last_live_segment = ""
+                self._last_live_emit_ts = 0.0
                 return [self._summary(count, last), line]
             return [line]
         # 含 \r 的进度行:累计刷新次数,只记最后一次刷新文本
@@ -374,7 +413,15 @@ class ProgressCollapseFilter:
         last_seg = self._last_segment(line)
         if last_seg:
             self._last_refresh = last_seg
-        # 进度刷新吞掉,不立即 emit(等遇到普通行或 flush 再总结)
+        # 新值(与上次 live emit 的 segment 不同)且距上次 emit 够久 -> 实时 emit
+        # 同值重复 / 距上次 emit 太近(< _LIVE_INTERVAL)则静默累计,不刷屏
+        if last_seg and last_seg != self._last_live_segment:
+            import time as _time
+            now = _time.monotonic()
+            if now - self._last_live_emit_ts >= self._LIVE_INTERVAL:
+                self._last_live_segment = last_seg
+                self._last_live_emit_ts = now
+                return [self._live_marker(self._refresh_count, last_seg)]
         return []
 
     def flush(self) -> List[str]:
@@ -384,20 +431,36 @@ class ProgressCollapseFilter:
             last = self._last_refresh
             self._refresh_count = 0
             self._last_refresh = ""
+            self._last_live_segment = ""
+            self._last_live_emit_ts = 0.0
             return [self._summary(count, last)]
         return []
 
     @classmethod
     def _summary(cls, count: int, last: str) -> str:
-        """生成折叠总结行。
+        """生成折叠总结行(在普通行前或 flush 时 emit)。
 
-        last 是最后一次刷新的原文(如 'tracking: 100%|████| 81/81')。
+        措辞从 "lines collapsed" 改成 "updates":现在每帧新值都会 live emit,
+        这里的 N 表示「这一段进度里累计了多少帧」,而不是"被折叠掉的数量"。
+
+        last 是最后一次刷新的原文(如 "tracking: 100%|████| 81/81")。
         不用 repr()——repr 会把整串(含 unicode 块字符)包成乱码;
         直接拼原文,UI 能正确渲染,保存为纯文本也干净。
         """
         if last:
-            return f"... {count} lines collapsed: {last}"
-        return f"... {count} lines collapsed"
+            return f"... {count} updates: {last}"
+        return f"... {count} updates"
+
+    @classmethod
+    def _live_marker(cls, count: int, last: str) -> str:
+        """实时进度标记行(每帧新值各 emit 一条,带 [progress] 前缀便于识别)。
+
+        count 是当前累计刷新次数(包含本次),方便用户看出进度跳了多少帧。
+        """
+        if last:
+            return f"[progress #{count}] {last}"
+        return f"[progress #{count}]"
+
 
 try:
     from PyQt5 import QtCore, QtGui, QtWidgets

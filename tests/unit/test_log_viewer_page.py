@@ -182,7 +182,7 @@ class TestLogViewerPageTailing(_Fixture):
         _process_events_for(0.8)
         text_collapsed = page.text_edit.toPlainText()
         self.assertIn("done", text_collapsed)
-        self.assertIn("lines collapsed", text_collapsed)
+        self.assertIn("updates", text_collapsed)
         # 关掉折叠,清空再写
         page.clear_btn.click()
         self.app.processEvents()
@@ -195,7 +195,7 @@ class TestLogViewerPageTailing(_Fixture):
         _process_events_for(0.8)
         text_raw = page.text_edit.toPlainText()
         self.assertIn("finished", text_raw)
-        self.assertNotIn("lines collapsed", text_raw)
+        self.assertNotIn("updates", text_raw)
 
 
 class TestLogViewerPageWrap(_Fixture):

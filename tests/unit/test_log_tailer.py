@@ -225,5 +225,69 @@ def _tmpfile(content):
     return _ctx()
 
 
+class TestLogTailerCarriageReturnSplitting(unittest.TestCase):
+    """LogTailer \r 分段:tqdm 重定向到文件时整段进度压在一条物理行里,
+    必须按 \r 切段成多行才能让 ProgressCollapseFilter 实时刷出。
+    """
+
+    def test_single_line_with_multiple_cr_emits_each_segment(self):
+        """一条物理行里有 3 段 \r 分隔的内容 -> emit 3 条带 \r 的行。"""
+        # 用 str 写盘,_tmpfile 接受 str;转义后的 \r 物理写入就是真 \r
+        raw = "\r  0%|          | 0/8 [00:00<?, ?it/s]\r 12%|█| 1/8 [00:03<00:26, 3.77s/it]\r100%|" + "█" * 10 + "| 8/8 [00:06<00:00, 1.21it/s]\r\n"
+        with _tmpfile("") as path:
+            received = []
+            tailer = LogTailer(path, on_line=received.append, start_from_beginning=True)
+            tailer.start()
+            try:
+                with open(path, "a", encoding="utf-8") as f:
+                    f.write(raw)
+                self.assertTrue(_wait_for(lambda: len(received) == 3, timeout=3.0),
+                                f"should emit 3 \r-separated segments, got {received!r}")
+                # 每段都保留 \r 标记,给 Filter 识别
+                for line in received:
+                    self.assertTrue(line.endswith("\r"),
+                                    f"segment missing \r marker: {line!r}")
+                # 内容分别对应 0%、12%、100%
+                self.assertIn("0%", received[0])
+                self.assertIn("12%", received[1])
+                self.assertIn("100%", received[2])
+                self.assertIn("8/8", received[2])
+            finally:
+                tailer.stop()
+
+    def test_empty_segments_between_cr_are_skipped(self):
+        """连续 \r 之间的空段(tqdm 写新值前先 \r 把光标归位)直接丢弃。"""
+        raw = "\r\r\r  only_one  \r\r\n"
+        with _tmpfile("") as path:
+            received = []
+            tailer = LogTailer(path, on_line=received.append, start_from_beginning=True)
+            tailer.start()
+            try:
+                with open(path, "a", encoding="utf-8") as f:
+                    f.write(raw)
+                self.assertTrue(_wait_for(lambda: len(received) >= 1, timeout=2.0))
+                # 只有 1 段非空内容,不应有 7 段(3 leading + 中间 1 + 3 trailing)
+                non_empty = [r for r in received if r.strip(" \r")]
+                self.assertEqual(len(non_empty), 1, f"got segments: {received!r}")
+                self.assertIn("only_one", non_empty[0])
+            finally:
+                tailer.stop()
+
+    def test_normal_line_without_cr_passes_through_unchanged(self):
+        """不含 \r 的普通行透传,不加 \r 后缀(Filter 不当进度处理)。"""
+        with _tmpfile("") as path:
+            received = []
+            tailer = LogTailer(path, on_line=received.append, start_from_beginning=True)
+            tailer.start()
+            try:
+                with open(path, "a", encoding="utf-8") as f:
+                    f.write("[INFO] normal line\n")
+                self.assertTrue(_wait_for(lambda: received == ["[INFO] normal line"], timeout=2.0))
+                self.assertEqual(received[0], "[INFO] normal line")
+                self.assertFalse(received[0].endswith("\r"))
+            finally:
+                tailer.stop()
+
+
 if __name__ == "__main__":
     unittest.main()
