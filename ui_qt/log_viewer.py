@@ -16,8 +16,37 @@ _TIMESTAMP_RE = re.compile(
 # 诊断日志：挂到 launcher 子 logger，同 handler、同 launcher.log。
 # 默认 INFO 级别不输出，需 DEBUG：创建 launcher/is_debug 文件，或置环境变量 COMFYUI_LAUNCHER_DEBUG=1。
 # 输出包含源码位置、文件路径、信号连接计数、tailer 状态、line 预览，
-# 用于下次复现 env 切换 3x 重复时排查。
+# 用于下次复现 env 切换 3x 重复时排查。默认 INFO 输出到 launcher.log，修复后清理。
 _diag_logger = logging.getLogger("comfyui_launcher.log_viewer")
+
+# 高频点防爆采样。原则:
+# - 前 5 次调用都 log（保证初始 bug 能被记下）
+# - 之后每 100 次 log 1 次（保持可观测量，防爆诊断日志填满 launcher.log）
+_EMIT_LOG_INTERVAL = 100
+_EMIT_LOG_INITIAL = 5
+_emit_counters = {}
+
+
+def _should_log_emit(key: str) -> bool:
+    """防爆采样判定。调用方法:_should_log_emit("LogTailer.emit")。
+    
+    为防止一个点的限流状态泄露给另一个点（例如初始 5 次中某个中途被 swallow），
+    并且高频点在 burst 下可能反复调过判定函数反而被重置计数器,
+    采用计数器（字典）状态以保证跨调用不丢。
+    """
+    n = _emit_counters.get(key, 0) + 1
+    _emit_counters[key] = n
+    return n <= _EMIT_LOG_INITIAL or n % _EMIT_LOG_INTERVAL == 0
+
+
+# TODO(diag): env 切换 3x 重复 bug 修复后清理。全部诊断日志位于：
+#  - _diag_logger / _diag_logger.info/debug 调用
+#  - _EMIT_LOG_INITIAL / _EMIT_LOG_INTERVAL 参数
+#  - _emit_counters / _should_log_emit 函数
+#  - 各 LogTailer / LogViewerPage 方法中的 .info() 调用
+# 修复后删除本 TODO 及上述全部代码。
+
+
 
 
 
@@ -173,7 +202,7 @@ class LogTailer:
         self._thread = None  # type: threading.Thread | None
         self._buffer = b""
         self._first_line = b""
-        _diag_logger.debug(
+        _diag_logger.info(
             "LogTailer.__init__ path=%s start_from_beginning=%s",
             self._path, start_from_beginning,
         )
@@ -203,7 +232,7 @@ class LogTailer:
 
     def _run(self) -> None:
         path = self._path
-        _diag_logger.debug("LogTailer._run thread_start path=%s", path)
+        _diag_logger.info("LogTailer._run thread_start path=%s", path)
         # 等待文件出现
         while not self._stop_event.is_set():
             if path.exists():
@@ -214,7 +243,7 @@ class LogTailer:
         try:
             f = self._open_shared(path)
         except OSError:
-            _diag_logger.debug("LogTailer._run open_failed path=%s", path)
+            _diag_logger.info("LogTailer._run open_failed path=%s", path)
             return
         try:
             if self._start_from_beginning:
@@ -226,7 +255,7 @@ class LogTailer:
             self._buffer = b""
             # 记录打开时的文件实体标识(inode),用于轮转检测
             opened_key = self._file_key(path)
-            _diag_logger.debug(
+            _diag_logger.info(
                 "LogTailer._run opened path=%s position=%d start_from_beginning=%s",
                 path, position, self._start_from_beginning,
             )
@@ -246,7 +275,7 @@ class LogTailer:
                 elif current_size is not None and position > current_size:
                     rotated = True
                 if rotated:
-                    _diag_logger.debug(
+                    _diag_logger.info(
                         "LogTailer._run rotated_detected path=%s old_key=%s new_key=%s old_pos=%d new_size=%s",
                         path, opened_key, current_key, position, current_size,
                     )
@@ -290,14 +319,16 @@ class LogTailer:
                                     line = seg.decode("utf-8", errors="replace") + "\r"
                                 except Exception:
                                     line = "\r"
-                                _diag_logger.debug("LogTailer.emit path=%s line=%r", path, line[:200])
+                                if _should_log_emit("LogTailer.emit"):
+                                    _diag_logger.info("LogTailer.emit path=%s line=%r", path, line[:200])
                                 self._on_line(line)
                         else:
                             try:
                                 line = line_bytes.decode("utf-8", errors="replace")
                             except Exception:
                                 line = ""
-                            _diag_logger.debug("LogTailer.emit path=%s line=%r", path, line[:200])
+                            if _should_log_emit("LogTailer.emit"):
+                                _diag_logger.info("LogTailer.emit path=%s line=%r", path, line[:200])
                             self._on_line(line)
                         self._buffer = self._buffer[idx + 1:]
                 else:
@@ -563,7 +594,7 @@ if _HAS_QT:
             # 首次切到本页才加载历史(之后靠 tailer 跟随,不重复读)
             if not self._history_loaded:
                 self._history_loaded = True
-                self.logger.debug("showEvent history_load path=%s", self._log_path)
+                self.logger.info("showEvent history_load path=%s", self._log_path)
                 try:
                     self._load_recent_history()
                 except Exception:
@@ -703,10 +734,10 @@ if _HAS_QT:
 
         def start_tailing(self, start_from_beginning: bool = False) -> None:
             if self._log_path is None:
-                self.logger.debug("start_tailing skipped: no log_path")
+                self.logger.info("start_tailing skipped: no log_path")
                 return
             if self._tailer is not None:
-                self.logger.debug(
+                self.logger.info(
                     "start_tailing skipped: tailer_alive path=%s", self._log_path,
                 )
                 return
@@ -719,7 +750,7 @@ if _HAS_QT:
                 self._on_line_main, QtCore.Qt.QueuedConnection
             )
             self._tailer.start()
-            self.logger.debug(
+            self.logger.info(
                 "start_tailing path=%s start_from_beginning=%s receivers=%d",
                 self._log_path, start_from_beginning,
                 self._emitter.receivers(self._emitter.line_received),
@@ -741,18 +772,20 @@ if _HAS_QT:
             flushed = self._filter.flush()
             for line in flushed:
                 self._append_line(line)
-            self.logger.debug(
+            self.logger.info(
                 "stop_tailing path=%s receivers_before=%d receivers_after=%d tailer_alive_before=%s flushed_lines=%d",
                 self._log_path, receivers_before, receivers_after, tailer_alive, len(flushed),
             )
 
         def _on_line_from_tailer(self, line: str) -> None:
             # tailer 线程:通过 signal 把行投到 UI 线程(QueuedConnection)
-            self.logger.debug("tailer_cb_recv line=%r", line[:200])
+            if _should_log_emit("tailer_cb_recv"):
+                self.logger.info("tailer_cb_recv line=%r", line[:200])
             self._emitter.line_received.emit(line)
 
         def _on_line_main(self, line: str) -> None:
-            self.logger.debug("main_recv line=%r", line[:200])
+            if _should_log_emit("main_recv"):
+                self.logger.info("main_recv line=%r", line[:200])
             if self._paused:
                 return
             if self.collapse_checkbox.isChecked():
@@ -805,10 +838,8 @@ if _HAS_QT:
             batch_size = len(self._batch_buffer)
             text = "\n".join(self._batch_buffer) + "\n"
             self._batch_buffer.clear()
-            self.logger.debug(
-                "flush_batch size=%d first_line=%r",
-                batch_size, text.splitlines()[0][:120] if text else "",
-            )
+            if _should_log_emit("flush_batch"):
+                self.logger.info("flush_batch size=%d first_line=%r", batch_size, text.splitlines()[0][:120] if text else "")
             # moveCursor + insertText 一次写整批;document 的 maximumBlockCount 自动裁老的
             cursor = self.text_edit.textCursor()
             cursor.movePosition(QtGui.QTextCursor.End)
