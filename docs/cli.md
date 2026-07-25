@@ -45,6 +45,7 @@ commands:
   - `2` start 拒绝重复启动（已在跑）
   - `3` status 检测到未运行
   - `4` update 检测到已是最新
+- **多环境**：配置可存多组环境（`config.json` 的 `environments[]` + `active_env_id`）。CLI 默认跑 `active_env_id` 指向的那一份，**agent / 监控不需要也不应该传 `--env`**——切环境是 GUI 的事。`start` / `restart` / `info` / `logs` / `update` 接受可选的 `--env ENV_ID`（覆盖本次调用的环境，不写回 config），仅在跨环境自动化 / 一次性脚本里用。同一时间只允许一个环境在跑：`start` 发现已有 pidfile 时拒绝并返回 `running_env_id`，要先 `stop` 再换。
 
 PID 跨进程协调走 `<cwd>/launcher/comfyui.pid`（JSON：pid/port/started_at/log_path），
 stale（PID 已死）当成不存在。
@@ -56,13 +57,14 @@ stale（PID 已死）当成不存在。
 启动 ComfyUI。默认阻塞直到 `/system_stats` 返回 200 或超时。
 
 ```
-comfyui-launcher start [--no-wait] [--timeout SEC]
+comfyui-launcher start [--no-wait] [--timeout SEC] [--env ENV_ID]
 ```
 
 | flag | 默认 | 说明 |
 |---|---|---|
 | `--no-wait` | off | spawn 后立即返回，不等 `/system_stats` |
 | `--timeout` | 60 | 等待就绪的最大秒数 |
+| `--env` | (config 的 `active_env_id`) | 一次性指定本次启动使用的环境 ID；不传则用 GUI 当前激活环境 |
 
 **Exit codes:**
 - `0` 服务就绪（或 `--no-wait` 且进程 spawn 成功）
@@ -135,8 +137,14 @@ $ echo $?
 stop 旧的 + start 新的。若旧实例未在跑则直接 start。
 
 ```
-comfyui-launcher restart [--no-wait] [--timeout SEC]
+comfyui-launcher restart [--no-wait] [--timeout SEC] [--env ENV_ID]
 ```
+
+| flag | 默认 | 说明 |
+|---|---|---|
+| `--no-wait` | off | spawn 后立即返回 |
+| `--timeout` | 60 | 等待新实例就绪的最大秒数 |
+| `--env` | (config 的 `active_env_id`) | 一次性指定本次重启使用的环境 ID；不传则用 GUI 当前激活环境 |
 
 **Exit codes:**
 - `0` 重启后服务就绪
@@ -150,8 +158,12 @@ comfyui-launcher restart [--no-wait] [--timeout SEC]
 **不启动任何东西**。排查"我配了什么"时用。
 
 ```
-comfyui-launcher info [--json]
+comfyui-launcher info [--json] [--env ENV_ID]
 ```
+
+| flag | 默认 | 说明 |
+|---|---|---|
+| `--env` | (config 的 `active_env_id`) | 一次性指定查看哪个环境的配置；不传则查 GUI 当前激活环境 |
 
 **Output schema:**
 - `launcher_version (str)` 启动器自报版本
@@ -180,6 +192,7 @@ comfyui-launcher logs TARGET [-n N] [-f | --no-follow]
 |---|---|---|
 | `-n / --lines` | 100 | 先打印最后 N 行 |
 | `-f / --follow` | on | 持续跟踪新内容（`--no-follow` 关闭） |
+| `--env` | (config 的 `active_env_id`) | 一次性指定看哪个环境的日志；不传则看 GUI 当前激活环境 |
 
 > **注：** `-f` 模式会永久 hang，不适合监控脚本。监控请用 `status` / 读 pidfile 配合外部日志采集。
 
@@ -213,6 +226,7 @@ comfyui-launcher update TARGET [--yes] [--dry-run] [--json]
 |---|---|---|
 | `--yes` | on | CLI 默认非交互，保留供将来用 |
 | `--dry-run` | off | 只打印会做什么，不实际执行 |
+| `--env` | (config 的 `active_env_id`) | 一次性指定更新哪个环境；不传则更新 GUI 当前激活环境 |
 
 **Exit codes:**
 - `0` 已应用变更
