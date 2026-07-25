@@ -12,6 +12,8 @@ Tests cover:
 """
 
 import json
+import sys
+import tempfile
 import unittest
 from pathlib import Path
 from unittest.mock import MagicMock, patch
@@ -461,6 +463,104 @@ class TestHeadlessAppContext(unittest.TestCase):
             context.get_user_env_vars(),
             [("A", "1"), ("B", "2")],
         )
+
+
+class TestUpdateOptionVars(unittest.TestCase):
+    """Tests for update_*_var / stable_only / pypi_proxy attrs + services.version.
+
+    这些属性是 services.update_service.perform_batch_update() 必需的；
+    CLI `update comfyui` 报 "no attribute update_core_var" 就是这里缺的。
+    """
+
+    def _make_ctx(self, tmp_dir, version_prefs=None, proxy_settings=None):
+        cfg = {
+            "environments": [
+                {"id": "env_default", "name": "默认",
+                 "comfyui_root": r"F:\fake", "python_path": sys.executable}
+            ],
+            "active_env_id": "env_default",
+            "paths": {"comfyui_root": r"F:\fake", "python_path": sys.executable},
+            "launch_options": {},
+        }
+        if version_prefs is not None:
+            cfg["version_preferences"] = version_prefs
+        if proxy_settings is not None:
+            cfg["proxy_settings"] = proxy_settings
+        import tempfile, json, os
+        cfg_path = os.path.join(tmp_dir, "launcher", "config.json")
+        os.makedirs(os.path.dirname(cfg_path), exist_ok=True)
+        with open(cfg_path, "w", encoding="utf-8") as f:
+            json.dump(cfg, f, ensure_ascii=False)
+        return HeadlessAppContext(tmp_dir)
+
+    def test_update_core_frontend_template_default_true(self):
+        """三个 update_*_var 默认 True（与 Qt GUI 默认对齐）。"""
+        with tempfile.TemporaryDirectory() as tmp:
+            ctx = self._make_ctx(tmp)
+            self.assertTrue(ctx.update_core_var.get())
+            self.assertTrue(ctx.update_frontend_var.get())
+            self.assertTrue(ctx.update_template_var.get())
+
+    def test_stable_only_default_true_when_no_config(self):
+        """stable_only_var 默认 True（与 Qt 默认对齐）。"""
+        with tempfile.TemporaryDirectory() as tmp:
+            ctx = self._make_ctx(tmp)
+            self.assertTrue(ctx.stable_only_var.get())
+
+    def test_stable_only_reads_config(self):
+        """stable_only_var 从 config["version_preferences"]["stable_only"] 读。"""
+        with tempfile.TemporaryDirectory() as tmp:
+            ctx = self._make_ctx(tmp, version_prefs={"stable_only": False})
+            self.assertFalse(ctx.stable_only_var.get())
+
+    def test_auto_update_deps_default_true(self):
+        """auto_update_deps_var 默认 True。"""
+        with tempfile.TemporaryDirectory() as tmp:
+            ctx = self._make_ctx(tmp)
+            self.assertTrue(ctx.auto_update_deps_var.get())
+
+    def test_pypi_proxy_default_aliyun(self):
+        """pypi_proxy_mode / pypi_proxy_url 默认 aliyun。"""
+        with tempfile.TemporaryDirectory() as tmp:
+            ctx = self._make_ctx(tmp)
+            self.assertEqual(ctx.pypi_proxy_mode.get(), "aliyun")
+            self.assertEqual(
+                ctx.pypi_proxy_url.get(),
+                "https://mirrors.aliyun.com/pypi/simple/",
+            )
+
+    def test_pypi_proxy_reads_config(self):
+        """pypi_proxy_* 读 config["proxy_settings"]。"""
+        with tempfile.TemporaryDirectory() as tmp:
+            ctx = self._make_ctx(
+                tmp,
+                proxy_settings={
+                    "pypi_proxy_mode": "huaweicloud",
+                    "pypi_proxy_url": "https://repo.huaweicloud.com/repository/pypi/simple/",
+                },
+            )
+            self.assertEqual(ctx.pypi_proxy_mode.get(), "huaweicloud")
+            self.assertEqual(
+                ctx.pypi_proxy_url.get(),
+                "https://repo.huaweicloud.com/repository/pypi/simple/",
+            )
+
+    def test_services_version_is_real_version_service(self):
+        """services.version 是 services.version_service.VersionService 实例，
+        不是 _NoOpRuntime — 这样 perform_batch_update() 才能跑真实更新。"""
+        with tempfile.TemporaryDirectory() as tmp:
+            ctx = self._make_ctx(tmp)
+            from services.version_service import VersionService
+            self.assertIsInstance(ctx.services.version, VersionService)
+            self.assertTrue(hasattr(ctx.services.version, "upgrade_latest"))
+            self.assertTrue(hasattr(ctx.services.version, "get_current_kernel_version"))
+
+    def test_services_runtime_still_noop(self):
+        """services.runtime 保持 no-op（不影响 update 路径）。"""
+        with tempfile.TemporaryDirectory() as tmp:
+            ctx = self._make_ctx(tmp)
+            # _NoOpRuntime 没有方法，只有属性；用 hasattr 验证
+            self.assertFalse(hasattr(ctx.services.runtime, "upgrade_latest"))
 
 
 class TestGetHeadlessApp(unittest.TestCase):

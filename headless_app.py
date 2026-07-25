@@ -211,6 +211,23 @@ class HeadlessAppContext:
         # Version manager proxy
         self.version_manager = _VersionManagerProxy(proxy_settings)
 
+        # 更新选项（对应 GUI "批量更新" 对话框的复选框）
+        # CLI `update comfyui` 默认全选；config["version_preferences"] 可覆盖，
+        # 缺省按 GUI 默认 True。修 CLI 报 "no attribute update_core_var" 时加。
+        vp = self.config.get("version_preferences", {}) if isinstance(self.config, dict) else {}
+        self.update_core_var = BoolVar(True)
+        self.update_frontend_var = BoolVar(True)
+        self.update_template_var = BoolVar(True)
+        self.stable_only_var = BoolVar(bool(vp.get("stable_only", True)))
+        self.auto_update_deps_var = BoolVar(bool(vp.get("auto_update_deps", True)))
+
+        # PyPI 镜像设置（services.update_service._resolve_index_url 会读）
+        # 缺省 aliyun（与 Qt 默认对齐），用户 config 里可覆盖。
+        self.pypi_proxy_mode = StringVar(proxy_settings.get("pypi_proxy_mode", "aliyun"))
+        self.pypi_proxy_url = StringVar(
+            proxy_settings.get("pypi_proxy_url", "https://mirrors.aliyun.com/pypi/simple/")
+        )
+
         # 多环境支持：读激活环境的 python_path（与 PyQtLauncher 启动逻辑对齐）
         paths_cfg = self.get_active_paths()
         self.python_exec = str(paths_cfg.get("python_path") or sys.executable)
@@ -228,8 +245,8 @@ class HeadlessAppContext:
         # Root object with .after() method
         self.root = _NoOpRoot()
 
-        # Services object (mock)
-        self._services = _NoOpServices()
+        # Services object（_NoOpServices 会挂一个真实 VersionService，详见类注释）
+        self._services = _NoOpServices(self)
 
     def get_user_env_vars(self):
         """Return validated [(key, value), ...] from ``self.user_env_vars``.
@@ -278,9 +295,18 @@ class HeadlessAppContext:
 
 
 class _NoOpServices:
-    """No-op services object with .runtime attribute."""
+    """Headless services object — .version 是真实 VersionService。
 
-    def __init__(self):
+    services.update_service.UpdateService.perform_batch_update() 会调
+    ``self.app.services.version.upgrade_latest(...)`` 和 ``.get_current_kernel_version()``，
+    CLI ``update comfyui`` 必须能跑真实更新（不只是 no-op），所以这里挂一个真实的
+    VersionService（它只依赖 app.config / app.logger / app.git_path，headless 都有）。
+    其它服务（process / config / runtime / ...）CLI 当前不接触，保持 no-op。
+    """
+
+    def __init__(self, app):
+        from services.version_service import VersionService
+        self.version = VersionService(app)
         self.runtime = _NoOpRuntime()
 
 
