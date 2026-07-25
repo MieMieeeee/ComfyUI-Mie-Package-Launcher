@@ -18,6 +18,63 @@ warnings.filterwarnings("ignore", category=DeprecationWarning, message=".*sipPyT
 #   qt.text          全局文本模块下的警告全部抑制
 # 多个规则以 ";" 分隔。这一层为首选防线(过滤掉大多数警告);
 # 下面会加 qInstallMessageHandler 作为二层防线(抓住漏网的任何警告)。
+# 阶段性拦截: import PyQt5 之前包装 sys.stderr,
+# 过滤 DirectWrite 字体警告。该警告是 Qt DLL 在 import 阶段就输出的,
+# 比 qInstallMessageHandler 要装上更早, 所以 logging rule + message handler 都装太晚。
+# Python 层的 sys.stderr 包装可以接住所有走 stderr 的输出
+# (包括 Qt 内部 qWarning 走 stderr 那部分)。
+
+
+class _DirectWriteNoiseFilter:
+    """stderr 过滤器: 丢掉含 DirectWrite: CreateFontFaceFromHDC 的行。"""
+
+    _NEEDLE = "DirectWrite: CreateFontFaceFromHDC"
+
+    def __init__(self, real):
+        self._real = real
+        self._buf = ""
+
+    def write(self, s):
+        if not s:
+            return
+        if not isinstance(s, str):
+            try:
+                s = s.decode("utf-8", errors="replace")
+            except Exception:
+                return self._real.write(s)
+        # 以\n为分隔索引拼接完整行, 避免一行被切两半
+        # 出现"半行是警告, 半行正常" 这种 bug。
+        data = self._buf + s
+        out = []
+        last_split = 0
+        for i, ch in enumerate(data):
+            if ch == "\n":
+                line = data[last_split:i]
+                last_split = i + 1
+                if self._NEEDLE not in line:
+                    out.append(line + "\n")
+        self._buf = data[last_split:]
+        if out:
+            self._real.write("".join(out))
+
+    def flush(self):
+        if self._buf and self._NEEDLE not in self._buf:
+            self._real.write(self._buf)
+        self._buf = ""
+        try:
+            self._real.flush()
+        except Exception:
+            pass
+
+    def __getattr__(self, name):
+        # 其他属性(isatty/fileno/...) 全部转发到原始 stream,
+        # 避免 colorama 等三方包调用 .isatty 报错。
+        return getattr(self._real, name)
+
+
+sys.stderr = _DirectWriteNoiseFilter(sys.stderr)
+
+
 os.environ["QT_LOGGING_RULES"] = (
     "qt.qpa.fonts.warning=false;"
     "qt.text.font.warning=false;"
