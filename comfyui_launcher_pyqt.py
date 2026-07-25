@@ -11,7 +11,19 @@ warnings.filterwarnings("ignore", category=DeprecationWarning, message=".*sipPyT
 # 无法处理,每次刷一行 "CreateFontFaceFromHDC() failed" 警告。这些警告无害
 # (字体最终会回退到正常字体),纯粹是噪音,通过 logging rule 关掉。
 # 必须在 import PyQt5 之前设置。
-os.environ.setdefault("QT_LOGGING_RULES", "qt.qpa.fonts.warning=false")
+# DirectWrite 负载失败在 Qt5 不同版本在不同 category,多击击都覆盖上:
+#   qt.qpa.fonts     字体枚举阶段的警告
+#   qt.text.font     Qt5.9+ 的字体加载路径上下文
+#   qt.text.fonts    部分 patch 版本使用这个名称
+#   qt.text          全局文本模块下的警告全部抑制
+# 多个规则以 ";" 分隔。DirectWrite 警告无害,过滤后完全没有信息丢失。
+os.environ.setdefault(
+    "QT_LOGGING_RULES",
+    "qt.qpa.fonts.warning=false;"
+    "qt.text.font.warning=false;"
+    "qt.text.fonts.warning=false;"
+    "qt.text.warning=false",
+)
 
 from PyQt5 import QtWidgets, QtCore, QtGui
 

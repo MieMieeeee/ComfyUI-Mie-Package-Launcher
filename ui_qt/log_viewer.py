@@ -683,14 +683,28 @@ if _HAS_QT:
             self.text_edit = QtWidgets.QTextBrowser()
             self.text_edit.setObjectName("LogViewEdit")  # 供全局 QSS 按 objectName 设主题色
             self.text_edit.setReadOnly(True)
-            # 用 setFamilies 设置 fallback 列表(QFont 构造函数把整串当成单个
-            # family 名,导致 DirectWrite 反复尝试加载名为 "Consolas, Courier New"
-            # 的字体失败,并回退枚举 Fixedsys/Modern/MS Sans Serif 等旧字体,
-            # 启动时刷一堆 CreateFontFaceFromHDC() 警告)。
-            font = QtGui.QFont()
-            font.setFamilies(["Consolas", "Cascadia Mono", "Courier New", "Menlo", "DejaVu Sans Mono"])
+            # 选一个系统实际可用的等宽字体。不用 setFamilies fallback list 也不用 setStyleHint(Monospace)，
+            # 避免 Qt 枚举系统无法处理的旧位图字体（Fixedsys/Modern/MS Sans Serif 等）触发
+            # DirectWrite 负载失败 "CreateFontFaceFromHDC() failed" 警告。选字体顺序:
+            # 1) 首选我们面向多平台的偏好 (只选系统实际装的)→ 避免 fallback 枚举中心 fallback chain 里众多无法处理的旧字体;
+            # 2) 都不装的话退到系统默认(避免重新触发枚举)。
+            try:
+                from PyQt5 import QtGui as _QtGui
+                _families = set(_QtGui.QFontDatabase().families())
+            except Exception:
+                _families = set()
+            _picked = next(
+                (f for f in ("Consolas", "Cascadia Mono", "Courier New", "Menlo",
+                              "DejaVu Sans Mono", "Courier")
+                 if f in _families),
+                "",
+            )
+            if _picked:
+                font = _QtGui.QFont(_picked)
+            else:
+                # 系统默认字体(不加任何 hint)→避免枚举无法处理的旧字体。
+                font = _QtGui.QFont()
             font.setPointSize(10)
-            font.setStyleHint(QtGui.QFont.Monospace)
             self.text_edit.setFont(font)
             self.text_edit.setLineWrapMode(QtWidgets.QTextEdit.WidgetWidth)
             # 行数上限:Qt 在 block 数超过阈值时自动裁掉最早的 block,
