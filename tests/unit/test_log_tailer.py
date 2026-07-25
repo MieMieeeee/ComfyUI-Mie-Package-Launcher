@@ -255,6 +255,24 @@ class TestLogTailerCarriageReturnSplitting(unittest.TestCase):
             finally:
                 tailer.stop()
 
+    def test_cr_terminated_progress_emits_before_newline(self):
+        """tqdm 只写回车刷新时也应实时 emit，不能等任务结束后的换行。"""
+        with _tmpfile("") as path:
+            received = []
+            tailer = LogTailer(path, on_line=received.append, start_from_beginning=True)
+            tailer.start()
+            try:
+                with open(path, "ab", buffering=0) as f:
+                    f.write(b" 15%|###| 3/20 [00:07<00:37, 2.20s/it]\r")
+                self.assertTrue(
+                    _wait_for(lambda: len(received) == 1, timeout=1.0),
+                    f"progress should emit before newline, got {received!r}",
+                )
+                self.assertTrue(received[0].endswith("\r"))
+                self.assertIn("3/20", received[0])
+            finally:
+                tailer.stop()
+
     def test_empty_segments_between_cr_are_skipped(self):
         """连续 \r 之间的空段(tqdm 写新值前先 \r 把光标归位)直接丢弃。"""
         raw = "\r\r\r  only_one  \r\r\n"

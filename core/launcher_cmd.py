@@ -108,6 +108,10 @@ def build_launch_params(app, env_id=None):
     except Exception:
         pass
     env = os.environ.copy()
+    # ComfyUI 在隐藏控制台模式下将 stdout/stderr 重定向到普通文件。
+    # Python 对文件默认使用块缓冲，会让 tqdm 的回车刷新直到任务完成才落盘。
+    # 强制无缓冲后，每次进度刷新都能被 LogTailer 在轮询周期内读到。
+    env["PYTHONUNBUFFERED"] = "1"
     try:
         sel = app.selected_hf_mirror.get()
         if sel != "不使用镜像":

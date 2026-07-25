@@ -177,12 +177,13 @@ class TestLogViewerPageTailing(_Fixture):
         self.assertTrue(page.collapse_checkbox.isChecked())
         with open(log, "a", encoding="utf-8") as f:
             for pct in ("10", "20", "30", "40"):
-                f.write(f"Loading: {pct}%\r\n")
+                f.write(f"Loading: {pct}%\r")
             f.write("done\n")
         _process_events_for(0.8)
         text_collapsed = page.text_edit.toPlainText()
         self.assertIn("done", text_collapsed)
-        self.assertIn("updates", text_collapsed)
+        self.assertIn("Loading: 40%", text_collapsed)
+        self.assertNotIn("Loading: 10%", text_collapsed)
         # 关掉折叠,清空再写
         page.clear_btn.click()
         self.app.processEvents()
@@ -545,6 +546,38 @@ class TestBatchRendering(_Fixture):
         page = LogViewerPage(theme_manager=self.tm)
         page._flush_batch()  # 空 buffer 不抛、不写
         self.assertEqual(page.text_edit.toPlainText(), "")
+
+    def test_live_progress_replaces_active_line(self):
+        page = LogViewerPage(theme_manager=self.tm)
+        page._on_line_main("  5%|#| 1/20 [00:02<00:38]\r")
+        page._flush_batch()
+        page._on_line_main(" 15%|###| 3/20 [00:07<00:37]\r")
+        page._flush_batch()
+        text = page.text_edit.toPlainText()
+        self.assertNotIn("1/20", text)
+        self.assertIn("3/20", text)
+        self.assertEqual(text.count("3/20"), 1)
+
+    def test_progress_burst_renders_only_latest_value(self):
+        page = LogViewerPage(theme_manager=self.tm)
+        for step in range(1, 6):
+            page._on_line_main(f" {step * 5}%|#| {step}/20\r")
+        page._flush_batch()
+        text = page.text_edit.toPlainText()
+        self.assertIn("5/20", text)
+        self.assertNotIn("1/20", text)
+        self.assertEqual(text.count("/20"), 1)
+
+    def test_normal_line_finalizes_active_progress(self):
+        page = LogViewerPage(theme_manager=self.tm)
+        page._on_line_main(" 15%|###| 3/20 [00:07<00:37]\r")
+        page._flush_batch()
+        page._on_line_main("Prompt executed")
+        page._flush_batch()
+        text = page.text_edit.toPlainText()
+        self.assertIn("3/20", text)
+        self.assertIn("Prompt executed", text)
+        self.assertLess(text.index("3/20"), text.index("Prompt executed"))
 
 
 if __name__ == "__main__":

@@ -18,6 +18,53 @@ def _post_to_ui(app, fn):
             pass
 
 
+def _pump_output(source, target):
+    """把子进程输出逐块写入日志，并立即 flush 供 LogTailer 实时读取。"""
+    try:
+        read_chunk = getattr(source, "read1", source.read)
+        while True:
+            chunk = read_chunk(4096)
+            if not chunk:
+                break
+            target.write(chunk)
+            target.flush()
+    finally:
+        try:
+            source.close()
+        except Exception:
+            pass
+        try:
+            target.close()
+        except Exception:
+            pass
+
+
+def _start_log_pump(pm, source, target):
+    thread = threading.Thread(
+        target=_pump_output, args=(source, target),
+        name="ComfyUILogPump", daemon=True,
+    )
+    thread.start()
+    pm._log_pump_thread = thread
+
+
+def _start_console_log_window(pm, log_path):
+    """打开独立 CMD，持续显示与实时日志页相同的日志文件。"""
+    script = Path(os.environ.get("TEMP", ".")) / "comfyui_launcher_tail.ps1"
+    script.write_text(
+        "param([string]$LogPath)\n"
+        "$host.UI.RawUI.WindowTitle = 'ComfyUI'\n"
+        "Get-Content -LiteralPath $LogPath -Wait -Tail 80\n",
+        encoding="utf-8",
+    )
+    flags = getattr(subprocess, "CREATE_NEW_CONSOLE", 0)
+    pm._console_log_process = subprocess.Popen(
+        ["powershell.exe", "-NoProfile", "-ExecutionPolicy", "Bypass",
+         "-File", str(script), str(log_path)],
+        creationflags=flags,
+    )
+
+
 def _spawn_process(pm, cmd, env, run_cwd, show_console=True, log_path=None):
     """spawn ComfyUI 子进程。
 
@@ -44,43 +91,27 @@ def _spawn_process(pm, cmd, env, run_cwd, show_console=True, log_path=None):
         Unix 不受 Win32 句柄继承影响,继承父进程 stdin 即可。
     """
     log_fh = None
-    if show_console is False and log_path is not None:
+    capture_for_console = bool(show_console and log_path is not None)
+    if log_path is not None:
         # 兼容 str 和 Path 两种入参
         log_path = Path(log_path)
         try:
             log_path.parent.mkdir(parents=True, exist_ok=True)
         except Exception:
             pass
+        if log_path.exists() and log_path.stat().st_size > 0:
+            with open(log_path, "rb") as existing:
+                existing.seek(-1, os.SEEK_END)
+                if existing.read(1) not in (b"\n", b"\r"):
+                    with open(log_path, "ab") as boundary:
+                        boundary.write(b"\n")
         log_fh = open(log_path, "ab")
 
     if os.name == "nt":
         si = subprocess.STARTUPINFO()
         si.dwFlags |= subprocess.STARTF_USESHOWWINDOW
-        if show_console:
+        if show_console and not capture_for_console:
             si.wShowWindow = 1  # SW_SHOWNORMAL
-            # 临时把启动器的三个 std handle (stdin=-10, stdout=-11, stderr=-12)
-            # 全部设为 NULL,spawn 后立即恢复。两个目的:
-            #
-            # 1) 防 WinError 6:Nuitka --windows-console-mode=attach 打包后,
-            #    双击启动的 GUI 进程 std handle 是无效/已关闭句柄。Popen 内部
-            #    _get_handles() 继承到无效句柄时,DuplicateHandle 抛
-            #    WinError 6(句柄无效)。三个 handle 全清 NULL 后,CreateProcess
-            #    在 CREATE_NEW_CONSOLE 下会给子进程的新 console 分配全套
-            #    有效 std handle。
-            #
-            # 2) 防 conhost 黑窗口:CLI launcher 调 _attach_parent_console 后,
-            #    stdout handle 是父 PowerShell 的有效(inheritable)句柄,
-            #    ComfyUI 的 print 会跑到 PowerShell 而不是新弹的 conhost 窗口
-            #    (窗口看着是黑的)。清成 NULL 后,Windows 给新 console 分配
-            #    新 handle,输出正确进 conhost 窗口。
-            #
-            # 关键:这里 *不能* 传 stdin=DEVNULL。一旦传 stdin=,subprocess
-            # 会设 STARTF_USESTDHANDLES,把 stdout/stderr 也强制为 NULL 句柄
-            # (因为已经 SetStdHandle 清零),ComfyUI 第一次 print 就抛
-            # [Errno 22] Invalid argument,进程立即以 returncode=120 退出,
-            # conhost 窗口是黑的没有任何输出 —— 这正是之前的 bug。
-            # 不传 stdin= 时,Windows 走 CREATE_NEW_CONSOLE 默认路径,自己给
-            # 新 console 分配全套有效 std handle,不依赖 STARTF_USESTDHANDLES。
             _k32 = None
             _si_h = _so = _se = None
             try:
@@ -96,9 +127,7 @@ def _spawn_process(pm, cmd, env, run_cwd, show_console=True, log_path=None):
                 pass
             try:
                 pm.comfyui_process = subprocess.Popen(
-                    cmd,
-                    env=env,
-                    cwd=run_cwd,
+                    cmd, env=env, cwd=run_cwd,
                     creationflags=subprocess.CREATE_NEW_CONSOLE,
                     startupinfo=si,
                 )
@@ -123,10 +152,16 @@ def _spawn_process(pm, cmd, env, run_cwd, show_console=True, log_path=None):
                 # (与 utils/common.py:run_hidden 的 capture_output 路径一致)
                 stdin=subprocess.DEVNULL,
             )
-            if log_fh is not None:
+            if capture_for_console:
+                popen_kwargs["stdout"] = subprocess.PIPE
+                popen_kwargs["stderr"] = subprocess.STDOUT
+            elif log_fh is not None:
                 popen_kwargs["stdout"] = log_fh
                 popen_kwargs["stderr"] = subprocess.STDOUT
             pm.comfyui_process = subprocess.Popen(cmd, **popen_kwargs)
+            if capture_for_console:
+                _start_log_pump(pm, pm.comfyui_process.stdout, log_fh)
+                _start_console_log_window(pm, log_path)
     else:
         # Unix: stdin 继承父进程即可,Win32 的无效句柄继承问题在这里不存在
         popen_kwargs = dict(env=env, cwd=run_cwd)

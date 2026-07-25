@@ -296,6 +296,7 @@ class LogTailer:
                 if chunk:
                     position = f.tell()
                     self._buffer += chunk
+                    self._emit_complete_carriage_returns(path)
                     while True:
                         idx = self._buffer.find(b"\n")
                         if idx < 0:
@@ -327,9 +328,10 @@ class LogTailer:
                                 line = line_bytes.decode("utf-8", errors="replace")
                             except Exception:
                                 line = ""
-                            if _should_log_emit("LogTailer.emit"):
-                                _diag_logger.info("LogTailer.emit path=%s line=%r", path, line[:200])
-                            self._on_line(line)
+                            if line:
+                                if _should_log_emit("LogTailer.emit"):
+                                    _diag_logger.info("LogTailer.emit path=%s line=%r", path, line[:200])
+                                self._on_line(line)
                         self._buffer = self._buffer[idx + 1:]
                 else:
                     self._stop_event.wait(self._POLL_INTERVAL)
@@ -338,6 +340,22 @@ class LogTailer:
                 f.close()
             except Exception:
                 pass
+
+    def _emit_complete_carriage_returns(self, path) -> None:
+        """立即发出以回车结束的刷新，尾部半行继续等待后续字节。"""
+        while True:
+            idx = self._buffer.find(b"\r")
+            newline_idx = self._buffer.find(b"\n")
+            if idx < 0 or (newline_idx >= 0 and newline_idx <= idx + 1):
+                return
+            segment = self._buffer[:idx]
+            self._buffer = self._buffer[idx + 1:]
+            if not segment:
+                continue
+            line = segment.decode("utf-8", errors="replace") + "\r"
+            if _should_log_emit("LogTailer.emit"):
+                _diag_logger.info("LogTailer.emit path=%s line=%r", path, line[:200])
+            self._on_line(line)
 
     @staticmethod
     def _file_key(path) -> tuple:
@@ -575,6 +593,7 @@ if _HAS_QT:
             # 避免逐行 insertText 触发富文本 O(n²) 布局重算。
             self._batch_buffer = []  # type: List[str]
             self._batch_timer = None  # type: QtCore.QTimer | None
+            self._active_progress = ""
             self._setup_ui()
 
         # 最近历史日志的行数上限(用户首次切到日志页时回填这么多行)。
@@ -787,6 +806,8 @@ if _HAS_QT:
             if self._tailer is not None:
                 self._tailer.stop()
                 self._tailer = None
+            if self._active_progress:
+                self._finalize_active_progress()
             flushed = self._filter.flush()
             for line in flushed:
                 self._append_line(line)
@@ -806,11 +827,29 @@ if _HAS_QT:
                 self.logger.info("main_recv line=%r", line[:200])
             if self._paused:
                 return
+            if self.collapse_checkbox.isChecked() and "\r" in line:
+                progress = ProgressCollapseFilter._last_segment(line)
+                if progress:
+                    self._set_active_progress(progress)
+                return
+            if self._active_progress:
+                self._finalize_active_progress()
             if self.collapse_checkbox.isChecked():
                 for out in self._filter.feed(line):
                     self._append_line(out)
             else:
                 self._append_line(line)
+
+        def _set_active_progress(self, line: str) -> None:
+            self._active_progress = strip_ansi(line)
+            self._enqueue_batch(None)
+
+        def _finalize_active_progress(self) -> None:
+            self._flush_batch()
+            cursor = self.text_edit.textCursor()
+            cursor.movePosition(QtGui.QTextCursor.End)
+            cursor.insertBlock()
+            self._active_progress = ""
 
         def _append_line(self, line: str) -> None:
             """处理一行日志:剥 ANSI、记录未读、入批量缓冲(不直接写 QTextEdit)。
@@ -835,9 +874,10 @@ if _HAS_QT:
             clean = strip_ansi(line)
             self._enqueue_batch(clean)
 
-        def _enqueue_batch(self, line: str) -> None:
-            """行进批量缓冲,启动/重置 flush 定时器(攒满 _BATCH_INTERVAL_MS ms 再写)。"""
-            self._batch_buffer.append(line)
+        def _enqueue_batch(self, line) -> None:
+            """普通行入缓冲；None 表示只触发活动进度刷新。"""
+            if line is not None:
+                self._batch_buffer.append(line)
             if self._batch_timer is None:
                 self._batch_timer = QtCore.QTimer(self)
                 self._batch_timer.setSingleShot(True)
@@ -851,17 +891,24 @@ if _HAS_QT:
             批量化是关键:把 N 次 insertText(每次触发富文本布局重算)合并成 1 次,
             实时跟随(行流)和历史回填(几百行)都只做 O(1) 次 DOM 写入。
             """
-            if not self._batch_buffer:
+            if not self._batch_buffer and not self._active_progress:
                 return
             batch_size = len(self._batch_buffer)
-            text = "\n".join(self._batch_buffer) + "\n"
+            text = "\n".join(self._batch_buffer)
             self._batch_buffer.clear()
             if _should_log_emit("flush_batch"):
                 self.logger.info("flush_batch size=%d first_line=%r", batch_size, text.splitlines()[0][:120] if text else "")
             # moveCursor + insertText 一次写整批;document 的 maximumBlockCount 自动裁老的
             cursor = self.text_edit.textCursor()
             cursor.movePosition(QtGui.QTextCursor.End)
-            cursor.insertText(text)
+            if self._active_progress:
+                cursor.select(QtGui.QTextCursor.BlockUnderCursor)
+                cursor.removeSelectedText()
+                if text:
+                    cursor.insertText(text + "\n")
+                cursor.insertText(self._active_progress)
+            elif text:
+                cursor.insertText(text + "\n")
             # 滚到底(整批一次)
             bar = self.text_edit.verticalScrollBar()
             if bar is not None:
@@ -874,10 +921,13 @@ if _HAS_QT:
 
         def _on_clear_clicked(self) -> None:
             self.text_edit.clear()
+            self._active_progress = ""
             # 重置 filter 状态(避免之前积累的 \r 计数影响下一段)
             self._filter = ProgressCollapseFilter()
 
         def _on_collapse_toggled(self, checked: bool) -> None:
+            if self._active_progress:
+                self._finalize_active_progress()
             # 切换折叠时重置 filter,避免陈旧 \r 计数
             self._filter = ProgressCollapseFilter()
 

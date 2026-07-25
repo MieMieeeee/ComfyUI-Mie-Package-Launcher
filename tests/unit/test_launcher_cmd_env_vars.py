@@ -64,6 +64,17 @@ class TestBuildLaunchParamsInjectsUserEnv(unittest.TestCase):
         import shutil
         shutil.rmtree(self.tmp, ignore_errors=True)
 
+    def test_python_output_is_unbuffered_by_default(self):
+        from core.launcher_cmd import build_launch_params
+        _, env, *_ = build_launch_params(self.app)
+        self.assertEqual(env.get("PYTHONUNBUFFERED"), "1")
+
+    def test_user_can_override_python_unbuffered(self):
+        self.app.user_env_vars.set("PYTHONUNBUFFERED=0")
+        from core.launcher_cmd import build_launch_params
+        _, env, *_ = build_launch_params(self.app)
+        self.assertEqual(env.get("PYTHONUNBUFFERED"), "0")
+
     def test_user_env_vars_present_in_spawn_env(self):
         from core.launcher_cmd import build_launch_params
         cmd, env, run_cwd, py, main = build_launch_params(self.app)

@@ -169,6 +169,20 @@ def _stop_by_port_fallback(app) -> bool:
     return killed
 
 
+def _stop_console_log_window(pm) -> None:
+    proc = getattr(pm, "_console_log_process", None)
+    if proc is None or proc.poll() is not None:
+        return
+    try:
+        proc.terminate()
+        proc.wait(timeout=2)
+    except Exception:
+        try:
+            proc.kill()
+        except Exception:
+            pass
+
+
 def stop(app, pm):
     try:
         app.logger.info("用户点击停止：开始关闭 ComfyUI")
@@ -180,6 +194,7 @@ def stop(app, pm):
     killed = _stop_tracked_process(app, pm)
     if not killed:
         killed = _stop_by_port_fallback(app)
+    _stop_console_log_window(pm)
 
     try:
         app.logger.info("停止流程完成: killed=%s", killed)
