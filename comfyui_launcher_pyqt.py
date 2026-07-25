@@ -10,22 +10,54 @@ warnings.filterwarnings("ignore", category=DeprecationWarning, message=".*sipPyT
 # Modern / MS Sans Serif / MS Serif / Roman / Script 这些旧位图字体,DirectWrite
 # 无法处理,每次刷一行 "CreateFontFaceFromHDC() failed" 警告。这些警告无害
 # (字体最终会回退到正常字体),纯粹是噪音,通过 logging rule 关掉。
-# 必须在 import PyQt5 之前设置。
-# DirectWrite 负载失败在 Qt5 不同版本在不同 category,多击击都覆盖上:
+# 必须在 import PyQt5 之前设置。用无条件赋值覆盖用户 shell 里可能已设的其他值。
+# DirectWrite 负载失败在 Qt5 不同版本不同 category,多击击都覆盖上:
 #   qt.qpa.fonts     字体枚举阶段的警告
 #   qt.text.font     Qt5.9+ 的字体加载路径上下文
 #   qt.text.fonts    部分 patch 版本使用这个名称
 #   qt.text          全局文本模块下的警告全部抑制
-# 多个规则以 ";" 分隔。DirectWrite 警告无害,过滤后完全没有信息丢失。
-os.environ.setdefault(
-    "QT_LOGGING_RULES",
+# 多个规则以 ";" 分隔。这一层为首选防线(过滤掉大多数警告);
+# 下面会加 qInstallMessageHandler 作为二层防线(抓住漏网的任何警告)。
+os.environ["QT_LOGGING_RULES"] = (
     "qt.qpa.fonts.warning=false;"
     "qt.text.font.warning=false;"
     "qt.text.fonts.warning=false;"
-    "qt.text.warning=false",
+    "qt.text.warning=false"
 )
 
 from PyQt5 import QtWidgets, QtCore, QtGui
+
+# 二层防线：装 message handler 拦截 Qt 消息。过滤:
+# 1) DirectWrite 字体负载失败 ("CreateFontFaceFromHDC() failed" 类)——无害,仅为警告;
+# 2) qt.qpa.fonts / qt.text.* category 下的任何 message（以防 logging rule 漏网）。
+# 其他消息全部放行。这个 handler 覆盖默认 handler,但只在本脚本进程内生效。
+_DIRECTWRITE_NOISE = (
+    "CreateFontFaceFromHDC",  # DirectWrite 负载失败的关键字符串
+)
+
+
+def _qt_message_handler(mode, ctx, msg):
+    """拦截 Qt 内部消息。对装中误以 DirectWrite 字体负载失败为默认抛弃。
+
+    参数 ctx 可能为 None（部分路径调用 handler 时不传 ctx）,以及不同 Qt 版本字段不同,所以做防御性访问。
+    """
+    try:
+        if msg and any(needle in msg for needle in _DIRECTWRITE_NOISE):
+            return  # 丢弃该条警告
+        cat = getattr(ctx, "category", "") if ctx is not None else ""
+        if cat and (
+            cat.startswith("qt.qpa.fonts")
+            or cat.startswith("qt.text")
+            and ("font" in cat or "Font" in cat)
+        ):
+            return
+    except Exception:
+        pass
+    # 其他消息走默认 handler（输出到 stderr、调试器等）
+    sys.stderr.write(f"{msg}\n")
+
+
+QtCore.qInstallMessageHandler(_qt_message_handler)
 
 # -----------------------------------------------------------------------------
 # Fix for PyQt5 plugins + DLL path in PyInstaller onedir + Enigma Virtual Box
