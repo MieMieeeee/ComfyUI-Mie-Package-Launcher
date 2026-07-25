@@ -166,7 +166,7 @@ cd /path/to/ComfyUI-Mie-Package-Launcher
 # 确保 "channel": "stable"
 
 # 执行编译
-python build_exe_v2.py
+.venv\Scripts\python.exe build.py
 ```
 
 编译产物：`dist/ComfyUI启动器_{版本号}.exe`
@@ -182,7 +182,7 @@ cd /path/to/ComfyUI-Mie-Package-Launcher
 # 确保 "channel": "test"
 
 # 执行编译（带 --test 标志）
-python build_exe_v2.py --test
+.venv\Scripts\python.exe build.py --test
 ```
 
 编译产物：`dist/test/ComfyUI启动器_{版本号}.exe`
@@ -286,7 +286,7 @@ rm -rf build/ dist/ *.build/ *.dist/
 cat build_parameters.json | grep channel
 
 # 3. 重新编译
-python build_exe_v2.py --test
+.venv\Scripts\python.exe build.py --test
 ```
 
 #### 2. 版本号比较逻辑问题
@@ -404,7 +404,7 @@ curl -I "https://gitee.com/MieMieeeee/comfyui-mie-resources/raw/master/launcher/
 # 编辑 build_parameters.json，将 version 改为 "v1.0.9"，channel 改为 "stable"
 
 # 2. 编译
-python build_exe_v2.py
+.venv\Scripts\python.exe build.py
 
 # 3. 测试编译产物（可选但推荐）
 ./dist/ComfyUI启动器_v1.0.9.exe --version
@@ -425,7 +425,7 @@ python upgrade_exe.py \
 
 | 文件 | 路径 | 说明 |
 |------|------|------|
-| 编译脚本 | `build_exe_v2.py` | Nuitka 编译入口 |
+| 编译脚本 | `build.py` | Nuitka 编译 + Enigma 封包 + release 打包 |
 | 发布脚本 | `upgrade_exe.py` | Gitee 发布脚本 |
 | 编译配置 | `build_parameters.json` | 版本、通道等元信息 |
 | 更新服务 | `services/LauncherUpdateService.py` | 版本检查核心逻辑 |

@@ -12,7 +12,7 @@ ComfyUI 启动器（PyQt5，Windows）。无参数启动 = GUI 图形界面；�
 
 ## 怎么调用
 
-**agent / 自动化推荐 `ComfyUI-CLI.cmd`**：和下面 `ComfyUI启动器.exe` 行为完全等价（参数 + 退出码透传），但名字带 -CLI，对监控脚本 / NSSM / systemd / GitHub Actions 更友好。必须和 `ComfyUI启动器.exe` 同目录。
+**agent / 自动化推荐 `ComfyUI启动器-CLI.cmd`**：和下面 `ComfyUI启动器.exe` 行为完全等价（参数 + 退出码透传），但名字带 -CLI，对监控脚本 / NSSM / systemd / GitHub Actions 更友好。必须和 `ComfyUI启动器.exe` 同目录。
 
 ```bash
 # 打包版（部署/运维场景，agent 通常用这个）—— exe 会自动切到自身所在目录找配置
@@ -22,7 +22,8 @@ ComfyUI启动器.exe <command> [--json] [-v]
 python __main__.py <command> [--json] [-v]
 ```
 
-- **无子命令** → `ComfyUI启动器.exe`（裸跑）会启动 GUI；`ComfyUI-CLI.cmd`（裸跑）会转发到 `help`，不弹窗口。
+- **无子命令** → `ComfyUI启动器.exe`（裸跑）会启动 GUI；`ComfyUI启动器-CLI.cmd`（裸跑）会转发到 `help`，不弹窗口。
+- **未知子命令或仅传 flags**（如 `frobnicate`、`--json` 单独）→ wrapper exit 1 + stderr 一行 `[ComfyUI启动器-CLI] ERROR: ...`，不弹 GUI。
 - 所有子命令都支持 `--json`（输出**单行** JSON，便于解析）和 `-v`/`--verbose`（可叠加 `-vv`）。
 
 ## 子命令速查（agent 最常用）

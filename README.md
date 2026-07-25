@@ -198,8 +198,7 @@ ComfyUI-Mie-Package-Launcher/
 │   ├── ui/                     # UI 测试（pytest-qt）
 │   └── utils/                  # 测试工具（app_stub、mock_subprocess 等）
 ├── pyproject.toml              # 项目配置与 pytest 设置
-├── build_exe.py                # PyInstaller 打包脚本
-├── build_exe_v2.py             # Nuitka 打包脚本（推荐）
+├── build.py                    # Nuitka + Enigma 一键构建脚本
 ├── build_parameters.json       # 构建参数（版本号、构建时间）
 └── README.md
 ```
@@ -245,21 +244,20 @@ View (PyQt5)          Service (DI)           Core              External
 
 ## 打包 EXE
 
-### 方式一：Nuitka 构建（推荐）
+`build.py` 一键完成 Nuitka 编译 + Enigma 封包 + release 子目录打包：
+
 ```bash
-python build_exe_v2.py          # 正式版
-python build_exe_v2.py --test   # 测试版
+.venv\Scripts\python.exe build.py             # 正式版
+.venv\Scripts\python.exe build.py --test      # 测试通道（dist/ComfyUI启动器_test.dist/）
+.venv\Scripts\python.exe build.py --evb-only # 跳过 Nuitka，仅重跑 Enigma 封包
 ```
 
-### 方式二：PyInstaller 构建
-```bash
-python build_exe.py
-# 或
-pyinstaller "ComfyUI启动器.spec"
-```
+参数与排错：见 BUILD.md。
 
 ### 构建产物
-- `dist/ComfyUI启动器.exe` → 自动复制到项目根目录
+- `dist/ComfyUI启动器.dist/` — Nuitka + Enigma 中间产物（含 `ComfyUI_Launcher_Internal_boxed.exe`）
+- `release/ComfyUI启动器_v<ver>_<YYYYMMDD_HHMM>/ComfyUI启动器.exe` — 最终发布文件，纯净名
+- `release/.../ComfyUI启动器-CLI.cmd` — 配套 CLI wrapper（agent / 自动化专用，详 AGENTS.md）
 - `build_parameters.json` 自动更新版本号与构建时间
 
 ### 说明

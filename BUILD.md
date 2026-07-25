@@ -1,7 +1,7 @@
 # 构建指南
 
 本项目使用 **Nuitka 编译** + **Enigma Virtual Box 封包** 的一键构建流程。
-主入口脚本：`build.py`（已封装全部步骤），也可单独使用 `build_exe_v2.py`（仅 Nuitka）。
+主入口脚本：`build.py`（已封装 Nuitka 编译 + Enigma 封包 + release 子目录打包三步）。
 
 ## 一键构建
 
@@ -23,7 +23,9 @@
 
 - `dist\ComfyUI启动器.dist\ComfyUI_Launcher_Internal.exe` — Nuitka 编译后的内部 exe
 - `dist\ComfyUI启动器.dist\ComfyUI_Launcher_Internal_boxed.exe` — Enigma 封包后的单文件 exe
-- `release\ComfyUI启动器_v<ver>_<YYYYMMDD_HHMM>.exe` — 最终发布文件
+- `dist\ComfyUI启动器.dist\ComfyUI启动器-CLI.cmd` — 配套 CLI wrapper（dev tester 用）
+- `release\ComfyUI启动器_v<ver>_<YYYYMMDD_HHMM>\ComfyUI启动器.exe` — 最终发布文件（纯净名）
+- `release\ComfyUI启动器_v<ver>_<YYYYMMDD_HHMM>\ComfyUI启动器-CLI.cmd` — 最终发布文件里的 CLI wrapper（与 .exe 配对）
 
 ## 关键依赖
 

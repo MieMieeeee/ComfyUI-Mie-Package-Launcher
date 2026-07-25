@@ -3,7 +3,7 @@
 `comfyui-launcher` 内置 headless 命令行模式，复用 GUI 启动 / 停止路径，
 适合配合 systemd / NSSM / 任务计划程序做开机自启 / 监控 / CI。
 
-agent / 自动化场景推荐用 **ComfyUI-CLI.cmd**（仓库根目录）：
+agent / 自动化场景推荐用 **ComfyUI启动器-CLI.cmd**（仓库根目录）：
 
 - 行为与 `ComfyUI启动器.exe <cmd>` 完全等价（参数 + 退出码透传）
 - 名字带 -CLI，对监控 / NSSM / systemd / GitHub Actions 更友好
