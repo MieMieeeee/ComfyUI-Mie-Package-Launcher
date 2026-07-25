@@ -35,6 +35,13 @@ BOXED_EXE_NAME = "ComfyUI_Launcher_Internal_boxed.exe"
 EXE_NAME = "ComfyUI启动器.exe"
 CLI_WRAPPER_NAME = "ComfyUI启动器-CLI.cmd"
 
+# 发布子目录里要带的 launcher 操作文档（让 agent / 用户拿到 release 包就能读到 CLI 介绍）
+RELEASE_DOC_FILES = [
+    ("使用说明.md",     "使用说明.md"),
+    ("AGENTS.md",       "AGENTS.md"),
+    ("docs/cli.md",     "docs/cli.md"),
+]
+
 
 def parse_args():
     parser = argparse.ArgumentParser(description='ComfyUI启动器 一键构建脚本')
@@ -395,6 +402,26 @@ def step_copy_cli_wrapper(dest_dir, project_dir):
     return dst
 
 
+def step_copy_release_docs(dest_dir, project_dir):
+    """把 launcher 操作文档 (使用说明.md / AGENTS.md / docs/cli.md) 拷到发布子目录。
+
+    让 agent / 用户拿到 release 包后无需回仓库就能读到 CLI 介绍。
+    缺失的源文件会跳过 + 警告，不让 build 失败。
+    """
+    copied = 0
+    for src_rel, dst_rel in RELEASE_DOC_FILES:
+        src = os.path.join(project_dir, src_rel)
+        dst = os.path.join(dest_dir, dst_rel)
+        if not os.path.exists(src):
+            print(f"[docs] 跳过 (源不存在): {src}")
+            continue
+        os.makedirs(os.path.dirname(dst), exist_ok=True)
+        shutil.copy2(src, dst)
+        print(f"[docs] -> {dst}")
+        copied += 1
+    return copied
+
+
 def generate_release_dirname(version, is_test):
     """生成 release 子目录名: ComfyUI启动器_v1.0.10_20260412_1033[_test]。
 
@@ -436,6 +463,9 @@ def step_finalize_release(boxed_exe, version, is_test):
 
     # 2) ComfyUI启动器-CLI.cmd （配套 wrapper）
     step_copy_cli_wrapper(sub_dir, project_dir)
+
+    # 3) 操作文档（让 agent / 用户拿到 release 包就能读到 CLI 介绍）
+    step_copy_release_docs(sub_dir, project_dir)
 
     return sub_dir
 
