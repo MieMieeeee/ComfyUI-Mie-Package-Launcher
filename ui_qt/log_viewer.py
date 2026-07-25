@@ -614,12 +614,16 @@ if _HAS_QT:
             except Exception:
                 return
             for line in lines:
+                # 历史行也是从原始文件读出来的, 会含 ANSI SGR 代码
+                # (例如 Python logging 输出的 \x1b[1m\x1b[31m[ERROR]\x1b[0m) -> QTextBrowser 里\x1b不可见
+                # 会留下 [1m[31m[0m 这种“残乙”。走 filter 之前先剥 ANSI,与实时行一致。
+                clean = strip_ansi(line)
                 # 走折叠过滤器(与实时行一致),结果入批量缓冲
                 if self.collapse_checkbox.isChecked():
-                    for out in self._filter.feed(line):
+                    for out in self._filter.feed(clean):
                         self._enqueue_batch(out)
                 else:
-                    self._enqueue_batch(line)
+                    self._enqueue_batch(clean)
             self._flush_batch()  # 历史一次性 flush,不等定时器
 
         def _setup_ui(self):

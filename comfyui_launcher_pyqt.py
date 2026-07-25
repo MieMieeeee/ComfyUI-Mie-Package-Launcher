@@ -26,9 +26,18 @@ warnings.filterwarnings("ignore", category=DeprecationWarning, message=".*sipPyT
 
 
 class _DirectWriteNoiseFilter:
-    """stderr 过滤器: 丢掉含 DirectWrite: CreateFontFaceFromHDC 的行。"""
+    """stderr 过滤器:
+    - 丢掉含 DirectWrite: CreateFontFaceFromHDC 的行 (Qt 字体警告)
+    - 从其他行中剥除 ANSI SGR 转义串 (Python logging 输出的 [1m[31m[ERROR][0m 类)。"""
 
     _NEEDLE = "DirectWrite: CreateFontFaceFromHDC"
+    # ANSI SGR: ESC [ <参数> m。参数以 ; 分隔的数字 (颜色 / 加粗 / 背景色 / reset 等)。
+    # 不包括光标移动 / 清屏等 (H, J, K 等), 那些不在 PowerShell 能反应的范围内。
+    _SGR_RE = re.compile(r"\x1b\[[\d;]*m")
+
+    @classmethod
+    def _strip_sgr(cls, s: str) -> str:
+        return cls._SGR_RE.sub("", s)
 
     def __init__(self, real):
         self._real = real
@@ -51,15 +60,18 @@ class _DirectWriteNoiseFilter:
             if ch == "\n":
                 line = data[last_split:i]
                 last_split = i + 1
-                if self._NEEDLE not in line:
-                    out.append(line + "\n")
+                if self._NEEDLE in line:
+                    # 该行丢弃, 不加到 out
+                    continue
+                # 不含 DirectWrite 的行: 剥除 ANSI SGR 后转发
+                out.append(self._strip_sgr(line) + "\n")
         self._buf = data[last_split:]
         if out:
             self._real.write("".join(out))
 
     def flush(self):
         if self._buf and self._NEEDLE not in self._buf:
-            self._real.write(self._buf)
+            self._real.write(self._strip_sgr(self._buf))
         self._buf = ""
         try:
             self._real.flush()
