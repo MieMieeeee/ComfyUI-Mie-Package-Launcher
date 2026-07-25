@@ -6,18 +6,35 @@ from utils import paths as PATHS
 __all__ = ["run"]
 
 
-def _resolve_version() -> str:
-    """读 build_parameters.json 里的 version 字段。"""
+def _read_build_parameters():
+    """读 build_parameters.json，找不到或解析失败返回空 dict。"""
     import json
     from pathlib import Path
     try:
         p = Path("build_parameters.json")
         if not p.exists():
-            return "unknown"
-        data = json.loads(p.read_text(encoding="utf-8"))
-        return str(data.get("version", "unknown"))
+            return {}
+        return json.loads(p.read_text(encoding="utf-8")) or {}
     except Exception:
-        return "unknown"
+        return {}
+
+
+def _resolve_version() -> str:
+    """读 build_parameters.json 里的 version 字段。"""
+    return str(_read_build_parameters().get("version") or "unknown")
+
+
+def _resolve_build_time() -> str:
+    """读 build_parameters.json 里的 built_at，作为编译时间暴露给用户。
+
+    优先用 build_parameters.json 里的 built_at（构建时刻）。若缺失或为开发版
+    未及时刷新，回退为 sys.executable 的 mtime，保证用户看到的不是陈旧时间。
+    """
+    try:
+        from core.build_meta import actual_build_time
+        return actual_build_time()
+    except Exception:
+        return str(_read_build_parameters().get("built_at") or "")
 
 
 def _resolve_paths(app, env_id=None) -> dict:
@@ -81,6 +98,7 @@ def run(args, app) -> int:
             break
     data = {
         "launcher_version": _resolve_version(),
+        "build_time": _resolve_build_time(),
         "comfyui_path": _resolve_comfy_path(app, env_id),
         "python_path": _resolve_python(app, env_id),
         "port": _resolve_port(app),

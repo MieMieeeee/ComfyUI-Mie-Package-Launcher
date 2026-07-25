@@ -194,7 +194,7 @@ class AboutLauncherPage(BasePage):
         layout.setSpacing(12)
 
         # 版本信息
-        version_str = self._get_version_only()
+        version_str = self._get_version_display()
         version_label = QtWidgets.QLabel(f"当前版本: {version_str}")
         version_label.setStyleSheet(f"""
             color: {self.theme_manager.colors.get('text', '#E5E7EB')};
@@ -264,12 +264,21 @@ class AboutLauncherPage(BasePage):
                             params = json.load(f) or {}
                         ver = str(params.get("version") or "").strip()
                         if ver:
-                            return ver
+                            try:
+                                from core.build_meta import (
+                                    actual_build_time, format_version_display,
+                                )
+                                return format_version_display(ver, actual_build_time())
+                            except Exception:
+                                return ver
                 except Exception:
                     pass
         except Exception:
             pass
         return "Dev Build"
+
+    def _get_version_display(self) -> str:
+        return self._get_version_only()
 
     def _check_for_update(self):
         """检查更新"""

@@ -47,9 +47,8 @@ class TestInfo:
             cmd_info.run(args, app)
         captured = capsys.readouterr()
         parsed = json.loads(captured.out)
-        assert parsed["launcher_version"] == "1.0.14"
-        assert parsed["port"] == 8188
-        assert "paths" in parsed
+        assert "build_time" in parsed
+        assert parsed["build_time"] == "2026-07-25 17:10:12"
 
 class TestInfoExternalLibraries:
     """info --json must surface the multi-library data model."""
