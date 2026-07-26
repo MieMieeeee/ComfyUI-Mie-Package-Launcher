@@ -35,7 +35,7 @@ class AboutMePage(BasePage):
         inner_layout.setSpacing(10)
 
         # 个人资料卡片
-        # 加载头像资源
+        # 加载头像资源（本地 assets 目录）
         avatar_pix = None
         try:
             from ui import assets_helper as ASSETS
@@ -50,6 +50,7 @@ class AboutMePage(BasePage):
             quote="未觉池塘春草梦，阶前梧叶已秋声",
             theme_styles=self.theme_manager.styles,
             avatar_pixmap=avatar_pix,
+            avatar_size=96,
             parent=container
         )
 

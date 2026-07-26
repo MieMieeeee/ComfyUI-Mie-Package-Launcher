@@ -11,10 +11,12 @@ from .custom import CircleAvatar
 class ProfileCard(QtWidgets.QFrame):
     """个人资料卡片 - 关于我页面"""
 
-    def __init__(self, name: str, quote: str, theme_styles: ThemeStyles, avatar_pixmap=None, parent=None):
+    def __init__(self, name: str, quote: str, theme_styles: ThemeStyles,
+                 avatar_pixmap=None, avatar_size: int = 60, parent=None):
         super().__init__(parent)
         self.theme_styles = theme_styles
         self.avatar_pixmap = avatar_pixmap
+        self.avatar_size = avatar_size
         self.setObjectName("ProfileCard")
         self.setMinimumHeight(100)
         self.setAttribute(QtCore.Qt.WA_StyledBackground, True)
@@ -44,7 +46,7 @@ class ProfileCard(QtWidgets.QFrame):
         outer.addStretch(1)
 
         # 头像
-        avatar = CircleAvatar(pixmap=self.avatar_pixmap, size=60)
+        avatar = CircleAvatar(pixmap=self.avatar_pixmap, size=self.avatar_size)
         outer.addWidget(avatar)
 
         # 信息
