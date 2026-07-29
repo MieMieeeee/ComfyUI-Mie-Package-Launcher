@@ -1,7 +1,7 @@
 """CLI 子命令的退出码常量。
 
 集中在此是为了：
-- 文档化（每个常量自带 docstring，--help / docs/cli.md 可引用）
+- 文档化（每个常量自带 docstring，--help / cli.md 可引用）
 - 测试化（test_cli_exitcodes.py 锁住值，避免无意改动破坏外部脚本契约）
 - 一致性（避免子命令里散落 magic number）
 

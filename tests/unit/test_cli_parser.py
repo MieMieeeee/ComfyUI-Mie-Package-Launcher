@@ -7,7 +7,7 @@ parser 是 CLI 的契约层：它决定每个子命令叫什么、接受哪些�
 约定：
 - 全局 --json：所有子命令的输出格式开关
 - 每个子命令的 help 文本里必须含 “Output schema” 与 “Exit codes”
-  两段（被 docs/cli.md 自动引用）
+  两段（被 cli.md 自动引用）
 - 未知子命令 / 缺命令时 argparse 自动报错（SystemExit 2）
 """
 import argparse

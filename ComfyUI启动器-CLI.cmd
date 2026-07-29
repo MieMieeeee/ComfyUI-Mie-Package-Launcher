@@ -15,7 +15,7 @@ REM     ComfyUI启动器-CLI.cmd stop
 REM     ComfyUI启动器-CLI.cmd info --json
 REM     ComfyUI启动器-CLI.cmd help
 REM
-REM 退出码：与 GUI exe 的 CLI 模式严格一致（见 docs/cli.md）。
+REM 退出码：与 GUI exe 的 CLI 模式严格一致（见 cli.md）。
 REM 无参数调用 → 转发到 help（绝不弹 GUI 窗口）。
 REM ==========================================================
 REM

@@ -126,6 +126,59 @@ class TestLogViewerPageTailing(_Fixture):
             time.sleep(0.02)
         self.fail("line not appended: " + repr(page.text_edit.toPlainText()))
 
+    def _wait_for_line(self, page, needle, timeout=3.0):
+        """等 needle 出现在视图里,最多 timeout 秒;到了返回 True,超时 False。"""
+        deadline = time.monotonic() + timeout
+        while time.monotonic() < deadline:
+            self.app.processEvents()
+            if needle in page.text_edit.toPlainText():
+                return True
+            time.sleep(0.02)
+        return False
+
+    def test_no_duplicate_lines_after_env_switch(self):
+        """回归:切环境(stop→set_log_path→start)后,新日志每行只出现一次。
+
+        复现真实 bug:PyQt5 对 bound method 做 disconnect 可能静默失败,
+        导致 line_received signal 上累积多个指向 _on_line_main 的连接,
+        切环境后每行日志被触发多次(用户实测重复 2 次)。
+        修复:每次 start_tailing 重建 emitter(连带丢弃旧 emitter 上的残留连接)。
+        """
+        d = self._tmpdir()
+        log_a = d / "env_a.log"
+        log_b = d / "env_b.log"
+        log_a.write_text("", encoding="utf-8")
+        log_b.write_text("", encoding="utf-8")
+
+        page = LogViewerPage(theme_manager=self.tm)
+        self.addCleanup(page.stop_tailing)
+
+        # 1. tail 环境 A
+        page.set_log_path(log_a)
+        page.start_tailing(start_from_beginning=True)
+        with open(log_a, "a", encoding="utf-8") as f:
+            f.write("line_from_A\n")
+        self.assertTrue(self._wait_for_line(page, "line_from_A"))
+        # 切换前:每行只出现一次
+        self.assertEqual(page.text_edit.toPlainText().count("line_from_A"), 1)
+
+        # 2. 模拟 refresh_after_env_switch 的日志页刷新序列:
+        #    stop_tailing() → set_log_path(b) → start_tailing()
+        page.stop_tailing()
+        page.set_log_path(log_b)
+        page.start_tailing(start_from_beginning=True)
+
+        # 3. 环境 B 写一行
+        with open(log_b, "a", encoding="utf-8") as f:
+            f.write("line_from_B\n")
+        self.assertTrue(self._wait_for_line(page, "line_from_B"))
+
+        # 关键断言:切环境后新日志每行只出现一次(bug 触发时会是 2 次)
+        self.assertEqual(
+            page.text_edit.toPlainText().count("line_from_B"), 1,
+            "切换环境后日志行重复了: " + repr(page.text_edit.toPlainText()),
+        )
+
     def test_pause_stops_appending(self):
         d = self._tmpdir()
         log = d / "test.log"

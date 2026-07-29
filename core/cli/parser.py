@@ -3,7 +3,7 @@
 是 CLI 的契约层：
 - 子命令名（SUBCOMMANDS）必须稳定，供测试 / docs 引用
 - 每个子命令的 epilog 列出 Exit codes 和 Output schema 段，
-  --help 自动暴露给用户，docs/cli.md 也按同样结构写
+  --help 自动暴露给用户，cli.md 也按同样结构写
 
 子命令列表：
     start       启动 ComfyUI（走 GUI 同一路径）

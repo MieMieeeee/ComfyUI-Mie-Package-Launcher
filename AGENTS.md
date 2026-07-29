@@ -1,6 +1,6 @@
 # AGENTS.md — 给 AI agent 的操作指南
 
-> 本文件是 agent 操作本启动器的入口。完整 CLI 契约见 [`docs/cli.md`](docs/cli.md)。
+> 本文件是 agent 操作本启动器的入口。完整 CLI 契约见 [`cli.md`](cli.md)。
 
 ## 这是什么
 
@@ -45,7 +45,7 @@ python __main__.py <command> [--json] [-v]
 
 ## 机器契约（agent 解析依据）
 
-- **`--json` 输出**：每个命令都是单行 JSON，字段 schema 见 `docs/cli.md` 每个子命令的 *Output schema* 段。
+- **`--json` 输出**：每个命令都是单行 JSON，字段 schema 见 `cli.md` 每个子命令的 *Output schema* 段。
 - **退出码**（定义在 `core/cli/exitcodes.py`，跨命令稳定）：
 
   | 码 | 含义 | 出现在 |
@@ -120,5 +120,5 @@ python __main__.py <command> [--json] [-v]
 
 ## 深入
 
-- 完整 CLI 参考（每命令 flag / Exit codes / Output schema / systemd / NSSM / cron 示例）：[`docs/cli.md`](docs/cli.md)
+- 完整 CLI 参考（每命令 flag / Exit codes / Output schema / systemd / NSSM / cron 示例）：[`cli.md`](cli.md)
 - 服务接口契约：[`docs/ServiceInterfaces.md`](docs/ServiceInterfaces.md)

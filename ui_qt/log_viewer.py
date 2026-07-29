@@ -783,8 +783,17 @@ if _HAS_QT:
                 on_line=self._on_line_from_tailer,
                 start_from_beginning=start_from_beginning,
             )
+            # 每次启动都用全新的 emitter,与 tailer 生命周期严格 1:1。
+            # 旧 emitter(连同它上面任何残留的 signal 连接)随引用替换被 GC,
+            # 不再依赖 disconnect() 精确断开——pyqtSignal.disconnect(bound_method)
+            # 在某些 PyQt5 版本/打包环境下会静默失败(实测用户机器:receivers_after
+            # 不降),导致切环境后 line_received 上累积多个指向 _on_line_main 的
+            # 连接,每行日志被触发多次(用户实测重复 2 次)。
+            self._emitter = _LineEmitter()
+            # UniqueConnection 作双保险:即使同一 emitter 上也不会重复挂同一 slot。
             self._emitter.line_received.connect(
-                self._on_line_main, QtCore.Qt.QueuedConnection
+                self._on_line_main,
+                QtCore.Qt.QueuedConnection | QtCore.Qt.UniqueConnection,
             )
             self._tailer.start()
             self.logger.info(
@@ -794,33 +803,41 @@ if _HAS_QT:
             )
 
         def stop_tailing(self) -> None:
-            receivers_before = self._emitter.receivers(self._emitter.line_received)
-            try:
-                self._emitter.line_received.disconnect(self._on_line_main)
-            except Exception:
-                pass
-            receivers_after = self._emitter.receivers(self._emitter.line_received)
+            receivers_before = -1
+            if self._emitter is not None:
+                try:
+                    receivers_before = self._emitter.receivers(self._emitter.line_received)
+                except Exception:
+                    pass
             tailer_alive = (
                 self._tailer.is_alive() if self._tailer is not None else None
             )
             if self._tailer is not None:
                 self._tailer.stop()
                 self._tailer = None
+            # 丢弃旧 emitter:它上面残留的 signal 连接随之失效(下次 start 会建全新的)。
+            # 不再调 disconnect——bound method disconnect 在部分环境静默失败(见 start_tailing 注释)。
+            self._emitter = None
             if self._active_progress:
                 self._finalize_active_progress()
             flushed = self._filter.flush()
             for line in flushed:
                 self._append_line(line)
             self.logger.info(
-                "stop_tailing path=%s receivers_before=%d receivers_after=%d tailer_alive_before=%s flushed_lines=%d",
-                self._log_path, receivers_before, receivers_after, tailer_alive, len(flushed),
+                "stop_tailing path=%s receivers_before=%d tailer_alive_before=%s flushed_lines=%d",
+                self._log_path, receivers_before, tailer_alive, len(flushed),
             )
 
         def _on_line_from_tailer(self, line: str) -> None:
             # tailer 线程:通过 signal 把行投到 UI 线程(QueuedConnection)
             if _should_log_emit("tailer_cb_recv"):
                 self.logger.info("tailer_cb_recv line=%r", line[:200])
-            self._emitter.line_received.emit(line)
+            # stop_tailing 会把 _emitter 置空;tailer 线程在 stop() join 之前可能
+            # 还有尾包回调到达这里,直接丢弃即可(stop 后的新行本就不该再显示)。
+            emitter = self._emitter
+            if emitter is None:
+                return
+            emitter.line_received.emit(line)
 
         def _on_line_main(self, line: str) -> None:
             if _should_log_emit("main_recv"):

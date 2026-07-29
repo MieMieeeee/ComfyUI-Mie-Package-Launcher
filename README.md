@@ -1,20 +1,49 @@
 # ComfyUI 启动器
 
-> 版本：v1.0.9
+> 版本：v1.0.14
 
-一个专为 ComfyUI 设计的图形化启动器，基于 PyQt5，提供便捷的启动选项管理、版本更新与 CLI 无界面模式。
+PyQt5 GUI + 无窗口 CLI。GUI 管 ComfyUI 启停 / 多环境切换 / 镜像代理等配置；CLI 复用同一套路径，适合服务器 / 自动化 / 开机自启。
 
-## ⚠️ 重要提示：无法运行工作流的解决方案
+## 给 Agent 用
 
-> 如果启动 ComfyUI 后无法运行工作流，并在日志中看到类似错误：
->
-> `dev_utils_execute() takes 10 positional arguments but 11 were given`
->
-> 大概率是 **ComfyUI-Dev-Utils 插件版本不兼容** 导致的。
->
-> ✅ 解决方法：**禁用或升级 ComfyUI-Dev-Utils 插件**。
+CLI 是 agent 能看见的唯一入口；以 CLI 为准。
 
-![升级或禁用 ComfyUI-Dev-Utils 插件示意图](readme_assets/升级或禁用dev_utils.png)
+```bash
+python __main__.py status --json  # 健康检查（退出码 0=在跑 / 3=未跑 / 1=异常）
+python __main__.py start          # 启动（阻塞到 /system_stats 就绪）
+python __main__.py stop           # 停止
+python __main__.py update comfyui # 内核 + 前端 + 模板库 + 依赖
+```
+
+原则：默认跑 GUI 当前激活的环境和端口，不自行加 `--env` 或改 `config.json` 绕过 GUI。完整操作指南见 [AGENTS.md](AGENTS.md)；CLI 契约见 [cli.md](cli.md)。
+
+## 给 CLI 用
+
+```bash
+python __main__.py start                  # 启动（阻塞到 /system_stats 就绪）
+python __main__.py stop                   # 幂等，未跑也返回 0；--force 直接 taskkill /F
+python __main__.py status                 # 退出码 0=在跑 / 3=未跑 / 1=异常
+python __main__.py info --json            # 当前生效配置
+python __main__.py logs comfyui -n 100 --no-follow  # tail 日志（务必 --no-follow）
+python __main__.py update comfyui         # 内核 + 前端 + 模板库 + 依赖同步
+python __main__.py help [command]         # 完整帮助
+```
+
+所有子命令支持 `--json`（单行 JSON）与稳定退出码契约（0/1/2/3/4），适合 systemd / NSSM / cron / GitHub Actions。完整 flag / Exit codes / Output schema 见 [cli.md](cli.md)。
+
+## 常见问题
+
+- [启动后无法运行工作流，`dev_utils_execute() takes 10 positional arguments but 11 were given`](#faq-1)
+- [端口 8188 被占用 / 想换端口](#faq-2)
+- [想换 HuggingFace / PyPI / GitHub 镜像源](#faq-3)
+- [多套 ComfyUI 环境怎么切换](#faq-4)
+- [CLI `update comfyui` 不工作](#faq-5)
+- [日志视图看不到 tqdm 进度条刷新](#faq-6)
+- [启动器版本落后了，怎么更新](#faq-7)
+- [怎么改源码 / 编译新的 exe](#faq-8)
+- [模型库放在外置硬盘上怎么接进来](#faq-9)
+
+[完整 FAQ 文档](https://dcn8q5lcfe3s.feishu.cn/wiki/ELY2wwPgciIA56kS3eBciY4RnPd)
 
 ## 功能特性
 
@@ -64,7 +93,14 @@
 
 所有子命令支持 `--json`（单行 JSON 输出）与稳定的退出码契约。
 - agent 操作指南：[AGENTS.md](AGENTS.md)
-- 完整 CLI 参考：[docs/cli.md](docs/cli.md)
+- 完整 CLI 参考：[cli.md](cli.md)
+
+### v1.0.14 近期更新
+
+- **实时日志流**：`PYTHONUNBUFFERED=1` + 后台线程 pump 让 tqdm 进度条实时刷新；日志视图原地渲染 `\r` 回车覆盖行；配套 powershell tail 窗口独立显示。
+- **构建时间真实显示**：`info --json` 新增 `build_time` 字段；"关于启动器" 页版本号格式化为 `v1.0.14 (构建于 2026-07-25 17:10:12)`（dev 环境 fallback 到 `sys.executable` mtime，模块见 `core/build_meta.py`）。
+- **Headless update 修复**：CLI `update comfyui` 原先在 `services.update_service.perform_batch_update()` 第一行 `update_core_var.get()` AttributeError 崩溃；现补齐 `HeadlessAppContext` 7 个缺失属性 + `services.version` 换真实 `VersionService`，能跑完整 git pull + 前端 + 模板库 + 依赖同步（E2E 验证过）。
+- **Release 子目录自动带 3 份 launcher 文档**：`使用说明.md` / `AGENTS.md` / `cli.md` 跟 exe 一起进发布包，用户拿到 release 即可读 CLI / agent 操作说明，无需回仓库。
 
 ## 使用说明
 
@@ -145,6 +181,7 @@ ComfyUI-Mie-Package-Launcher/
 │   ├── probe.py                # 端口 / HTTP 可达性探测
 │   ├── kill.py                 # 进程终止
 │   ├── launcher_cmd.py         # 启动参数构建
+│   ├── build_meta.py           # 构建时间 / 版本显示解析
 │   ├── version_service.py      # 底层版本信息刷新
 │   ├── version_manager.py      # 版本管理器（UI 代理）
 │   ├── version_workers.py      # 版本操作工作线程
@@ -257,16 +294,67 @@ View (PyQt5)          Service (DI)           Core              External
 参数与排错：见 BUILD.md。
 
 ### 构建产物
+
 - `dist/ComfyUI启动器.dist/` — Nuitka + Enigma 中间产物（含 `ComfyUI_Launcher_Internal_boxed.exe`）
-- `release/ComfyUI启动器_v<ver>_<YYYYMMDD_HHMM>/ComfyUI启动器.exe` — 最终发布文件，纯净名
-- `release/.../ComfyUI启动器-CLI.cmd` — 配套 CLI wrapper（agent / 自动化专用，详 AGENTS.md）
-- `build_parameters.json` 自动更新版本号与构建时间
+- `release/ComfyUI启动器_v<ver>_<YYYYMMDD_HHMM>/` — 最终发布子目录：
+  - `ComfyUI启动器.exe` — 纯净名启动器
+  - `ComfyUI启动器-CLI.cmd` — 配套 CLI wrapper（agent / 自动化专用，详 AGENTS.md）
+  - `使用说明.md` / `AGENTS.md` / `cli.md` — 操作文档随 exe 一起打包，用户拿到 release 即可读
+- `build_parameters.json` 自动更新版本号与构建时间（dev 环境 fallback 到 `sys.executable` mtime，见 `core/build_meta.py`）
 
 ### 说明
 - Nuitka 构建产物体积更小、启动更快（`build_parameters.json` 中 `mode: nuitka_release`）。
 - 若自定义图标，替换 `assets/rabbit.ico` 即可。
 - 调试日志可通过在 `launcher` 目录下创建 `is_debug` 文件开启；打包后的 EXE 同样支持。
 - 公告相关文件写入运行目录的 `launcher/` 子目录：`announcement_cache.txt` / `announcement_seen.json` / `announcement_muted.json`。
+
+## 发布到 GitHub Releases
+
+`release.py` 依赖 [GitHub CLI](https://cli.github.com/) (`gh`)，读取 `release/ComfyUI启动器_v<ver>_<YYYYMMDD_HHMM>/` 里已打包好的 subdir，打成 zip 上传到 GitHub Releases。默认上传资产：`ComfyUI启动器_v<ver>_<YYYYMMDD_HHMM>.zip`（含 exe + CLI wrapper + 3 份文档）
+
+运行前需要：
+
+- 安装 `gh` 并认证 (`gh auth login`)
+- 已有正确的 repo 写入权限 (默认为 `MieMieeeee/ComfyUI-Mie-Package-Launcher`)
+- `release/ComfyUI启动器_v<ver>_<YYYYMMDD_HHMM>/` 里已有最新打包的 exe
+
+```bash
+# 默认：取最新一个 subdir，上传
+python release.py
+
+# 列出所有产物（subdir + 旧格式残留）
+python release.py --list
+
+# 查看 GitHub 上已发布的 release
+python release.py --view
+
+# 指定具体 subdir（避免交互选）
+python release.py --file "release/ComfyUI启动器_v1.0.15_20260728_1200"
+
+# 发布时标记为 Latest + 推送 git tag 到 origin
+python release.py --latest --push-tag
+
+# 已有 release 重跑 (上传会走 upload-only 分支)
+python release.py --version v1.0.15
+
+# 不创建 git tag (只发 release)
+python release.py --no-tag
+
+# 删除某个 release
+python release.py --delete v1.0.14
+```
+
+常见场景：
+
+1. **发布正式版本**：先跑 `python build.py` 打包，本地测试 release 子目录里的 exe，然后 `python release.py --latest --push-tag`。
+2. **发布测试版本**：先跑 `python build.py --test`，然后 `python release.py`（脚本会自动给 test subdir 的 release 加 `--prerelease`）。
+3. **只推送 zip，不重新打包**：上一次打包过的 subdir 里的 exe 是测试过的，直接 `python release.py` 选它，脚本会重打 zip 上传。zip 里包含 exe + CLI wrapper + 3 份文档，用户下载后解压即可。
+
+输出约定：
+
+- `gh` / `git` 命令失败 -> 与错误信息打到 stderr，退出码 1
+- release 已存在 -> 跳过创建，直接 `gh release upload --clobber`。上传失败重跑安全
+- `--push-tag` 只在本地 `git tag` 创建后才推送到 origin，默认只创建本地 tag
 
 ## 测试
 
@@ -286,7 +374,7 @@ pytest tests/unit/test_runner_start.py -v
 pytest --cov=. --cov-report=html
 ```
 
-### 测试结构
+## 测试结构
 - `tests/unit/` — 单元测试，覆盖 Service、Core、Utils 层
 - `tests/integration/` — 集成测试，验证跨模块协作
 - `tests/ui/` — PyQt5 UI 测试（需要 Qt 显示环境）
@@ -308,9 +396,107 @@ pytest --cov=. --cov-report=html
 - 明确输入/输出契约，失败返回统一结构（`success/updated/up_to_date/version/error`）。
 - 调用 Core 与 Utils，避免直接操作 UI 控件或线程调度。
 
+## 常见问题解答
+
+> ⚠️ 本地速查版本；以 [Feishu wiki 完整 FAQ](https://dcn8q5lcfe3s.feishu.cn/wiki/ELY2wwPgciIA56kS3eBciY4RnPd) 为准。
+
+<a id="faq-1"></a>
+<details>
+<summary><strong>启动后无法运行工作流，dev_utils_execute() 报错</strong></summary>
+
+> 如果启动 ComfyUI 后无法运行工作流，并在日志中看到类似错误：
+> `dev_utils_execute() takes 10 positional arguments but 11 were given`
+> 大概率是 **ComfyUI-Dev-Utils 插件版本不兼容** 导致的。
+> ✅ 解决方法：**禁用或升级 ComfyUI-Dev-Utils 插件**。
+> ![升级或禁用ComfyUI-Dev-Utils插件示意图](readme_assets/升级或禁用dev_utils.png)
+
+</details>
+
+<a id="faq-2"></a>
+<details>
+<summary><strong>端口 8188 被占用 / 想换端口</strong></summary>
+
+- **GUI**：启动控制页直接改端口字段。
+- **CLI**：不支持 `--port` flag；改 `launcher/config.json` 的 `launch_options.default_port`。
+- **端口被占**：启动器检测到冲突时弹"是否直接打开网页而不启动新实例"，默认取消启动。
+
+</details>
+
+<a id="faq-3"></a>
+<details>
+<summary><strong>想换 HuggingFace / PyPI / GitHub 镜像源</strong></summary>
+
+- **HF 镜像**：`launcher/config.json` 的 `proxy_settings.hf_mirror_mode` + `hf_mirror_url`，或 GUI 设置页下拉（默认 `hf-mirror.com`）。
+- **PyPI 镜像**：`proxy_settings.pypi_proxy_mode`（`aliyun` / `tsinghua` / `huaweicloud` / `custom` / `none`），CLI `update comfyui` 走这个装依赖。
+- **GitHub 代理**：`launch_options.git_proxy_mode` + `git_proxy_url`（`gh-proxy` / 自定义），用于内核 git pull。
+
+</details>
+
+<a id="faq-4"></a>
+<details>
+<summary><strong>多套 ComfyUI 环境怎么切换</strong></summary>
+
+- **GUI 切**：环境下拉 / 设置页管理（持久化到 `config.json` 的 `active_env_id`）。
+- **CLI 默认跑 GUI 当前激活的环境**；agent 不主动切。
+- **跨 env 自动化**：`--env <id>`（parser 接受但 agent 默认不传，详 AGENTS.md）。
+
+</details>
+
+<a id="faq-5"></a>
+<details>
+<summary><strong>CLI `update comfyui` 不工作</strong></summary>
+
+- **v1.0.14 之前**会崩在 `HeadlessAppContext object has no attribute update_core_var`。
+- **v1.0.14 已修**：`HeadlessAppContext` 补齐 7 个缺失属性 + `services.version` 换真实 `VersionService`，能跑完整 git pull + 前端 + 模板库 + 依赖同步。
+- **还报错**：`python __main__.py update comfyui --dry-run --json` 看会跑哪条路径；或 `python __main__.py logs launcher -n 50 --no-follow` 排查。
+
+</details>
+
+<a id="faq-6"></a>
+<details>
+<summary><strong>日志视图看不到 tqdm 进度条刷新</strong></summary>
+
+- **v1.0.14 起**：`PYTHONUNBUFFERED=1` + 后台线程 pump 让 tqdm 实时刷新。
+- 日志视图原地渲染 `回车` 覆盖行（tqdm 进度条形态）。
+- 配套 powershell tail 窗口独立显示（`show_console=true` 时启动）。
+
+</details>
+
+<a id="faq-7"></a>
+<details>
+<summary><strong>启动器版本落后了，怎么更新</strong></summary>
+
+- **GUI 自更**：关于页有"检查更新"按钮（v1.0.8+）。
+- **手动**：拉新源码 → `.venv\Scripts\python.exe build.py` 重打 exe。
+- 注意：`build_parameters.json` 会自动 bump `built_at` 时间戳。
+
+</details>
+
+<a id="faq-8"></a>
+<details>
+<summary><strong>怎么改源码 / 编译新的 exe</strong></summary>
+
+- **开发模式**：`python __main__.py <command>` 直接跑源码（热改生效）。
+- **打 exe**：`.venv\Scripts\python.exe build.py`，参数详 [BUILD.md](BUILD.md)。
+- **构建产物**：`release/ComfyUI启动器_v<ver>_<YYYYMMDD_HHMM>/` 含 exe + CLI wrapper + 3 份文档。
+- `build_parameters.json` 自动 bump 时间戳；`version_preferences` 在 config.json 里调。
+
+</details>
+
+<a id="faq-9"></a>
+<details>
+<summary><strong>模型库放在外置硬盘上怎么接进来</strong></summary>
+
+- **GUI**："外置模型库管理"页 → 添加根路径 → 自动扫描子文件夹 → 生成 `ComfyUI/extra_model_paths.yaml`。
+- **多库**（v1.0.14）：可在 `config.json` 的 `models.external_libraries[]` 配多个，每个独立 base_path + enabled 开关。
+- 变更前自动备份旧 yaml。
+
+</details>
+
+
 ## 文档
 - Agent 操作指南：[AGENTS.md](AGENTS.md)
-- CLI 完整参考：[docs/cli.md](docs/cli.md)
+- CLI 完整参考：[cli.md](cli.md)
 - 接口契约：[docs/ServiceInterfaces.md](docs/ServiceInterfaces.md)
 - 自动更新设计：[docs/auto-update.md](docs/auto-update.md)
 - 进程事件设计：[docs/process_events_design.md](docs/process_events_design.md)

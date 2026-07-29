@@ -39,7 +39,7 @@ CLI_WRAPPER_NAME = "ComfyUI启动器-CLI.cmd"
 RELEASE_DOC_FILES = [
     ("使用说明.md",     "使用说明.md"),
     ("AGENTS.md",       "AGENTS.md"),
-    ("docs/cli.md",     "docs/cli.md"),
+    ("cli.md",     "cli.md"),
 ]
 
 
@@ -403,7 +403,7 @@ def step_copy_cli_wrapper(dest_dir, project_dir):
 
 
 def step_copy_release_docs(dest_dir, project_dir):
-    """把 launcher 操作文档 (使用说明.md / AGENTS.md / docs/cli.md) 拷到发布子目录。
+    """把 launcher 操作文档 (使用说明.md / AGENTS.md / cli.md) 拷到发布子目录。
 
     让 agent / 用户拿到 release 包后无需回仓库就能读到 CLI 介绍。
     缺失的源文件会跳过 + 警告，不让 build 失败。

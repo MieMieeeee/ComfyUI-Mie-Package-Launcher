@@ -6,7 +6,7 @@
 调用形态与 cmd_update 的 plugins target 一致：
     PluginService(app).<method>()
 
-各 action 的 Output schema 见 _PLUGINS_EPILOG（parser.py），docs/cli.md 同步。
+各 action 的 Output schema 见 _PLUGINS_EPILOG（parser.py），cli.md 同步。
 """
 from core.cli.exitcodes import EXIT_OK, EXIT_ERROR
 from core.cli.output import format_human, format_json

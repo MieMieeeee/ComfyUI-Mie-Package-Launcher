@@ -28,7 +28,7 @@
 - `release\ComfyUI启动器_v<ver>_<YYYYMMDD_HHMM>\ComfyUI启动器-CLI.cmd` — 最终发布文件里的 CLI wrapper（与 .exe 配对）
 - `release\ComfyUI启动器_v<ver>_<YYYYMMDD_HHMM>\使用说明.md` — launcher 用户文档
 - `release\ComfyUI启动器_v<ver>_<YYYYMMDD_HHMM>\AGENTS.md` — agent 操作入口（CLI 速查 + 多环境机制）
-- `release\ComfyUI启动器_v<ver>_<YYYYMMDD_HHMM>\docs\cli.md` — CLI 完整契约（子命令 / flag / Exit codes / Output schema）
+- `release\ComfyUI启动器_v<ver>_<YYYYMMDD_HHMM>\cli.md` — CLI 完整契约（子命令 / flag / Exit codes / Output schema）
 
 ## 关键依赖
 
