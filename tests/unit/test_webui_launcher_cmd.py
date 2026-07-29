@@ -37,8 +37,15 @@ def test_basic_cmd_and_env():
     app = _make_app()
     cmd, env, cwd, py, webui_root = build_webui_launch_params(app)
     assert cmd[0].endswith("python.exe")
-    assert cmd[1:3] == ["-m", "app.flask_app"]
-    assert cmd[3:] == ["--debug", "--no-reload"]
+    # cmd[1] = "-c", cmd[2] 是 python -c 后的 inner 脚本
+    assert cmd[1] == "-c"
+    inner = cmd[2]
+    # inner 必须含 sys.path.insert + from app.flask_app import main
+    assert "sys.path.insert" in inner
+    assert "from app.flask_app import main" in inner
+    # extra_args 透传到 inner
+    assert "--debug" in inner
+    assert "--no-reload" in inner
     assert env["FLASK_HOST"] == "127.0.0.1"
     assert env["FLASK_PORT"] == "8299"
     assert env["COMFY_BASE_URL"] == "http://127.0.0.1:9999"
@@ -73,7 +80,9 @@ def test_extra_args_handles_quoted_string():
     cfg["webui_options"] = {"port": "8199", "extra_args": '--name "my app"'}
     app = _make_app(cfg)
     cmd, *_ = build_webui_launch_params(app)
-    assert cmd[3:] == ["--name", "my app"]
+    inner = cmd[2]
+    assert "--name" in inner
+    assert "my app" in inner
 
 
 def test_extra_args_invalid_quotes_falls_back_to_split():
@@ -82,8 +91,9 @@ def test_extra_args_invalid_quotes_falls_back_to_split():
     cfg["webui_options"] = {"port": "8199", "extra_args": '--bad "unclosed'}
     app = _make_app(cfg)
     cmd, *_ = build_webui_launch_params(app)
-    assert "--bad" in cmd
-    assert any("unclosed" in part for part in cmd)
+    inner = cmd[2]
+    assert "--bad" in inner
+    assert "unclosed" in inner
 
 
 def test_no_extra_args_means_no_extra_tokens():
@@ -92,7 +102,10 @@ def test_no_extra_args_means_no_extra_tokens():
     cfg["webui_options"] = {"port": "8199"}
     app = _make_app(cfg)
     cmd, *_ = build_webui_launch_params(app)
-    assert cmd == cmd[:3]
+    # 此时 inner 是 "import sys;sys.path.insert(...);from app.flask_app import main;main()"
+    inner = cmd[2]
+    assert "sys.path.insert" in inner
+    assert "--debug" not in inner
 
 
 def test_env_id_override():
@@ -116,9 +129,9 @@ def test_empty_environments_uses_defaults():
     cfg = {"environments": [], "active_env_id": "env_a"}
     app = _make_app(cfg=cfg)
     cmd, env, cwd, py, webui_root = build_webui_launch_params(app)
-    assert cmd[1:3] == ["-m", "app.flask_app"]
+    assert cmd[1] == "-c"
     assert env["FLASK_PORT"] == "8199"
-    assert env["FLASK_HOST"]  # 有默认值
+    assert env["FLASK_HOST"]
 
 
 def test_app_without_custom_port_uses_default():

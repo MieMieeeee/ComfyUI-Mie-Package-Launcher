@@ -66,8 +66,25 @@ def build_webui_launch_params(
     display_host = str(webui_options.get("display_host") or "127.0.0.1").strip()
     extra_args_str = str(webui_options.get("extra_args") or "").strip()
 
-    # 3. cmd: python -m app.flask_app
-    cmd = [str(py), "-m", "app.flask_app"]
+    # 3. cmd: python -c "import sys; sys.path.insert(0, ...); from app.flask_app import main; main(...)"
+    # 用 python -c 而不是 -m app.flask_app 是因为 python_embeded 在 sys.path[0]
+    # 硬编码了 ComfyUI 路径, 里面有个同名的 app/ 包 (regular package), 会盖掉 webui 的 app/.
+    # 强制 webui_root 先进入 sys.path, 解析时优先 webui.app.
+    # extra_args 串到 main(...) 调用, 一并通过 shlex 处理引号.
+    extra_args_str = str(webui_options.get("extra_args") or "").strip()
+    extra_pieces = []
+    if extra_args_str:
+        try:
+            extra_pieces = shlex.split(extra_args_str)
+        except Exception:
+            extra_pieces = extra_args_str.split()
+    inner = (
+        "import sys;"
+        "sys.path.insert(0, " + repr(str(webui_root)) + ");"
+        "from app.flask_app import main;"
+        "main(*" + repr(extra_pieces) + ")"
+    )
+    cmd = [str(py), "-c", inner]
     if extra_args_str:
         try:
             cmd.extend(shlex.split(extra_args_str))
@@ -76,6 +93,12 @@ def build_webui_launch_params(
 
     # 4. env: 基于系统 + launcher 上下文
     env = os.environ.copy()
+    # Python 3.13 在 Windows 上 subprocess 内部读 stdout/stderr 走 UTF-8,
+    # webui 输出含 cp1252 字节 (print 出来的中文/emoji) 会 UnicodeDecodeError.
+    # 设 PYTHONLEGACYWINDOWSSTDIO=1 走老 stdio 路径, 解决此问题.
+    env.setdefault("PYTHONLEGACYWINDOWSSTDIO", "1")
+    env.setdefault("PYTHONIOENCODING", "utf-8")
+
     env["FLASK_HOST"] = display_host
     env["FLASK_PORT"] = port
     # COMFY_BASE_URL: 指向激活 env 的 ComfyUI 实例 (默认 8188, 跟 ComfyUI 共享)

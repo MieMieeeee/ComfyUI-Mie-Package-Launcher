@@ -28,6 +28,25 @@ WEBUI_ENTRY_FILE = "app/flask_app.py"
 WEBUI_REQUIREMENTS_FILE = "requirements.txt"
 
 
+def ensure_app_init(webui_root: Path) -> None:
+    """post-clone / post-pull patch: 给 webui 的 app/ 目录放个 __init__.py.
+
+    python_embeded 在 sys.path[0] 硬编码 ComfyUI 路径, 里面有同名的 app/ 包 (regular package).
+    webui 的 app/ 没 __init__.py, 会被当作 namespace package, 在 sys.path 上跟 ComfyUI/app/ 冲突.
+    1-byte fix, 上游 webui 仓库目前没这个文件, 不影响行为 (blank 是合法 package marker).
+
+    通常 clone_webui 已 patch 过; 这里再 patch 一次, 兼容 pull_webui 后用户手动删了 / git
+    stash 等情况. 也供 WebuiProcessManager.start_webui 兜底调用.
+    """
+    try:
+        init_file = webui_root / "app" / "__init__.py"
+        if not init_file.exists():
+            init_file.touch()
+    except Exception:
+        pass
+
+
+
 def _resolve_git_executable(app: Any) -> Optional[str]:
     """复用 launcher 的 git 解析 (services.git_service.resolve_git)."""
     try:
@@ -175,6 +194,9 @@ def clone_webui(
             "error": f"clone 完了但缺入口 {WEBUI_ENTRY_FILE}, "
                      "可能是默认分支已改名或仓库 layout 变了",
         }
+
+    # 6. post-clone patch: 详见 ensure_app_init docstring.
+    ensure_app_init(target_dir)
 
     try:
         if cb:

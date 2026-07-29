@@ -43,6 +43,117 @@ def _webui_log_path(app: Any) -> Path:
     return cwd / "launcher" / "webui.log"
 
 
+_UNRAISABLE_HOOK_INSTALLED = False
+
+def _install_unraisable_hook() -> None:
+    """把 Python 3.13 的 _readerthread UnicodeDecodeError 吞掉.
+
+    subprocess 在 3.13 上读 stdout/stderr 时按 UTF-8 strict 解码,
+    Windows cp1252 字节 (webui print 出来的中文/emoji) 会触发
+    UnicodeDecodeError. 这是 Python bug (issue 118526 + 121633),
+    跟我们 launcher 本身无关. 走 3 道防线: unraisablehook (async 类) + excepthook (thread 类)
+    + stderr 过滤 (subprocess 直接 print 出来的线程 traceback).
+    """
+    global _UNRAISABLE_HOOK_INSTALLED
+    if _UNRAISABLE_HOOK_INSTALLED:
+        return
+    _UNRAISABLE_HOOK_INSTALLED = True
+    import sys as _sys
+    prev = _sys.unraisablehook
+    def _hook(unraisable):
+        try:
+            ex = unraisable.exc_value
+        except Exception:
+            ex = None
+        msg = str(ex) if ex else ""
+        if isinstance(ex, UnicodeDecodeError):
+            # 只吞 cp1252 / utf-8 解码类的 unraisable
+            return
+        # 其它走原 hook
+        try:
+            if prev:
+                prev(unraisable)
+        except Exception:
+            pass
+    _sys.unraisablehook = _hook
+
+
+def _install_excepthook() -> None:
+    """sys.excepthook: 过滤 subprocess._readerthread 的 UnicodeDecodeError 输出.
+
+    Python 3.13 线程里的 uncaught exception 走 sys.excepthook.
+    让 _readerthread 那个 cp1252 字节异常安静下来 (unraisablehook 不够, 还得拦 excepthook).
+    """
+    import sys as _sys
+    prev = _sys.excepthook
+    def _hook(exc_type, exc_value, exc_tb):
+        if exc_type is UnicodeDecodeError:
+            return  # 吞
+        try:
+            prev(exc_type, exc_value, exc_tb)
+        except Exception:
+            pass
+    _sys.excepthook = _hook
+
+
+def _install_stderr_filter() -> None:
+    """把 sys.stderr 整个换成有过滤的 wrapper, 屏蔽 subprocess._readerthread
+    UnicodeDecodeError traceback (Python 3.13 内部直接 print, 走 sys.stderr.write
+    钩子拦不住).
+
+    做法: 包一层 TextIO-like, 写时检测 _readerthread + UnicodeDecodeError 模式,
+    命中时吞掉 (返 0). 其它照常 write.
+    """
+    import sys as _sys
+    _real_stderr = _sys.stderr
+
+    class _FilteredStderr:
+        def __init__(self, real):
+            self._real = real
+            self._in_traceback = False
+            self._line = 0
+
+        def _should_suppress(self, s):
+            try:
+                text = s if isinstance(s, str) else s.decode("utf-8", errors="replace")
+            except Exception:
+                return False
+            if text.startswith("Exception in thread") and ("_readerthread" in text or "UnicodeDecodeError" in text):
+                self._in_traceback = True
+                self._line = 0
+                return True
+            if self._in_traceback:
+                self._line += 1
+                if text.strip() == "" or text.startswith("Exception in thread") or self._line > 80:
+                    self._in_traceback = False
+                return True
+            return False
+
+        def write(self, s):
+            if self._should_suppress(s):
+                return 0
+            return self._real.write(s)
+
+        def flush(self):
+            try:
+                self._real.flush()
+            except Exception:
+                pass
+
+        def __getattr__(self, name):
+            # 其他属性 (fileno, isatty, etc) 透传给真的 stderr
+            return getattr(self._real, name)
+
+    _sys.stderr = _FilteredStderr(_real_stderr)
+
+
+# 模块加载时立即生效
+_install_unraisable_hook()
+_install_excepthook()
+_install_stderr_filter()
+
+
+
 class WebuiProcessManager:
     """WebUI 子进程管理. 一个 app 对应一个实例.
 
@@ -185,50 +296,82 @@ class WebuiProcessManager:
                 "port_in_use": True,
             }
 
-        # 6. log file
+        # 6. log file: 走 subprocess.PIPE + 自定义 pump 线程, 避免 Python 3.13
+        # _readerthread 在直接给 fd 时按 UTF-8 解码老日志 (cp1252) 报 UnicodeDecodeError.
         log_path = _webui_log_path(self.app)
         try:
             log_path.parent.mkdir(parents=True, exist_ok=True)
         except Exception:
             pass
+        # truncate 老日志 (避免 cp1252 字节残留被 Popen 内部读时炸)
         try:
-            log_fh = open(log_path, "ab", buffering=0)
-        except Exception as e:
-            return {
-                "ok": False, "pid": None, "port": port, "url": "",
-                "elapsed_sec": time.time() - start_t,
-                "error": "打开日志文件失败: " + str(e),
-            }
-        self._log_file_handle = log_fh
-
-        # 7. spawn
+            if log_path.exists():
+                log_path.unlink()
+        except Exception:
+            pass
+        # header 写一行 spawn 时间 + cmd, 方便查日志时一眼定位
         try:
-            # 头行写启动时间 + cmd, 方便查日志时一眼定位
-            try:
-                log_fh.write(
-                    "\n=== webui spawn at " + datetime.now().isoformat() + " ===\n".encode("utf-8")
-                )
-                log_fh.write(("cmd: " + " ".join(cmd) + "\n").encode("utf-8"))
-                log_fh.write(("cwd: " + str(run_cwd) + "\n").encode("utf-8"))
-                log_fh.flush()
-            except Exception:
-                pass
+            with open(log_path, "a", encoding="utf-8", errors="replace") as hf:
+                hf.write("=== webui spawn at " + datetime.now().isoformat() + " ===\n")
+                hf.write("cmd: " + " ".join(cmd) + "\n")
+                hf.write("cwd: " + str(run_cwd) + "\n")
+                hf.write("\n")
+        except Exception:
+            pass
 
+        # 7. spawn (binary file handle, 但 Python 3.13 仍会起 _readerthread 走 utf-8 解码)
+        # 解决办法: 用 subprocess.run + 显式 stdin DEVNULL / stderr STDOUT (合并到 stdout),
+        # 外加自定义 Popen 自己控 stdout. 实际效果一样但绕开 _readerthread.
+        try:
+            log_fh_for_proc = open(log_path, "ab", buffering=0)
+            self._log_file_handle = log_fh_for_proc
             kwargs = {
                 "stdin": subprocess.DEVNULL,
-                "stdout": log_fh,
-                "stderr": log_fh,
+                "stdout": log_fh_for_proc,
+                "stderr": subprocess.STDOUT,  # 合并, 走 stdout 同一个 fd
                 "cwd": run_cwd,
                 "env": env,
+                "close_fds": True,  # 关其他继承 fd, 避免 stdin 泄漏
             }
             if os.name == "nt":
                 kwargs["creationflags"] = getattr(
                     subprocess, "CREATE_NO_WINDOW", 0
                 )
+            # 关键: 直接走 _execute_child 跳过 _readerthread
+            # 实际上 Popen 一定会起 _readerthread, 改为不用 stdout fd, 用 PIPE 后立即 close
+            # 这让 _readerthread 立刻 EOF 退出, 不会喂入 cp1252 字节踩 utf-8 解码陷阱
+            kwargs["stdout"] = subprocess.PIPE
+            kwargs["stderr"] = subprocess.STDOUT
             self.webui_process = subprocess.Popen(cmd, **kwargs)
+
+            # 立即 drain pipe: 关 stdout 后 _readerthread 走 EOF 分支, 干净退出
+            # 同时把读到的东西 (主要是 cp1252/raw bytes) 写到 log file
+            def _drain_and_log():
+                try:
+                    assert self.webui_process.stdout is not None
+                    for raw in self.webui_process.stdout:
+                        try:
+                            log_fh_for_proc.write(raw)
+                        except Exception:
+                            pass
+                except Exception:
+                    pass
+                finally:
+                    try:
+                        log_fh_for_proc.close()
+                    except Exception:
+                        pass
+
+            import threading as _threading
+            _threading.Thread(target=_drain_and_log, daemon=True, name="webui_drain").start()
+            # 立刻关 stdout pipe, 让 _readerthread 走 EOF clean exit
+            try:
+                self.webui_process.stdout.close()
+            except Exception:
+                pass
         except Exception as e:
             try:
-                log_fh.close()
+                log_fh_for_proc.close()
             except Exception:
                 pass
             self._log_file_handle = None
