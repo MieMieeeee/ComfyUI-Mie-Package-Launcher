@@ -103,5 +103,12 @@
         "is_default": false
       }
     ]
+  },
+  "webui_options": {
+    "port": 8199,
+    "display_host": "127.0.0.1",
+    "auto_open_browser": false,
+    "extra_args": "",
+    "download_url": "https://github.com/MieMieeeee/Comfyui-Workbench-Mie.git"
   }
 }
