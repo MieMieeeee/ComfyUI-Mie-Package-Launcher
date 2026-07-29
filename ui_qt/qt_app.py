@@ -41,6 +41,7 @@ from ui_qt.pages.about_comfyui_page import AboutComfyUIPage
 from ui_qt.pages.about_launcher_page import AboutLauncherPage
 from ui_qt.pages.plugins_page import PluginsPage, PluginController
 from ui_qt.pages.system_settings_page import SystemSettingsPage
+from ui_qt.pages.webui_page import WebuiPage
 from ui_qt.widgets.tray_icon import LauncherTray
 from ui_qt.log_viewer import LogViewerPage
 
@@ -2134,6 +2135,7 @@ class PyQtLauncher(QtWidgets.QMainWindow, process_events.ProcessCallback):
 
         btns = {
             "launch": NavBtn("🚀 启动与更新"),
+            "webui": NavBtn("🧪 工作流 WebUI"),
             "logs": NavBtn("📋 ComfyUI 实时日志"),
             "plugins": NavBtn("🧩 插件管理"),
             "version": NavBtn("🧬 内核版本管理"),
@@ -2148,6 +2150,8 @@ class PyQtLauncher(QtWidgets.QMainWindow, process_events.ProcessCallback):
         # 为导航按钮添加工具提示和存储完整文字
         btns["launch"].setToolTip("启动、停止ComfyUI，查看运行状态")
         btns["launch"].setProperty("full_text", "🚀 启动与更新")
+        btns["webui"].setToolTip("启动 Comfyui-Workbench-Mie 多工作流 WebUI")
+        btns["webui"].setProperty("full_text", "🧪 工作流 WebUI")
         btns["logs"].setToolTip("实时显示 ComfyUI 运行日志")
         btns["logs"].setProperty("full_text", "📋 ComfyUI 实时日志")
         btns["version"].setToolTip("管理ComfyUI内核版本，切换提交")
@@ -2362,6 +2366,8 @@ class PyQtLauncher(QtWidgets.QMainWindow, process_events.ProcessCallback):
         # Create page instances using new refactored pages
         page_launch = LaunchPage(app=self, theme_manager=self.theme_manager)
         self._launch_page = page_launch
+        page_webui = WebuiPage(app=self, theme_manager=self.theme_manager)
+        self._webui_page = page_webui
         # 日志页:实时 tail ComfyUI 日志
         page_logs = LogViewerPage(theme_manager=self.theme_manager)
         self._log_viewer_page = page_logs  # 保存引用，用于后续更新显示
@@ -2419,6 +2425,7 @@ class PyQtLauncher(QtWidgets.QMainWindow, process_events.ProcessCallback):
         # Store references for theme updates
         self._new_pages = {
             "launch": page_launch,
+            "webui": page_webui,
             "logs": page_logs,
             "version": page_version,
             "models": page_models,
@@ -2508,6 +2515,7 @@ class PyQtLauncher(QtWidgets.QMainWindow, process_events.ProcessCallback):
             return scroll
 
         content.addWidget(wrap_in_scroll(page_launch))
+        content.addWidget(wrap_in_scroll(page_webui))
         content.addWidget(wrap_in_scroll(page_logs))
         content.addWidget(wrap_in_scroll(page_plugins))
         content.addWidget(wrap_in_scroll(page_version))
@@ -2520,6 +2528,7 @@ class PyQtLauncher(QtWidgets.QMainWindow, process_events.ProcessCallback):
         # Navigation actions
         pages = {
             "launch": page_launch,
+            "webui": page_webui,
             "logs": page_logs,
             "plugins": page_plugins,
             "version": page_version,
@@ -3248,6 +3257,14 @@ class PyQtLauncher(QtWidgets.QMainWindow, process_events.ProcessCallback):
                 page_logs.set_log_path(_log_path)
                 if hasattr(page_logs, "start_tailing"):
                     page_logs.start_tailing(start_from_beginning=False)
+        except Exception:
+            pass
+
+        # 6. WebUI 页面: 重探 webui_path + 重新计算状态 (env_id 换了 path 也跟着切)
+        try:
+            webui_page = pages.get("webui")
+            if webui_page is not None and hasattr(webui_page, "refresh_after_env_switch"):
+                webui_page.refresh_after_env_switch()
         except Exception:
             pass
 
