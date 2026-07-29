@@ -196,3 +196,52 @@ def update_active_env(config: Dict[str, Any], **updates) -> bool:
         if v is not None:
             target[k] = v
     return True
+
+
+def resolve_active_paths_for_webui(config: Dict[str, Any], env_id: str | None = None) -> Dict[str, Any]:
+    """WebUI 启动所需的路径解析 (跟 resolve_active_paths 平行, 多带 webui_path).
+
+    返回:
+      {
+        "comfyui_root": str,    # 激活 env 的包根目录 (ComfyUI 的父目录)
+        "python_path": str,    # 激活 env 的 python (用于跑 webui)
+        "webui_path": str,     # 期望的 WebUI 安装路径 (<comfyui_root>/Comfyui-Workbench-Mie)
+        "env_id": str,          # 实际生效的环境 id
+      }
+
+    - env_id 不指定 -> 走激活环境
+    - env_id 指定但找不到 -> 退回激活环境 (跟 resolve_paths_for_env 一致)
+    - 任何异常都尽量不抛, 字段缺失返回 None
+    """
+    out: Dict[str, Any] = {
+        "comfyui_root": None,
+        "python_path": None,
+        "webui_path": None,
+        "env_id": None,
+    }
+    if not isinstance(config, dict):
+        return out
+    try:
+        if env_id:
+            # env_id 命中才认 env_id, 退回时用 active_env_id
+            from config.migrations import find_env
+            hit = find_env(config, env_id)
+            base = (resolve_paths_for_env(config, env_id) or {}) if hit is not None else (resolve_active_paths(config) or {})
+            active_id = env_id if hit is not None else config.get("active_env_id")
+        else:
+            base = resolve_active_paths(config) or {}
+            active_id = config.get("active_env_id")
+    except Exception:
+        base = {}
+        active_id = None
+    out["comfyui_root"] = base.get("comfyui_root")
+    out["python_path"] = base.get("python_path")
+    out["env_id"] = active_id
+    try:
+        from utils.paths import webui_path_from_config
+        wp = webui_path_from_config(config, env_id=env_id)
+        if wp is not None:
+            out["webui_path"] = str(wp)
+    except Exception:
+        pass
+    return out

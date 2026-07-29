@@ -143,3 +143,34 @@ def validate_comfy_root(path: Path) -> bool:
         return p.exists() and ((p / "main.py").exists() or (p / ".git").exists())
     except Exception:
         return False
+
+# 多 WebUI 项目命名约定 (跟 Comfyui-Workbench-Mie 仓库对齐):
+# 期望目录名是 Comfyui-Workbench-Mie, 跟 GitHub repo 同名 (混大小写). 改这个
+# 常量要同步更新 AGENTS.md / docs/cli.md 跟 GUI 提示文案.
+WEBUI_DIR_NAME = "Comfyui-Workbench-Mie"
+
+
+def webui_path_from_config(app_config: dict | None, env_id: str | None = None) -> Path | None:
+    """返回 WebUI 期望安装路径 (<comfyui_root>/Comfyui-Workbench-Mie).
+
+    - 路径是否存在都返回 (用于 "未安装" 状态显示 期望路径).
+    - 多环境支持: env_id 非 None 时用 resolve_paths_for_env, 否则走激活环境.
+    - 任何异常 / comfyui_root 缺失 -> 返回 None, 调用方按未安装处理.
+    """
+    try:
+        cfg = app_config if isinstance(app_config, dict) else {}
+        from config.migrations import resolve_paths_for_env, resolve_active_paths
+        if env_id:
+            paths = resolve_paths_for_env(cfg, env_id) or {}
+        else:
+            paths = resolve_active_paths(cfg) or {}
+    except Exception:
+        paths = {}
+    comfy_root = (paths or {}).get("comfyui_root")
+    if not comfy_root:
+        return None
+    try:
+        base = Path(comfy_root).resolve()
+    except Exception:
+        return None
+    return base / WEBUI_DIR_NAME

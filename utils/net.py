@@ -49,6 +49,43 @@ def build_github_endpoint(base_url: str) -> str:
     return f"{base}https://github.com"
 
 
+# GitHub 代理模式常量, 跟 launcher config.proxy_settings.git_proxy_mode 对齐.
+GITHUB_PROXY_MODE_NONE = "none"
+GITHUB_PROXY_MODE_GH_PROXY = "gh-proxy"
+GITHUB_PROXY_MODE_CUSTOM = "custom"
+
+# 默认 gh-proxy 域名 (services/version_service.py 里 hardcode 的是同样这个).
+GITHUB_GH_PROXY_BASE = "https://gh-proxy.com/"
+
+
+def apply_git_proxy_to_url(base: str, proxy_settings: dict | None) -> str:
+    """根据 config.proxy_settings 给 GitHub URL 加代理前缀.
+
+    - git_proxy_mode == "gh-proxy"  ->  https://gh-proxy.com/<base>
+    - git_proxy_mode == "custom"    ->  <git_proxy_url>/<base>
+    - 其他 (none / 缺失)            ->  原样返回 base
+
+    跟 services/version_service.py:_apply_proxy_to_path 行为一致, 抽到这里供
+    webui clone / 未来一般 git 链接复用, 避免散落 magic.
+    """
+    base = (base or "").strip()
+    if not base:
+        return base
+    try:
+        cfg = proxy_settings or {}
+        mode = (cfg.get("git_proxy_mode") or "none").strip()
+        url = (cfg.get("git_proxy_url") or "").strip()
+        if mode == GITHUB_PROXY_MODE_GH_PROXY:
+            return GITHUB_GH_PROXY_BASE + base
+        if mode == GITHUB_PROXY_MODE_CUSTOM and url:
+            if not url.endswith("/"):
+                url += "/"
+            return url + base
+    except Exception:
+        pass
+    return base
+
+
 def update_pip_ini(python_exec_path: str, mode: str, index_url: str, pip_proxy: str, logger=None):
     try:
         py_path = Path(python_exec_path).resolve()
