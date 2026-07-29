@@ -10,7 +10,7 @@ import sys
 import traceback
 from typing import Any, Optional
 
-from core.cli import cmd_status, cmd_start, cmd_stop, cmd_restart, cmd_info, cmd_logs, cmd_update, cmd_plugins, cmd_help
+from core.cli import cmd_status, cmd_start, cmd_stop, cmd_restart, cmd_info, cmd_logs, cmd_update, cmd_plugins, cmd_webui, cmd_help
 from core.cli.exitcodes import EXIT_OK, EXIT_ERROR
 
 __all__ = ["main", "dispatch", "_load_app", "_DISPATCH"]
@@ -26,6 +26,7 @@ _DISPATCH = {
     "logs": cmd_logs,
     "update": cmd_update,
     "plugins": cmd_plugins,
+    "webui": cmd_webui,
     "help": cmd_help,
 }
 

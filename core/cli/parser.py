@@ -28,11 +28,12 @@ SUBCOMMANDS: Final[List[str]] = [
     "logs",
     "update",
     "plugins",
+    "webui",
     "help",
 ]
 
 # logs 子命令的稳定目标清单。
-LOGS_TARGETS: Final[List[str]] = ["launcher", "comfyui"]
+LOGS_TARGETS: Final[List[str]] = ["launcher", "comfyui", "webui"]
 
 # update 子命令的稳定目标清单。
 UPDATE_TARGETS: Final[List[str]] = ["comfyui", "plugins"]
@@ -41,6 +42,12 @@ UPDATE_TARGETS: Final[List[str]] = ["comfyui", "plugins"]
 PLUGINS_ACTIONS: Final[List[str]] = [
     "list", "install", "uninstall", "disable", "enable",
     "check-updates", "force-update",
+]
+
+# webui 子命令的稳定 action 清单 (与 cmd_webui.WEBUI_ACTIONS 一致).
+WEBUI_ACTIONS: Final[List[str]] = [
+    "start", "stop", "status", "info", "restart",
+    "install", "setup", "update",
 ]
 
 
@@ -185,6 +192,66 @@ Output schema (default human / --json):
 """
 
 
+
+
+_WEBUI_EPILOG = """\
+Exit codes:
+  0  success
+  1  general error (path missing / IO / timeout)
+  2  start 拒绝重复 (webui 已在跑)
+  3  status 未在跑
+  6  webui start 时检测到 ComfyUI 未运行 (用了 --with-comfyui)
+  7  webui 路径未安装 (用 install 子动作拉)
+  8  webui 依赖缺失 (用 setup 子动作装)
+
+Output schema (default human / --json):
+  start / install / setup / update / restart:
+    action       (str)   - 子动作名
+    ok           (bool)  - 是否成功
+    pid          (int)   - 启动后 PID, null 未启动
+    port         (int)   - 端口
+    url          (str)   - http://127.0.0.1:<port>
+    elapsed_sec  (float) - 耗时秒
+    env_id       (str)   - 实际生效的 env_id
+    error        (str)   - 错误信息, null 时无
+
+  stop:
+    ok           (bool)  - 始终 true (未跑也返 0)
+    pid          (int)   - 杀的 PID, null 时无
+    killed       (bool)  - 是否真的杀到进程
+
+  status:
+    running        (bool) - webui 是否在跑
+    pid            (int)  - 跟踪到的 PID, null 时无
+    port           (int)  - 端口
+    url            (str)  - http://127.0.0.1:<port>
+    http_reachable (bool) - HTTP 端口活
+    log_path       (str)  - 启动器日志路径
+    since          (str)  - 启动时间 ISO 8601
+    env_id         (str)  - 启动时的 env id
+
+  info:
+    installed       (bool) - webui 路径 + 入口都在
+    available       (bool) - installed + deps_ok
+    webui_path      (str)  - 期望安装路径
+    python_path     (str)  - 启动 webui 用的 python
+    port            (int)  - 端口
+    display_host    (str)  - 绑定地址
+    deps_ok         (bool) - flask/requests/websockets 都装
+    deps_missing    (list) - 缺哪些包
+    deps_available  (list) - 已装哪些
+    env_id          (str)  - env (透传 --env)
+
+Actions:
+  start    启动 webui (与 GUI 启动按钮行为一致)
+  stop     停止 webui (幂等, 未跑也返 0)
+  status   查询 webui 状态 (按 HTTP 端口活/死 + pidfile)
+  info     打印 webui 当前生效配置 (供 agent 解析)
+  restart  stop + start (跟 ComfyUI restart 同语义)
+  install  拉 webui 仓库 + 装依赖 (无 webui 时)
+  setup    仅装依赖 (webui 已 clone 但缺包时)
+  update   git pull (webui 已装时)
+"""
 def _global_parent() -> argparse.ArgumentParser:
     """仅含全局 flag 的 parent parser。
 
@@ -454,6 +521,57 @@ def build_parser() -> argparse.ArgumentParser:
         metavar="NAME",
         help="install/uninstall/disable/enable/force-update 的目标插件（dir_name / git URL / CNR id）。"
              "force-update 省略则作用于全部。",
+    )
+
+    # webui
+    sp = _make_subparser(
+        sub, "webui",
+        help="管理 Comfyui-Workbench-Mie (webui) 服务（与 ComfyUI 平级）",
+        description="start / stop / status / info / restart / install / setup / update; 跟 ComfyUI 同一套 pidfile / 进程管理 / 日志设施, 但走 flask app 入口 -m app.flask_app。",
+        epilog=_WEBUI_EPILOG,
+        formatter_class=argparse.RawDescriptionHelpFormatter,
+    )
+    sp.add_argument(
+        "webui_action",
+        choices=WEBUI_ACTIONS,
+        metavar="ACTION",
+        help="start / stop / status / info / restart / install / setup / update。",
+    )
+    sp.add_argument(
+        "--env",
+        type=str,
+        default=None,
+        metavar="ENV_ID",
+        help="使用指定的环境（覆盖 config 的 active_env_id）; 不传则用激活环境。",
+    )
+    sp.add_argument(
+        "--no-wait",
+        action="store_true",
+        help="spawn 后立即返回, 不等待 HTTP 就绪。",
+    )
+    sp.add_argument(
+        "--timeout",
+        type=int,
+        default=60,
+        metavar="SEC",
+        help="等待 HTTP 就绪的最大秒数（默认 60）。",
+    )
+    sp.add_argument(
+        "--with-comfyui",
+        action="store_true",
+        help="start 时要求 ComfyUI 已在跑; 否则返 exit code 6。仅做检测, 不强启动 ComfyUI。",
+    )
+    sp.add_argument(
+        "--force",
+        action="store_true",
+        help="stop 时跳过优雅终止, 直接 taskkill /F。",
+    )
+    sp.add_argument(
+        "--url",
+        type=str,
+        default=None,
+        metavar="URL",
+        help="install 时用这个 git URL 覆盖默认 (https://github.com/MieMieeeee/Comfyui-Workbench-Mie.git)。",
     )
 
     return p

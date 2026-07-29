@@ -103,6 +103,11 @@ def _resolve_log_path(app, target: str) -> Optional[Path]:
             return Path(app._cwd) / "launcher" / "launcher.log"
         except Exception:
             return None
+    if target == "webui":
+        try:
+            return Path(app._cwd) / "launcher" / "webui.log"
+        except Exception:
+            return None
     return None
 
 
