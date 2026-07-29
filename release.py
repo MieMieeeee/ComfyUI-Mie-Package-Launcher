@@ -459,6 +459,11 @@ def do_upload(args):
             gh_args.append("--prerelease")
         run_gh(gh_args)
 
+    # NOTE: gh CLI 已知 bug —— "启动器" 三个中文字符会被替换成 "_"，
+    # 所以本地 zip 名是 "ComfyUI启动器_v...zip"，GitHub 上显示的资产名是
+    # "ComfyUI._v...zip"。v1.0.13 也是这样（asset 显示 ComfyUI._v1.0.13_*.exe），
+    # 跟历史命名习惯一致；zip 内容正确（解压后子目录名是 "ComfyUI启动器_v..."），
+    # 不影响用户实际下载体验。如果哪天 gh 修了，别忘了同步 release note 里的描述。
     run_gh([
         "gh", "release", "upload", version, upload_path,
         "--repo", args.repo,
