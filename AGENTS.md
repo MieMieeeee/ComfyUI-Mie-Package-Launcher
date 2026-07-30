@@ -119,6 +119,56 @@ python __main__.py <command> [--json] [-v]
 - **`start` / `stop` 只动 pidfile 里那个 PID**：看不到的另一份 launcher 实例（多环境 GUI 各自）可能随时被它自己的 GUI 关掉。如果看到 8188 突然空了，多半是用户手动操作，**别当成 launcher 的副作用去调查**。
 - **发布到 GitHub 后 zip 名中 `启动器` 会变成 `_`**：本地 release/里的 zip 叫 `ComfyUI启动器_v<ver>_<ts>.zip`，上传后在 GitHub release 资产里变成 `ComfyUI._v<ver>_<ts>.zip`。这是 `gh release upload` 的 bug（中文字符被替换为 `_`），v1.0.13 也是这样。**zip 内容正确**（解压后子目录名是 `ComfyUI启动器_v<ver>_<ts>/`，里面文件全对），不影响用户下载体验。看到资产名字对不上别质疑 gh 配置问题，是已知 bug，详见 `release.py` 里的注释。如果一天 gh 修了，不要忘了同步 release note 里的下载名描述。
 
+## GUI 主题规范（改 ui_qt 页面/弹窗必读）
+
+所有页面/弹窗的配色**必须**走 `theme_manager`，**禁止**硬编码 `#rrggbb`（`webui_page.py` 曾是异类，已整改）。
+
+### 颜色从哪来
+
+| 来源 | 用法 | 文件 |
+|---|---|---|
+| `theme_manager.colors.get("<token>", default)` | 取单个色 token（标签/背景/输入框等） | `ui_qt/theme_styles.py`（`ThemeColors`，token dict 在此） |
+| `theme_manager.styles.<builder>()` | 取整段 QSS（按钮/输入/表格等） | `ui_qt/theme_styles.py`（`ThemeStyles`） |
+
+**关键 token**：`label` / `label_muted` / `label_dim`（文字）/ `content_bg` / `group_bg`（背景）/ `input_bg` / `input_border` / `input_readonly_bg` / `input_readonly_text`（输入框/日志区）/ `accent` / `error` / `warning`（语义色）。每个 token 都有深/浅两版，切换主题时自动取对的版本。
+
+**按钮 builder 一览**（优先用 builder，别自己拼）：
+- `primary_button_style()` —— 品牌紫渐变（`#7F56D9`→`#9E77ED`），一级动作（启动/停止/确定）。
+- `secondary_button_style()` —— 中性/半透明面，次级动作（打开网页/配置/刷新）。
+- `destructive_button_style()` / `destructive_outline_button_style()` —— 红色，高风险（卸载/退出）。
+- `link_button_style()` —— 链接样式。
+
+### 每个页面必须实现 `update_theme`
+
+页面继承 `BasePage`（自动注册主题监听）。`BasePage` 的 `update_theme` 只重应用基础 content 样式；**页内额外 `setStyleSheet` 过的控件必须在子类 `update_theme` 里重应用**，否则切深/浅主题时那些控件颜色会冻结。
+
+```python
+def _on_theme_changed(self, theme_styles):
+    self.update_theme(theme_styles)
+
+def update_theme(self, theme_styles=None):
+    super().update_theme(theme_styles)
+    styles = theme_styles or self.theme_manager.styles
+    self._btn_xxx.setStyleSheet(styles.primary_button_style())
+    self._label_yyy.setStyleSheet(f"color: {self.theme_manager.colors.get('label_muted')};")
+```
+
+参考实现：`ui_qt/pages/launch_page.py`、`models_page.py`、（整改后的）`webui_page.py`。
+
+### 弹窗走共享设施，禁原生 QMessageBox
+
+| 需求 | 用法 |
+|---|---|
+| 单按钮提示（信息/警告/错误） | `DialogHelper.show_info(parent, 标题, 内容)` / `show_warning` / `show_error` |
+| 是/否确认 | `DialogHelper.show_confirmation(parent, 标题, 内容)` |
+| 多按钮 / 自定义 / 带输入框 / 表单 | `CustomConfirmDialog`（继承 `FramelessDraggableDialog`，传 `theme_manager=`），多按钮靠 `get_result()` 拿索引 |
+
+带表单的自定义对话框继承 `FramelessDraggableDialog`，构造接 `theme_manager`，用「默认色兜底 + `theme_manager.colors` 覆盖」模式取色（参考 `ui_qt/widgets/update_dialog.py`、`custom_confirm_dialog.py`）。**不要** `QtWidgets.QMessageBox.xxx(...)`。
+
+### 字体大小
+
+走 `ThemeStyles` 内部的 `_pt()`/`_px()`（跟随全局 UI 缩放）。用 builder 时已自动带上；自己拼 QSS 里若需固定字号，小号（提示/详情）用 `9pt`、正文 `10pt`、标题 `bold 14pt`，**别**用影响布局的大号裸 pt。
+
 ## 深入
 
 - 完整 CLI 参考（每命令 flag / Exit codes / Output schema / systemd / NSSM / cron 示例）：[`cli.md`](cli.md)
