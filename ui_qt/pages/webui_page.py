@@ -144,7 +144,7 @@ class WebuiPage(BasePage):
         layout.setSpacing(8)
 
         # === 状态卡 ===
-        status_group = QtWidgets.QGroupBox("工作台状态")
+        status_group = QtWidgets.QGroupBox("WebUI工作台状态")
         status_layout = QtWidgets.QHBoxLayout(status_group)
         status_layout.setContentsMargins(10, 8, 10, 8)
         status_layout.setSpacing(12)
@@ -364,10 +364,10 @@ class WebuiPage(BasePage):
         version = _read_workbench_version(webui_path) if webui_path else None
 
         if self._state == STATE_NOT_INSTALLED:
-            txt = "工作台未安装"
+            txt = "WebUI工作台未安装"
             detail = "期望位置: %s" % (str(webui_path) if webui_path else "未解析")
             if webui_path:
-                detail += "\n点击 [下载工作台] 拉取最新版本"
+                detail += "\n点击 [下载WebUI工作台] 拉取最新版本"
         elif self._state == STATE_NO_DEPS:
             txt = "待安装依赖"
             detail = "位置: %s\nPython 缺少 flask / requests / websockets, 点击 [安装依赖]" % (
@@ -375,7 +375,7 @@ class WebuiPage(BasePage):
             )
         elif self._state == STATE_READY:
             v_str = " v" + version if version else ""
-            txt = "工作台就绪" + v_str
+            txt = "WebUI工作台就绪" + v_str
             detail = "位置: %s\nPython: %s\n点击 [一键启动] 拉起服务" % (
                 str(webui_path) if webui_path else "?",
                 str(info["python_path"]) if info["python_path"] else "?",
@@ -392,7 +392,7 @@ class WebuiPage(BasePage):
 
         # 按钮
         if self._state == STATE_NOT_INSTALLED:
-            self._btn_primary.setText("⬇ 下载工作台")
+            self._btn_primary.setText("⬇ 下载WebUI工作台")
             self._btn_primary.setEnabled(True)
             self._btn_secondary.setEnabled(False)
             self._btn_secondary.setText("打开网页")
@@ -464,16 +464,16 @@ class WebuiPage(BasePage):
         # ComfyUI 没跑, 弹 3 选 1 (走 CustomConfirmDialog, 主题化)
         dlg = CustomConfirmDialog(
             parent=self,
-            title="启动 WebUI",
+            title="启动 WebUI工作台",
             content=(
-                "WebUI 是以 ComfyUI 为后台运行工作流的。\n"
+                "WebUI工作台是以 ComfyUI 为后台运行工作流的。\n"
                 "ComfyUI 当前未在跑, 提交任务时会失败。\n\n"
                 "请选择启动方式:"
             ),
             buttons=[
                 {"text": "取消", "role": "normal"},
-                {"text": "只启动 WebUI", "role": "destructive"},
-                {"text": "同时启动 ComfyUI + WebUI", "role": "primary"},
+                {"text": "只启动 WebUI工作台", "role": "destructive"},
+                {"text": "同时启动 ComfyUI + WebUI工作台", "role": "primary"},
             ],
             default_index=2,
             theme_manager=self.theme_manager,
@@ -511,7 +511,7 @@ class WebuiPage(BasePage):
         if not ok:
             DialogHelper.show_warning(
                 self, "ComfyUI 启动失败",
-                "ComfyUI 启动失败, WebUI 不启动。\n请查看 ComfyUI 日志排查。",
+                "ComfyUI 启动失败, WebUI工作台不启动。\n请查看 ComfyUI 日志排查。",
             )
             return
         self._start_webui(with_comfyui=False)
@@ -539,8 +539,8 @@ class WebuiPage(BasePage):
             err = res.get("error")
             if err:
                 DialogHelper.show_warning(
-                    None, "WebUI 启动失败",
-                    "WebUI 启动失败: %s\n\n请查看 launcher/webui.log" % err,
+                    None, "WebUI工作台启动失败",
+                    "WebUI工作台启动失败: %s\n\n请查看 launcher/webui.log" % err,
                 )
 
         import threading
@@ -643,7 +643,7 @@ class WebuiPage(BasePage):
             if not silent:
                 DialogHelper.show_warning(
                     self, "requirements.txt 不存在",
-                    "WebUI 目录里没找到 requirements.txt: %s" % req,
+                    "WebUI工作台目录里没找到 requirements.txt: %s" % req,
                 )
             self._refresh_state()
             return
@@ -760,7 +760,7 @@ class WebuiConfigDialog(FramelessDraggableDialog):
         self.theme_manager = theme_manager
         self._initial = initial
 
-        self.setWindowTitle("WebUI 配置")
+        self.setWindowTitle("WebUI工作台配置")
 
         layout = QtWidgets.QVBoxLayout(self)
         layout.setContentsMargins(0, 0, 0, 0)
@@ -854,7 +854,7 @@ class WebuiConfigDialog(FramelessDraggableDialog):
         inner_layout.setSpacing(12)
 
         # 标题
-        lbl_title = QtWidgets.QLabel("WebUI 配置")
+        lbl_title = QtWidgets.QLabel("WebUI工作台配置")
         lbl_title.setStyleSheet(
             f'font: bold 14pt "Microsoft YaHei UI"; color: {title_color};'
         )

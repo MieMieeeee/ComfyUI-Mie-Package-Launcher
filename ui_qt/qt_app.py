@@ -2135,7 +2135,7 @@ class PyQtLauncher(QtWidgets.QMainWindow, process_events.ProcessCallback):
 
         btns = {
             "launch": NavBtn("🚀 启动与更新"),
-            "webui": NavBtn("🧪 工作流 WebUI"),
+            "webui": NavBtn("🧪 WebUI工作台"),
             "logs": NavBtn("📋 ComfyUI 实时日志"),
             "plugins": NavBtn("🧩 插件管理"),
             "version": NavBtn("🧬 内核版本管理"),
@@ -2150,8 +2150,8 @@ class PyQtLauncher(QtWidgets.QMainWindow, process_events.ProcessCallback):
         # 为导航按钮添加工具提示和存储完整文字
         btns["launch"].setToolTip("启动、停止ComfyUI，查看运行状态")
         btns["launch"].setProperty("full_text", "🚀 启动与更新")
-        btns["webui"].setToolTip("启动 Comfyui-Workbench-Mie 多工作流 WebUI")
-        btns["webui"].setProperty("full_text", "🧪 工作流 WebUI")
+        btns["webui"].setToolTip("启动 Comfyui-Workbench-Mie 多工作流 WebUI工作台")
+        btns["webui"].setProperty("full_text", "🧪 WebUI工作台")
         btns["logs"].setToolTip("实时显示 ComfyUI 运行日志")
         btns["logs"].setProperty("full_text", "📋 ComfyUI 实时日志")
         btns["version"].setToolTip("管理ComfyUI内核版本，切换提交")
