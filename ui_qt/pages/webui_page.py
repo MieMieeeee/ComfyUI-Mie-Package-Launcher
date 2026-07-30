@@ -1,15 +1,19 @@
 """WebUI工作台页面 (Comfyui-Workbench-Mie 启停 / 配置 / 更新 / 日志).
 
-布局 (仿首页 launch_page 左右结构):
-  状态卡 (圆点 + 文案 + 刷新)              <- 横跨顶部
-  ┌ 启动控制 (端口/监听/自动打开) ┐ ┌─右侧按钮列─┐
-  │  (左, stretch 1)              │ │ [一键启动] │  <- 大按钮
-  │                               │ │ [打开网页] │  <- 竖排
-  └───────────────────────────────┘ │ [更新]     │
-                                     └────────────┘
-  日志 (launcher/webui.log, 实时 tail)  <- 底部, 与实时日志页一致
+布局 (纵向三段式):
+  ┌─ 启动控制 ────────────────────────────┐
+  │ 端口号 [8199] ☑允许局域网访问         │
+  │ 自动打开浏览器 [默认▾]                 │
+  │ [🚀一键启动]      [🌐打开网页]        │
+  └──────────────────────────────────────┘
+  ┌─ 版本与更新 ──────────────────────────┐
+  │ 版本：xxxx，已安装配置      [🔄更新]  │
+  └──────────────────────────────────────┘
+  ┌─ 实时日志 ────────────────────────────┐
+  │ ...log tail...                        │
+  └──────────────────────────────────────┘
 
-状态机:
+状态机 (状态靠一键启动按钮文字体现):
   not_installed -> [下载WebUI工作台]  打开网页/更新禁用
   no_deps       -> [安装依赖]         打开网页/更新禁用
   ready         -> [一键启动]         打开网页/更新可用
@@ -180,21 +184,21 @@ class WebuiPage(BasePage):
         layout.setContentsMargins(12, 12, 12, 12)
         layout.setSpacing(8)
 
-        # === 顶部行: 左启动控制 + 右按钮列 (仿 launch_page top_row) ===
-        top_row = QtWidgets.QHBoxLayout()
-        top_row.setSpacing(15)
-        layout.addLayout(top_row)
+        lbl_style = self._config_label_style()
 
-        # --- 左: 启动控制 (端口 / 允许局域网访问 / 自动打开浏览器) ---
-        form_group = QtWidgets.QGroupBox("启动控制")
-        form_layout = QtWidgets.QGridLayout(form_group)
+        # === 段1: 启动控制 (配置项 + 启动/打开网页 按钮) ===
+        launch_group = QtWidgets.QGroupBox("启动控制")
+        launch_layout = QtWidgets.QVBoxLayout(launch_group)
+        launch_layout.setContentsMargins(8, 12, 8, 12)
+        launch_layout.setSpacing(8)
+        layout.addWidget(launch_group)
+
+        # 配置项 grid (端口/监听 + 自动打开浏览器)
+        form_layout = QtWidgets.QGridLayout()
         form_layout.setColumnStretch(1, 1)
         form_layout.setHorizontalSpacing(20)
         form_layout.setVerticalSpacing(8)
-        form_layout.setContentsMargins(8, 12, 8, 12)
-        top_row.addWidget(form_group, 1)
-
-        lbl_style = self._config_label_style()
+        launch_layout.addLayout(form_layout)
 
         # 端口号 + 允许局域网访问 (同一行 HBox, 复刻 launch_controls_section)
         port_label = QtWidgets.QLabel("端口号：")
@@ -256,53 +260,47 @@ class WebuiPage(BasePage):
         form_layout.addWidget(open_label, 1, 0)
         form_layout.addLayout(row_open, 1, 1)
 
-        # --- 右: 按钮列 (固定宽 200px, 仿 launch_page right_container) ---
-        right_container = QtWidgets.QWidget()
-        right_container.setFixedWidth(200)
-        right_layout = QtWidgets.QVBoxLayout(right_container)
-        right_layout.setContentsMargins(0, 0, 0, 0)
-        right_layout.setSpacing(8)
-        top_row.addWidget(right_container, 0)
+        # 启动/停止 大按钮 + 打开网页 (横排; 主按钮随状态变文字)
+        btn_row = QtWidgets.QHBoxLayout()
+        btn_row.setContentsMargins(0, 0, 0, 0)
+        btn_row.setSpacing(8)
 
-        # 启动/停止 大按钮 (随状态变文字)
         self._btn_primary = QtWidgets.QPushButton()
         self._btn_primary.setCursor(QtCore.Qt.PointingHandCursor)
-        self._btn_primary.setSizePolicy(QtWidgets.QSizePolicy.Expanding, QtWidgets.QSizePolicy.Expanding)
         self._btn_primary.clicked.connect(self._on_primary_clicked)
-        self._btn_primary.setMinimumHeight(60)
-        right_layout.addWidget(self._btn_primary, 4)
-
-        # 底部横排: 打开网页 + 更新 (复刻 launch_page bottom_row)
-        bottom_row = QtWidgets.QWidget()
-        bottom_layout = QtWidgets.QHBoxLayout(bottom_row)
-        bottom_layout.setContentsMargins(0, 0, 0, 0)
-        bottom_layout.setSpacing(4)
+        self._btn_primary.setMinimumHeight(44)
+        btn_row.addWidget(self._btn_primary, 3)
 
         self._btn_open = QtWidgets.QPushButton("🌐 打开网页")
         self._btn_open.setCursor(QtCore.Qt.PointingHandCursor)
-        self._btn_open.setSizePolicy(QtWidgets.QSizePolicy.Expanding, QtWidgets.QSizePolicy.Expanding)
-        self._btn_open.setMinimumHeight(40)
+        self._btn_open.setMinimumHeight(44)
         self._btn_open.clicked.connect(self._on_open_browser)
-        bottom_layout.addWidget(self._btn_open)
+        btn_row.addWidget(self._btn_open, 1)
 
-        self._btn_update = QtWidgets.QPushButton("🔄 更新")
-        self._btn_update.setCursor(QtCore.Qt.PointingHandCursor)
-        self._btn_update.setSizePolicy(QtWidgets.QSizePolicy.Expanding, QtWidgets.QSizePolicy.Expanding)
-        self._btn_update.setMinimumHeight(40)
-        self._btn_update.clicked.connect(self._on_update_clicked)
-        self._btn_update.setToolTip("git pull 更新 WebUI工作台到最新版本")
-        bottom_layout.addWidget(self._btn_update)
+        launch_layout.addLayout(btn_row)
 
-        # 版本信息行: 紧贴更新按钮上方 (版本号 ↔ 更新动作 语义相邻)
+        # === 段2: 版本与更新 (版本信息 + 更新按钮) ===
+        version_group = QtWidgets.QGroupBox("版本与更新")
+        version_layout = QtWidgets.QHBoxLayout(version_group)
+        version_layout.setContentsMargins(8, 12, 8, 12)
+        version_layout.setSpacing(12)
+        layout.addWidget(version_group)
+
+        # 版本信息行 (左, stretch; 已安装时显示"版本：xxxx，已安装配置")
         self._version_label = QtWidgets.QLabel("")
         self._version_label.setStyleSheet(self._label_muted_style())
-        self._version_label.setAlignment(QtCore.Qt.AlignCenter)
-        right_layout.addWidget(self._version_label)
+        version_layout.addWidget(self._version_label, 1)
 
-        right_layout.addWidget(bottom_row, 1)
+        # 更新按钮 (右)
+        self._btn_update = QtWidgets.QPushButton("🔄 更新")
+        self._btn_update.setCursor(QtCore.Qt.PointingHandCursor)
+        self._btn_update.setMinimumHeight(36)
+        self._btn_update.clicked.connect(self._on_update_clicked)
+        self._btn_update.setToolTip("git pull 更新 WebUI工作台到最新版本")
+        version_layout.addWidget(self._btn_update)
 
-        # === 日志区域 (实时 tail, 与实时日志页一致) ===
-        log_group = QtWidgets.QGroupBox("日志 (launcher/webui.log)")
+        # === 段3: 实时日志 (实时 tail, 与实时日志页一致) ===
+        log_group = QtWidgets.QGroupBox("实时日志")
         log_layout = QtWidgets.QVBoxLayout(log_group)
         log_layout.setContentsMargins(8, 8, 8, 8)
         log_layout.setSpacing(4)
@@ -327,7 +325,6 @@ class WebuiPage(BasePage):
         log_layout.addLayout(log_toolbar)
 
         layout.addWidget(log_group, 1)
-        layout.addSpacing(4)
 
         # 注册状态定时器 (5s)
         self._state_check_timer = QtCore.QTimer(self)
