@@ -1,20 +1,27 @@
-"""WebUI 页面 (Comfyui-Workbench-Mie 启停 / 配置 / 日志).
+"""WebUI工作台页面 (Comfyui-Workbench-Mie 启停 / 配置 / 更新 / 日志).
+
+布局 (仿首页 launch_page 紧凑结构):
+  状态卡 (圆点 + 文案 + 刷新)
+  操作行 [一键启动/停止] [更新]   <- 并排
+  启动控制 (端口 / 允许局域网访问 / 自动打开浏览器)  <- 内联, 不再弹配置框
+  日志 (launcher/webui.log)
 
 状态机:
-  not_installed  -> [下载工作台] [配置]
-  no_deps        -> [安装依赖] [配置]
-  ready          -> [一键启动] [打开网页] [配置]
-  running        -> [停止] [打开网页] [配置]
+  not_installed  -> [下载WebUI工作台] (主按钮)  更新禁用
+  no_deps        -> [安装依赖] (主按钮)         更新禁用
+  ready          -> [一键启动] (主按钮)         更新可用
+  running        -> [停止] (主按钮)             更新禁用
   starting/stopping -> 进度显示 (禁用按钮)
 
-主题: 全部走 theme_manager (跟 launch_page / models_page 一致), 实现 update_theme
-响应深/浅切换. 弹窗走共享 DialogHelper / CustomConfirmDialog, 不用原生 QMessageBox.
-参考: ui_qt/pages/launch_page.py (大按钮 + 状态机模式).
+主题: 全部走 theme_manager (跟 launch_page 一致), 实现 update_theme 响应深/浅切换.
+配置: 直接读写 config["webui_options"] + app.services.config.save (webui 无 app Var).
+弹窗: 走共享 DialogHelper / CustomConfirmDialog, 不用原生 QMessageBox.
 """
 from __future__ import annotations
 
 import os
 import sys
+import subprocess
 import webbrowser
 from pathlib import Path
 from typing import Optional
@@ -31,7 +38,7 @@ from core.webui_installer import clone_webui, pull_webui
 from utils.net import resolve_pypi_index_url
 from ui_qt.widgets.dialog_helper import DialogHelper
 from ui_qt.widgets.custom_confirm_dialog import CustomConfirmDialog
-from ui_qt.widgets.frameless_draggable_dialog import FramelessDraggableDialog
+from ui_qt.widgets.custom import NoWheelComboBox
 
 
 STATE_NOT_INSTALLED = "not_installed"
@@ -60,6 +67,13 @@ _STATE_COLORS_LIGHT = {
     STATE_STOPPING: "#2563EB",
 }
 
+# 自动打开浏览器三选项 (跟首页 launch_controls_section 一致: disable/default/webbrowser)
+_BROWSER_OPEN_OPTS = [
+    ("不自动打开", "disable"),
+    ("使用默认浏览器", "default"),
+    ("使用指定浏览器", "webbrowser"),
+]
+
 
 def _read_workbench_version(webui_root: Optional[Path]) -> Optional[str]:
     """从 <webui_root>/app/config.py 解析 WORKBENCH_VERSION."""
@@ -72,7 +86,6 @@ def _read_workbench_version(webui_root: Optional[Path]) -> Optional[str]:
         text = cfg.read_text(encoding="utf-8", errors="ignore")
     except Exception:
         return None
-    # 找 WORKBENCH_VERSION: str = "..." 这一行
     for line in text.splitlines():
         s = line.strip()
         if s.startswith("WORKBENCH_VERSION"):
@@ -85,7 +98,7 @@ def _read_workbench_version(webui_root: Optional[Path]) -> Optional[str]:
 
 
 class WebuiPage(BasePage):
-    """WebUI 启停 / 配置 / 日志."""
+    """WebUI工作台 启停 / 配置 / 更新 / 日志."""
 
     def __init__(self, app, theme_manager, parent=None):
         super().__init__(theme_manager, parent)
@@ -94,6 +107,7 @@ class WebuiPage(BasePage):
         self._state: str = STATE_NOT_INSTALLED
         self._state_check_timer = None
         self._pm: Optional[WebuiProcessManager] = None
+        self._updating = False  # 更新进行中标志 (禁用按钮)
         # 依赖探测缓存: 同一 (py, webui_path) 不重复 spawn 3 个 python 子进程.
         # 失效点: _after_setup / refresh_after_env_switch (路径或依赖可能变).
         self._deps_cache_key: Optional[tuple] = None
@@ -137,6 +151,38 @@ class WebuiPage(BasePage):
             f'font: bold 11pt "Microsoft YaHei UI"; color: {self._c("label", "#E5E7EB")};'
         )
 
+    def _config_label_style(self) -> str:
+        """配置项标签样式 (复刻首页 lbl_style: label_muted + bold)."""
+        return f'color: {self._c("label_muted", "#9CA3AF")}; font-weight: bold;'
+
+    # ---------------- 配置读写 (直接读写 config["webui_options"]) ----------------
+    def _webui_options(self) -> dict:
+        cfg = getattr(self.app, "config", None)
+        if isinstance(cfg, dict):
+            return cfg.get("webui_options") or {}
+        return {}
+
+    def _save_webui_option(self, key, value) -> None:
+        """写单个 webui_options 字段并持久化."""
+        try:
+            cfg = getattr(self.app, "config", None)
+            if not isinstance(cfg, dict):
+                return
+            opts = cfg.setdefault("webui_options", {})
+            opts[key] = value
+            # 持久化 (沿用现有保存路径)
+            svc = getattr(self.app, "services", None)
+            cfg_mgr = getattr(svc, "config", None) if svc else None
+            if cfg_mgr is not None:
+                saved = cfg_mgr.save(cfg)
+                if saved is not None:
+                    self.app.config = saved
+        except Exception as e:
+            try:
+                self.app.logger.warning("保存 webui_options.%s 失败: %s", key, e)
+            except Exception:
+                pass
+
     # ---------------- 主 UI ----------------
     def _setup_ui(self):
         layout = QtWidgets.QVBoxLayout(self)
@@ -149,17 +195,14 @@ class WebuiPage(BasePage):
         status_layout.setContentsMargins(10, 8, 10, 8)
         status_layout.setSpacing(12)
 
-        # 状态圆点
         self._status_dot = QtWidgets.QLabel()
         self._status_dot.setFixedSize(20, 20)
         status_layout.addWidget(self._status_dot)
 
-        # 状态文本
         self._status_text = QtWidgets.QLabel("检测中...")
         self._status_text.setStyleSheet(self._status_text_style())
         status_layout.addWidget(self._status_text, 1)
 
-        # 刷新按钮
         self._btn_refresh = QtWidgets.QPushButton("🔄 刷新")
         self._btn_refresh.setCursor(QtCore.Qt.PointingHandCursor)
         self._btn_refresh.clicked.connect(self._refresh_state)
@@ -172,33 +215,99 @@ class WebuiPage(BasePage):
         self._detail_label.setWordWrap(True)
         layout.addWidget(self._detail_label)
 
-        # === 操作按钮区 ===
-        action_group = QtWidgets.QGroupBox("操作")
-        action_layout = QtWidgets.QHBoxLayout(action_group)
-        action_layout.setContentsMargins(10, 8, 10, 8)
+        # === 操作行: 启动/停止 (主) + 更新 (并排) ===
+        action_layout = QtWidgets.QHBoxLayout()
+        action_layout.setContentsMargins(0, 0, 0, 0)
         action_layout.setSpacing(8)
 
         self._btn_primary = QtWidgets.QPushButton()
         self._btn_primary.setCursor(QtCore.Qt.PointingHandCursor)
         self._btn_primary.setMinimumHeight(44)
         self._btn_primary.clicked.connect(self._on_primary_clicked)
-        action_layout.addWidget(self._btn_primary, 2)
+        action_layout.addWidget(self._btn_primary, 3)
 
-        self._btn_secondary = QtWidgets.QPushButton("打开网页")
-        self._btn_secondary.setCursor(QtCore.Qt.PointingHandCursor)
-        self._btn_secondary.setMinimumHeight(44)
-        self._btn_secondary.clicked.connect(self._on_open_browser)
-        action_layout.addWidget(self._btn_secondary, 1)
+        self._btn_update = QtWidgets.QPushButton("🔄 更新")
+        self._btn_update.setCursor(QtCore.Qt.PointingHandCursor)
+        self._btn_update.setMinimumHeight(44)
+        self._btn_update.clicked.connect(self._on_update_clicked)
+        self._btn_update.setToolTip("git pull 更新 WebUI工作台到最新版本")
+        action_layout.addWidget(self._btn_update, 1)
 
-        self._btn_config = QtWidgets.QPushButton("⚙ 配置")
-        self._btn_config.setCursor(QtCore.Qt.PointingHandCursor)
-        self._btn_config.setMinimumHeight(44)
-        self._btn_config.clicked.connect(self._on_config_clicked)
-        action_layout.addWidget(self._btn_config, 1)
+        layout.addLayout(action_layout)
 
-        layout.addWidget(action_group)
+        # === 启动控制 (端口 / 允许局域网访问 / 自动打开浏览器) ===
+        form_group = QtWidgets.QGroupBox("启动控制")
+        form_layout = QtWidgets.QGridLayout(form_group)
+        form_layout.setColumnStretch(1, 1)
+        form_layout.setHorizontalSpacing(20)
+        form_layout.setVerticalSpacing(8)
+        form_layout.setContentsMargins(8, 12, 8, 12)
 
-        # === 状态指示 (运行时显示 port / pid / uptime) ===
+        lbl_style = self._config_label_style()
+
+        # --- 端口号 + 允许局域网访问 (同一行 HBox, 复刻 launch_controls_section) ---
+        port_label = QtWidgets.QLabel("端口号：")
+        port_label.setStyleSheet(lbl_style)
+        self._port_edit = QtWidgets.QLineEdit()
+        self._port_edit.setFixedWidth(60)
+        self._port_edit.setText(str(self._webui_options().get("port") or 8199))
+        self._port_edit.setToolTip("WebUI工作台服务端口，默认8199")
+        self._port_edit.textChanged.connect(
+            lambda v: self._save_webui_option("port", v.strip() or "8199")
+        )
+
+        self._listen_chk = QtWidgets.QCheckBox("允许局域网访问")
+        listen_lan = bool(self._webui_options().get("listen_lan", False))
+        self._listen_chk.setChecked(listen_lan)
+        self._listen_chk.setToolTip("允许局域网内其他设备访问 WebUI工作台")
+        self._listen_chk.toggled.connect(self._on_listen_toggled)
+
+        hbox_port = QtWidgets.QHBoxLayout()
+        hbox_port.setContentsMargins(0, 0, 0, 0)
+        hbox_port.setSpacing(15)
+        hbox_port.addWidget(port_label)
+        hbox_port.addWidget(self._port_edit)
+        hbox_port.addWidget(self._listen_chk)
+        hbox_port.addStretch(1)
+        form_layout.addLayout(hbox_port, 0, 0, 1, 2)
+
+        # --- 自动打开浏览器 (三选下拉 + 指定浏览器路径按钮) ---
+        open_label = QtWidgets.QLabel("自动打开浏览器：")
+        open_label.setStyleSheet(lbl_style)
+        self._open_combo = NoWheelComboBox()
+        for name, val in _BROWSER_OPEN_OPTS:
+            self._open_combo.addItem(name, val)
+        cur_mode = self._webui_options().get("browser_open_mode") or "default"
+        for i, (name, val) in enumerate(_BROWSER_OPEN_OPTS):
+            if val == cur_mode:
+                self._open_combo.setCurrentIndex(i)
+                break
+        self._open_combo.currentIndexChanged.connect(self._on_open_mode_changed)
+        self._open_combo.setToolTip("启动后自动打开浏览器访问 WebUI工作台")
+
+        self._cpath_btn = QtWidgets.QPushButton()
+        self._cpath_btn.setCursor(QtCore.Qt.PointingHandCursor)
+        self._cpath_btn.setFixedWidth(32)
+        try:
+            self._cpath_btn.setIcon(self.style().standardIcon(QtWidgets.QStyle.SP_DirOpenIcon))
+            self._cpath_btn.setIconSize(QtCore.QSize(14, 14))
+        except Exception:
+            pass
+        self._cpath_btn.clicked.connect(self._on_pick_browser_path)
+
+        row_open = QtWidgets.QHBoxLayout()
+        row_open.setContentsMargins(0, 0, 0, 0)
+        row_open.setSpacing(8)
+        row_open.addWidget(self._open_combo)
+        row_open.addWidget(self._cpath_btn)
+        row_open.addStretch(1)
+
+        form_layout.addWidget(open_label, 1, 0)
+        form_layout.addLayout(row_open, 1, 1)
+
+        layout.addWidget(form_group)
+
+        # === 服务信息 (port / pid / env / uptime) ===
         info_group = QtWidgets.QGroupBox("服务信息")
         info_layout = QtWidgets.QFormLayout(info_group)
         info_layout.setContentsMargins(10, 8, 10, 8)
@@ -227,7 +336,6 @@ class WebuiPage(BasePage):
         self._log_view.setMaximumBlockCount(500)
         log_layout.addWidget(self._log_view)
 
-        # 日志工具栏
         log_toolbar = QtWidgets.QHBoxLayout()
         log_toolbar.setSpacing(4)
         self._btn_log_refresh = QtWidgets.QPushButton("🔄 刷新日志")
@@ -243,8 +351,6 @@ class WebuiPage(BasePage):
         log_layout.addLayout(log_toolbar)
 
         layout.addWidget(log_group, 1)
-
-        # 底部留白
         layout.addSpacing(4)
 
         # 注册状态定时器 (5s)
@@ -252,8 +358,37 @@ class WebuiPage(BasePage):
         self._state_check_timer.timeout.connect(self._poll_status)
         self._state_check_timer.start(5000)
 
-        # 应用初始主题 (按钮等用 builder, 文本用 token helper)
+        # 应用初始主题
         self.update_theme()
+
+    # ---------------- 配置控件回调 ----------------
+    def _on_listen_toggled(self, checked: bool) -> None:
+        """允许局域网访问勾选框: 隐式决定 display_host (勾=0.0.0.0 / 不勾=127.0.0.1)."""
+        self._save_webui_option("listen_lan", bool(checked))
+        self._save_webui_option("display_host", "0.0.0.0" if checked else "127.0.0.1")
+        self._update_info_panel()  # URL 随 host 变
+
+    def _on_open_mode_changed(self, idx: int) -> None:
+        mode = _BROWSER_OPEN_OPTS[idx][1] if 0 <= idx < len(_BROWSER_OPEN_OPTS) else "default"
+        self._save_webui_option("browser_open_mode", mode)
+        self._update_cpath_vis()
+
+    def _update_cpath_vis(self) -> None:
+        """指定浏览器路径按钮仅在 webbrowser 模式可见 (复刻 launch_controls_section)."""
+        try:
+            is_custom = (self._open_combo.currentData() == "webbrowser")
+            self._cpath_btn.setVisible(is_custom)
+        except Exception:
+            pass
+
+    def _on_pick_browser_path(self) -> None:
+        """选自定义浏览器 exe 路径."""
+        cur = self._webui_options().get("custom_browser_path") or ""
+        path, _ = QtWidgets.QFileDialog.getOpenFileName(
+            self, "选择浏览器", cur or "", "可执行文件 (*.exe);;所有文件 (*)"
+        )
+        if path:
+            self._save_webui_option("custom_browser_path", path)
 
     # ---------------- 主题切换 ----------------
     def _on_theme_changed(self, theme_styles):
@@ -263,17 +398,22 @@ class WebuiPage(BasePage):
         """重应用所有主题化控件 QSS (响应深/浅切换)."""
         super().update_theme(theme_styles)
         styles = theme_styles if theme_styles is not None else self.theme_manager.styles
-        # 按钮: 用 theme_styles builder (跟 launch_page 大按钮一致)
+        input_ss = styles.input_style()
+        # 按钮
         self._btn_primary.setStyleSheet(styles.primary_button_style())
-        self._btn_secondary.setStyleSheet(styles.secondary_button_style())
-        self._btn_config.setStyleSheet(styles.secondary_button_style())
+        self._btn_update.setStyleSheet(styles.primary_button_style())
         self._btn_refresh.setStyleSheet(styles.secondary_button_style())
         self._btn_log_refresh.setStyleSheet(styles.secondary_button_style())
         self._btn_log_open.setStyleSheet(styles.secondary_button_style())
-        # 文本/日志: 用 token helper (读当前主题 token)
+        # 输入控件
+        self._port_edit.setStyleSheet(input_ss)
+        self._open_combo.setStyleSheet(input_ss)
+        self._cpath_btn.setStyleSheet(input_ss)
+        # 文本/日志
         self._log_view.setStyleSheet(self._log_view_style())
         self._detail_label.setStyleSheet(self._label_muted_style())
         self._status_text.setStyleSheet(self._status_text_style())
+        self._update_cpath_vis()
         # 状态圆点颜色重算 (深/浅版不同)
         self._refresh_state()
 
@@ -283,8 +423,11 @@ class WebuiPage(BasePage):
         cfg = getattr(self.app, "config", None)
         webui_options = (cfg or {}).get("webui_options") or {}
         port = int(webui_options.get("port") or 8199)
-        display_host = webui_options.get("display_host") or "127.0.0.1"
-        auto_open = bool(webui_options.get("auto_open_browser", False))
+        # display_host 由 listen_lan 隐式决定 (兼容老配置里直接写的 host)
+        if "listen_lan" in webui_options:
+            display_host = "0.0.0.0" if webui_options.get("listen_lan") else "127.0.0.1"
+        else:
+            display_host = webui_options.get("display_host") or "127.0.0.1"
         download_url = webui_options.get("download_url") or "https://github.com/MieMieeeee/Comfyui-Workbench-Mie.git"
 
         pw = resolve_active_paths_for_webui(cfg if isinstance(cfg, dict) else {})
@@ -298,7 +441,6 @@ class WebuiPage(BasePage):
             "env_id": env_id,
             "port": port,
             "display_host": display_host,
-            "auto_open": auto_open,
             "download_url": download_url,
         }
 
@@ -343,7 +485,7 @@ class WebuiPage(BasePage):
         self._refresh_log()
 
     def _poll_status(self):
-        """定时器: 仅在 running / starting / stopping 时勤跑 (running 状态会变)."""
+        """定时器: running 状态会变, 勤跑探测."""
         try:
             new_state = self._detect_state()
             if new_state != self._state:
@@ -390,30 +532,26 @@ class WebuiPage(BasePage):
         self._status_text.setText(txt)
         self._detail_label.setText(detail)
 
-        # 按钮
+        # 主按钮 (随状态变文字)
         if self._state == STATE_NOT_INSTALLED:
             self._btn_primary.setText("⬇ 下载WebUI工作台")
             self._btn_primary.setEnabled(True)
-            self._btn_secondary.setEnabled(False)
-            self._btn_secondary.setText("打开网页")
         elif self._state == STATE_NO_DEPS:
             self._btn_primary.setText("⚙ 安装依赖")
             self._btn_primary.setEnabled(True)
-            self._btn_secondary.setEnabled(False)
-            self._btn_secondary.setText("打开网页")
         elif self._state == STATE_READY:
             self._btn_primary.setText("🚀 一键启动")
             self._btn_primary.setEnabled(True)
-            self._btn_secondary.setEnabled(True)
-            self._btn_secondary.setText("打开网页")
         elif self._state == STATE_RUNNING:
             self._btn_primary.setText("⏹ 停止")
             self._btn_primary.setEnabled(True)
-            self._btn_secondary.setEnabled(True)
-            self._btn_secondary.setText("🌐 打开网页")
         else:
             self._btn_primary.setText("...")
             self._btn_primary.setEnabled(False)
+
+        # 更新按钮: 仅 ready (已安装) 可用; 更新中/启动停止中禁用
+        can_update = (self._state == STATE_READY and not self._updating)
+        self._btn_update.setEnabled(can_update)
 
     def _update_info_panel(self):
         info = self._resolve_paths()
@@ -421,21 +559,14 @@ class WebuiPage(BasePage):
         self._info_url.setText("http://%s:%s/" % (info["display_host"], info["port"]))
         self._info_env.setText(str(info["env_id"]) if info["env_id"] else "-")
 
-        # PID / 启动时间 — 来自 ProcessManager.status
         if self._pm is None:
             self._pm = WebuiProcessManager(self.app)
         try:
             st = self._pm.status()
         except Exception:
             st = {}
-        if st.get("pid"):
-            self._info_pid.setText(str(st["pid"]))
-        else:
-            self._info_pid.setText("-")
-        if st.get("since"):
-            self._info_since.setText(str(st["since"]))
-        else:
-            self._info_since.setText("-")
+        self._info_pid.setText(str(st["pid"]) if st.get("pid") else "-")
+        self._info_since.setText(str(st["since"]) if st.get("since") else "-")
 
     # ---------------- 按钮回调 ----------------
     def _on_primary_clicked(self):
@@ -448,16 +579,57 @@ class WebuiPage(BasePage):
         elif self._state == STATE_RUNNING:
             self._stop_webui()
 
-    def _start_with_prompt(self):
-        """弹 3 选 1 dialog: 同时启动 / 只启 WebUI / 取消."""
+    def _on_update_clicked(self):
+        """更新按钮: git pull WebUI工作台."""
+        if self._updating:
+            return
         info = self._resolve_paths()
-        env_id = info["env_id"]
+        webui_path = info["webui_path"]
+        if not webui_path or not webui_path.exists():
+            DialogHelper.show_warning(self, "无法更新", "WebUI工作台尚未安装，请先下载。")
+            return
+        if not (webui_path / ".git").exists():
+            DialogHelper.show_warning(self, "无法更新", "WebUI工作台目录不是 git 仓库，无法更新。")
+            return
 
-        # 检查 ComfyUI 是否在跑
-        comfyui_running = self._is_comfyui_running()
+        self._updating = True
+        self._btn_update.setText("更新中…")
+        self._btn_update.setEnabled(False)
 
-        if comfyui_running:
-            # ComfyUI 在跑, 直接启 WebUI (不弹 dialog)
+        def _worker():
+            try:
+                res = pull_webui(self.app, webui_path)
+            except Exception as e:
+                res = {"ok": False, "error": str(e), "updated": False}
+            updated = bool(res.get("updated"))
+            ok = bool(res.get("ok"))
+            QtCore.QMetaObject.invokeMethod(
+                self, "_after_update",
+                QtCore.Qt.QueuedConnection,
+                QtCore.Q_ARG(bool, ok),
+                QtCore.Q_ARG(bool, updated),
+                QtCore.Q_ARG(str, res.get("error") or ""),
+            )
+
+        import threading
+        threading.Thread(target=_worker, daemon=True).start()
+
+    @QtCore.pyqtSlot(bool, bool, str)
+    def _after_update(self, ok: bool, updated: bool, err: str):
+        self._updating = False
+        self._btn_update.setText("🔄 更新")
+        self._refresh_state()
+        if not ok:
+            DialogHelper.show_warning(self, "更新失败", "git pull 失败: %s" % (err or "未知"))
+        elif updated:
+            DialogHelper.show_info(self, "更新完成", "WebUI工作台已更新到最新版本。")
+        else:
+            DialogHelper.show_info(self, "已是最新", "WebUI工作台已是最新版本。")
+
+    def _start_with_prompt(self):
+        """弹 3 选 1 dialog: 同时启动 / 只启 WebUI工作台 / 取消."""
+        # ComfyUI 在跑 -> 直接启 WebUI工作台 (不弹 dialog)
+        if self._is_comfyui_running():
             self._start_webui(with_comfyui=False)
             return
 
@@ -480,12 +652,10 @@ class WebuiPage(BasePage):
         )
         dlg.exec_()
         result = dlg.get_result()
-        # result 索引对应 buttons 顺序: 0=取消, 1=只启 webui, 2=同时启动
         if result == 2:
             self._start_comfyui_then_webui()
         elif result == 1:
             self._start_webui(with_comfyui=False)
-        # else: 取消
 
     def _is_comfyui_running(self) -> bool:
         """ComfyUI 是否在跑 (HTTP 探活 + pidfile)."""
@@ -497,7 +667,7 @@ class WebuiPage(BasePage):
             return False
 
     def _start_comfyui_then_webui(self):
-        """先启 ComfyUI (同步), 成功后再启 WebUI."""
+        """先启 ComfyUI (同步), 成功后再启 WebUI工作台."""
         try:
             from core.cli.runner import start_service
             res = start_service(self.app, no_wait=False, timeout=60)
@@ -517,8 +687,7 @@ class WebuiPage(BasePage):
         self._start_webui(with_comfyui=False)
 
     def _start_webui(self, with_comfyui: bool):
-        """后台启 WebUI."""
-        info = self._resolve_paths()
+        """后台启 WebUI工作台."""
         if self._pm is None:
             self._pm = WebuiProcessManager(self.app)
         self._state = STATE_STARTING
@@ -526,11 +695,13 @@ class WebuiPage(BasePage):
 
         def _worker():
             res = self._pm.start_webui(timeout=60)
-            # 回到 UI 线程刷新
             if res.get("ok"):
                 self._state = STATE_RUNNING
+                # 自动打开浏览器
+                if self._should_auto_open():
+                    info = self._resolve_paths()
+                    self._open_url("http://%s:%s/" % (info["display_host"], info["port"]))
             else:
-                # 启失败, 回到 ready
                 self._state = STATE_READY
             QtCore.QMetaObject.invokeMethod(
                 self, "_after_action_done",
@@ -545,6 +716,40 @@ class WebuiPage(BasePage):
 
         import threading
         threading.Thread(target=_worker, daemon=True).start()
+
+    def _should_auto_open(self) -> bool:
+        """是否启动后自动打开浏览器 (browser_open_mode != disable)."""
+        mode = self._webui_options().get("browser_open_mode")
+        if mode is None:
+            # 兼容老字段 auto_open_browser
+            return bool(self._webui_options().get("auto_open_browser", False))
+        return mode != "disable"
+
+    def _open_url(self, url: str) -> None:
+        """按 browser_open_mode 打开 URL (disable/default/webbrowser)."""
+        opts = self._webui_options()
+        mode = opts.get("browser_open_mode") or "default"
+        if mode == "disable":
+            return
+        if mode == "webbrowser":
+            cpath = (opts.get("custom_browser_path") or "").strip()
+            if cpath and os.path.exists(cpath):
+                try:
+                    subprocess.Popen([cpath, url])
+                    return
+                except Exception as e:
+                    try:
+                        self.app.logger.warning("用指定浏览器打开失败: %s, 回退默认", e)
+                    except Exception:
+                        pass
+            # 路径无效或失败 -> 回退默认浏览器
+        try:
+            webbrowser.open(url)
+        except Exception as e:
+            try:
+                self.app.logger.warning("打开浏览器失败: %s", e)
+            except Exception:
+                pass
 
     def _stop_webui(self):
         if self._pm is None:
@@ -567,24 +772,12 @@ class WebuiPage(BasePage):
     def _after_action_done(self):
         self._refresh_state()
 
-    def _on_open_browser(self):
-        info = self._resolve_paths()
-        url = "http://%s:%s/" % (info["display_host"], info["port"])
-        try:
-            webbrowser.open(url)
-        except Exception as e:
-            try:
-                self.app.logger.warning("打开浏览器失败: %s", e)
-            except Exception:
-                pass
-
     def _download_webui(self):
         """下载 (git clone) + 完成后自动 setup deps."""
         info = self._resolve_paths()
         webui_path = info["webui_path"]
         if not webui_path:
             return
-
         download_url = info["download_url"]
 
         self._state = STATE_STARTING
@@ -603,7 +796,6 @@ class WebuiPage(BasePage):
                     QtCore.Q_ARG(str, "下载失败: " + (res.get("error") or "未知")),
                 )
                 return
-            # 成功, 自动 setup deps
             try:
                 self._setup_deps(silent=True)
             except Exception:
@@ -632,10 +824,7 @@ class WebuiPage(BasePage):
         if not py or not py.exists():
             self._state = STATE_NO_DEPS
             if not silent:
-                DialogHelper.show_warning(
-                    self, "Python 不可用",
-                    "Python 路径无效: %s" % py,
-                )
+                DialogHelper.show_warning(self, "Python 不可用", "Python 路径无效: %s" % py)
             self._refresh_state()
             return
         if not req or not req.exists():
@@ -648,7 +837,6 @@ class WebuiPage(BasePage):
             self._refresh_state()
             return
 
-        # 走 pypi proxy (统一走 utils.net.resolve_pypi_index_url)
         idx_url = resolve_pypi_index_url(self.app)
 
         self._state = STATE_STARTING
@@ -658,7 +846,6 @@ class WebuiPage(BasePage):
         def _worker():
             res = install_webui_requirements(py, req, index_url=idx_url)
             ok = res.get("ok") is True
-            # 回到 UI 线程
             QtCore.QMetaObject.invokeMethod(
                 self, "_after_setup",
                 QtCore.Qt.QueuedConnection,
@@ -681,46 +868,17 @@ class WebuiPage(BasePage):
         self._deps_cache_result = None
         self._refresh_state()
 
-    def _on_config_clicked(self):
-        """配置 dialog: 改 webui_options."""
-        info = self._resolve_paths()
-        dlg = WebuiConfigDialog(
-            self,
-            initial=info,
-            theme_manager=self.theme_manager,
-        )
-        if dlg.exec_() == QtWidgets.QDialog.Accepted:
-            new_options = dlg.get_values()
-            try:
-                cfg = getattr(self.app, "config", None)
-                if isinstance(cfg, dict):
-                    cfg["webui_options"] = new_options
-                    # 持久化
-                    if hasattr(self.app, "services") and getattr(self.app.services, "config", None):
-                        saved = self.app.services.config.save(cfg)
-                        if saved is not None:
-                            self.app.config = saved
-            except Exception as e:
-                try:
-                    self.app.logger.warning("保存 webui_options 失败: %s", e)
-                except Exception:
-                    pass
-            self._refresh_state()
-
     # ---------------- 日志 ----------------
     def _refresh_log(self):
-        info = self._resolve_paths()
         log_path = Path(self.app._cwd) / "launcher" / "webui.log" if hasattr(self.app, "_cwd") else Path("launcher/webui.log")
         if not log_path.exists():
-            self._log_view.setPlainText("# 日志文件不存在 (webui 还没启动过或路径未配置)\n")
+            self._log_view.setPlainText("# 日志文件不存在 (WebUI工作台还没启动过或路径未配置)\n")
             return
         try:
-            # 读最后 200 行
             with log_path.open("r", encoding="utf-8", errors="ignore") as f:
                 lines = f.readlines()
             tail = lines[-200:]
             self._log_view.setPlainText("".join(tail))
-            # 滚到底
             sb = self._log_view.verticalScrollBar()
             sb.setValue(sb.maximum())
         except Exception as e:
@@ -746,182 +904,3 @@ class WebuiPage(BasePage):
             self._refresh_state()
         except Exception:
             pass
-
-
-class WebuiConfigDialog(FramelessDraggableDialog):
-    """WebUI 配置对话框 (主题化): port / display_host / auto_open_browser / download_url / extra_args.
-
-    继承 FramelessDraggableDialog, 从 theme_manager 取色 (跟 UpdateDialog / CustomConfirmDialog 一致).
-    保留 get_values() 接口供 WebuiPage._on_config_clicked 调用.
-    """
-
-    def __init__(self, parent, initial: dict, theme_manager):
-        super().__init__(parent=parent)
-        self.theme_manager = theme_manager
-        self._initial = initial
-
-        self.setWindowTitle("WebUI工作台配置")
-
-        layout = QtWidgets.QVBoxLayout(self)
-        layout.setContentsMargins(0, 0, 0, 0)
-
-        self.container = QtWidgets.QFrame()
-        self.container.setObjectName("WebuiConfigContainer")
-
-        # 默认色兜底, theme_manager 覆盖 (跟 CustomConfirmDialog / UpdateDialog 同模式)
-        bg = "#1F2937"
-        border = "#374151"
-        text = "#E5E7EB"
-        title_color = "#F3F4F6"
-        input_bg = "rgba(0, 0, 0, 0.3)"
-        input_border = "#4B5563"
-        input_text = "#E5E7EB"
-        accent = "#7F56D9"
-        accent_hover = "#9E77ED"
-        label_muted = "#9CA3AF"
-        if self.theme_manager:
-            c = self.theme_manager.colors
-            bg = c.get("content_bg", bg)
-            border = c.get("group_border", border)
-            text = c.get("text", text)
-            title_color = c.get("label", title_color)
-            input_bg = c.get("input_bg", input_bg)
-            input_border = c.get("input_border", input_border)
-            input_text = c.get("input_text", input_text)
-            accent = c.get("btn_primary_bg", accent)
-            accent_hover = c.get("btn_primary_hover", accent_hover)
-            label_muted = c.get("label_muted", label_muted)
-
-        self.container.setStyleSheet(f"""
-            QFrame#WebuiConfigContainer {{
-                background-color: {bg};
-                border: 1px solid {border};
-                border-radius: 16px;
-            }}
-            QLabel {{
-                background: transparent;
-                color: {text};
-                font: 10pt "Microsoft YaHei UI";
-            }}
-            QLineEdit, QSpinBox {{
-                background-color: {input_bg};
-                color: {input_text};
-                border: 1px solid {input_border};
-                border-radius: 6px;
-                padding: 6px 10px;
-                font: 10pt "Microsoft YaHei UI";
-            }}
-            QCheckBox {{
-                color: {text};
-                spacing: 6px;
-                font: 10pt "Microsoft YaHei UI";
-            }}
-            QCheckBox::indicator {{
-                width: 16px; height: 16px;
-                border: 1px solid {input_border};
-                border-radius: 4px;
-                background-color: {input_bg};
-            }}
-            QCheckBox::indicator:hover {{
-                border: 1px solid {accent};
-            }}
-            QCheckBox::indicator:checked {{
-                background-color: {accent};
-                border: 1px solid {accent};
-            }}
-            QPushButton {{
-                background-color: {input_border};
-                color: {text};
-                border: none;
-                border-radius: 8px;
-                padding: 10px 24px;
-                font: bold 10pt "Microsoft YaHei UI";
-            }}
-            QPushButton:hover {{
-                background-color: {label_muted};
-            }}
-            QPushButton#PrimaryBtn {{
-                background-color: {accent};
-                color: #FFFFFF;
-            }}
-            QPushButton#PrimaryBtn:hover {{
-                background-color: {accent_hover};
-            }}
-        """)
-
-        inner_layout = QtWidgets.QVBoxLayout(self.container)
-        inner_layout.setContentsMargins(24, 24, 24, 24)
-        inner_layout.setSpacing(12)
-
-        # 标题
-        lbl_title = QtWidgets.QLabel("WebUI工作台配置")
-        lbl_title.setStyleSheet(
-            f'font: bold 14pt "Microsoft YaHei UI"; color: {title_color};'
-        )
-        inner_layout.addWidget(lbl_title)
-
-        # 表单
-        form = QtWidgets.QFormLayout()
-        form.setSpacing(10)
-
-        # port
-        self._port_input = QtWidgets.QSpinBox()
-        self._port_input.setRange(1024, 65535)
-        self._port_input.setValue(int(initial.get("port") or 8199))
-        form.addRow("端口:", self._port_input)
-
-        # display_host
-        self._host_input = QtWidgets.QLineEdit(str(initial.get("display_host") or "127.0.0.1"))
-        form.addRow("监听地址:", self._host_input)
-
-        # download_url
-        self._url_input = QtWidgets.QLineEdit(str(initial.get("download_url") or ""))
-        form.addRow("Git 仓库 URL:", self._url_input)
-
-        # extra_args
-        self._extra_args = QtWidgets.QLineEdit(str(initial.get("extra_args") or ""))
-        form.addRow("附加参数 (透传给 app.flask_app):", self._extra_args)
-
-        inner_layout.addLayout(form)
-
-        # auto_open_browser
-        self._auto_open_check = QtWidgets.QCheckBox("启动后自动打开浏览器")
-        self._auto_open_check.setChecked(bool(initial.get("auto_open", False)))
-        inner_layout.addWidget(self._auto_open_check)
-
-        # 提示
-        hint = QtWidgets.QLabel(
-            "提示: 端口 / 监听 / Git URL / 额外参数写在这里, 依赖安装 / 下载复用现有 "
-            "github proxy + pypi proxy 配置。"
-        )
-        hint.setStyleSheet(f'font: 9pt "Microsoft YaHei UI"; color: {label_muted};')
-        hint.setWordWrap(True)
-        inner_layout.addWidget(hint)
-
-        # 按钮
-        btn_row = QtWidgets.QHBoxLayout()
-        btn_row.addStretch(1)
-        btn_cancel = QtWidgets.QPushButton("取消")
-        btn_cancel.setObjectName("NormalBtn")
-        btn_cancel.setCursor(QtCore.Qt.PointingHandCursor)
-        btn_cancel.clicked.connect(self.reject)
-        btn_ok = QtWidgets.QPushButton("确定")
-        btn_ok.setObjectName("PrimaryBtn")
-        btn_ok.setCursor(QtCore.Qt.PointingHandCursor)
-        btn_ok.clicked.connect(self.accept)
-        btn_row.addWidget(btn_cancel)
-        btn_row.addWidget(btn_ok)
-        inner_layout.addLayout(btn_row)
-
-        layout.addWidget(self.container)
-        self.setMinimumWidth(460)
-
-    def get_values(self) -> dict:
-        return {
-            "port": int(self._port_input.value()),
-            "display_host": self._host_input.text().strip() or "127.0.0.1",
-            "auto_open_browser": bool(self._auto_open_check.isChecked()),
-            "download_url": self._url_input.text().strip()
-                or "https://github.com/MieMieeeee/Comfyui-Workbench-Mie.git",
-            "extra_args": self._extra_args.text().strip(),
-        }
