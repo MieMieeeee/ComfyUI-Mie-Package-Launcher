@@ -1,20 +1,23 @@
 """WebUI工作台页面 (Comfyui-Workbench-Mie 启停 / 配置 / 更新 / 日志).
 
-布局 (仿首页 launch_page 紧凑结构):
-  状态卡 (圆点 + 文案 + 刷新)
-  操作行 [一键启动/停止] [更新]   <- 并排
-  启动控制 (端口 / 允许局域网访问 / 自动打开浏览器)  <- 内联, 不再弹配置框
-  日志 (launcher/webui.log)
+布局 (仿首页 launch_page 左右结构):
+  状态卡 (圆点 + 文案 + 刷新)              <- 横跨顶部
+  ┌ 启动控制 (端口/监听/自动打开) ┐ ┌─右侧按钮列─┐
+  │  (左, stretch 1)              │ │ [一键启动] │  <- 大按钮
+  │                               │ │ [打开网页] │  <- 竖排
+  └───────────────────────────────┘ │ [更新]     │
+                                     └────────────┘
+  日志 (launcher/webui.log, 实时 tail)  <- 底部, 与实时日志页一致
 
 状态机:
-  not_installed  -> [下载WebUI工作台] (主按钮)  更新禁用
-  no_deps        -> [安装依赖] (主按钮)         更新禁用
-  ready          -> [一键启动] (主按钮)         更新可用
-  running        -> [停止] (主按钮)             更新禁用
-  starting/stopping -> 进度显示 (禁用按钮)
+  not_installed -> [下载WebUI工作台]  打开网页/更新禁用
+  no_deps       -> [安装依赖]         打开网页/更新禁用
+  ready         -> [一键启动]         打开网页/更新可用
+  running       -> [停止]             打开网页可用 / 更新禁用
 
 主题: 全部走 theme_manager (跟 launch_page 一致), 实现 update_theme 响应深/浅切换.
 配置: 直接读写 config["webui_options"] + app.services.config.save (webui 无 app Var).
+日志: 复用 ui_qt.log_viewer.LogTailer (后台线程 + Qt 信号 + 50ms 批量渲染), 与实时日志页一致.
 弹窗: 走共享 DialogHelper / CustomConfirmDialog, 不用原生 QMessageBox.
 """
 from __future__ import annotations
@@ -26,7 +29,7 @@ import webbrowser
 from pathlib import Path
 from typing import Optional
 
-from PyQt5 import QtCore, QtWidgets
+from PyQt5 import QtCore, QtGui, QtWidgets
 
 from .base_page import BasePage
 from utils.paths import webui_path_from_config, WEBUI_DIR_NAME
@@ -39,6 +42,7 @@ from utils.net import resolve_pypi_index_url
 from ui_qt.widgets.dialog_helper import DialogHelper
 from ui_qt.widgets.custom_confirm_dialog import CustomConfirmDialog
 from ui_qt.widgets.custom import NoWheelComboBox
+from ui_qt.log_viewer import LogTailer, read_tail_lines
 
 
 STATE_NOT_INSTALLED = "not_installed"
@@ -74,6 +78,11 @@ _BROWSER_OPEN_OPTS = [
     ("使用指定浏览器", "webbrowser"),
 ]
 
+# 日志: 历史回填行数 + 批量渲染间隔 (与实时日志页 LogViewerPage 一致)
+_RECENT_HISTORY_LINES = 500
+_BATCH_INTERVAL_MS = 50
+_MAX_LOG_LINES = 5000
+
 
 def _read_workbench_version(webui_root: Optional[Path]) -> Optional[str]:
     """从 <webui_root>/app/config.py 解析 WORKBENCH_VERSION."""
@@ -97,6 +106,11 @@ def _read_workbench_version(webui_root: Optional[Path]) -> Optional[str]:
     return None
 
 
+class _LineEmitter(QtCore.QObject):
+    """tailer 线程 → UI 线程的行投递信号桥 (复刻 log_viewer)."""
+    line_received = QtCore.pyqtSignal(str)
+
+
 class WebuiPage(BasePage):
     """WebUI工作台 启停 / 配置 / 更新 / 日志."""
 
@@ -112,8 +126,16 @@ class WebuiPage(BasePage):
         # 失效点: _after_setup / refresh_after_env_switch (路径或依赖可能变).
         self._deps_cache_key: Optional[tuple] = None
         self._deps_cache_result: Optional[dict] = None
+        # 日志实时 tail 状态 (复刻 LogViewerPage)
+        self._tailer: Optional[LogTailer] = None
+        self._emitter: Optional[_LineEmitter] = None
+        self._batch_buffer: list[str] = []
+        self._batch_timer: Optional[QtCore.QTimer] = None
+        self._log_path: Optional[Path] = None
+        self._history_loaded = False
         self._setup_ui()
         self._refresh_state()
+        self._start_log_tail()
 
     # ---------------- 主题 helper ----------------
     def _c(self, key: str, default: str = "") -> str:
@@ -170,7 +192,6 @@ class WebuiPage(BasePage):
                 return
             opts = cfg.setdefault("webui_options", {})
             opts[key] = value
-            # 持久化 (沿用现有保存路径)
             svc = getattr(self.app, "services", None)
             cfg_mgr = getattr(svc, "config", None) if svc else None
             if cfg_mgr is not None:
@@ -189,7 +210,7 @@ class WebuiPage(BasePage):
         layout.setContentsMargins(12, 12, 12, 12)
         layout.setSpacing(8)
 
-        # === 状态卡 ===
+        # === 状态卡 (横跨顶部) ===
         status_group = QtWidgets.QGroupBox("WebUI工作台状态")
         status_layout = QtWidgets.QHBoxLayout(status_group)
         status_layout.setContentsMargins(10, 8, 10, 8)
@@ -210,42 +231,23 @@ class WebuiPage(BasePage):
 
         layout.addWidget(status_group)
 
-        # 详情行 (路径 + 版本)
-        self._detail_label = QtWidgets.QLabel("")
-        self._detail_label.setWordWrap(True)
-        layout.addWidget(self._detail_label)
+        # === 顶部行: 左启动控制 + 右按钮列 (仿 launch_page top_row) ===
+        top_row = QtWidgets.QHBoxLayout()
+        top_row.setSpacing(15)
+        layout.addLayout(top_row)
 
-        # === 操作行: 启动/停止 (主) + 更新 (并排) ===
-        action_layout = QtWidgets.QHBoxLayout()
-        action_layout.setContentsMargins(0, 0, 0, 0)
-        action_layout.setSpacing(8)
-
-        self._btn_primary = QtWidgets.QPushButton()
-        self._btn_primary.setCursor(QtCore.Qt.PointingHandCursor)
-        self._btn_primary.setMinimumHeight(44)
-        self._btn_primary.clicked.connect(self._on_primary_clicked)
-        action_layout.addWidget(self._btn_primary, 3)
-
-        self._btn_update = QtWidgets.QPushButton("🔄 更新")
-        self._btn_update.setCursor(QtCore.Qt.PointingHandCursor)
-        self._btn_update.setMinimumHeight(44)
-        self._btn_update.clicked.connect(self._on_update_clicked)
-        self._btn_update.setToolTip("git pull 更新 WebUI工作台到最新版本")
-        action_layout.addWidget(self._btn_update, 1)
-
-        layout.addLayout(action_layout)
-
-        # === 启动控制 (端口 / 允许局域网访问 / 自动打开浏览器) ===
+        # --- 左: 启动控制 (端口 / 允许局域网访问 / 自动打开浏览器) ---
         form_group = QtWidgets.QGroupBox("启动控制")
         form_layout = QtWidgets.QGridLayout(form_group)
         form_layout.setColumnStretch(1, 1)
         form_layout.setHorizontalSpacing(20)
         form_layout.setVerticalSpacing(8)
         form_layout.setContentsMargins(8, 12, 8, 12)
+        top_row.addWidget(form_group, 1)
 
         lbl_style = self._config_label_style()
 
-        # --- 端口号 + 允许局域网访问 (同一行 HBox, 复刻 launch_controls_section) ---
+        # 端口号 + 允许局域网访问 (同一行 HBox, 复刻 launch_controls_section)
         port_label = QtWidgets.QLabel("端口号：")
         port_label.setStyleSheet(lbl_style)
         self._port_edit = QtWidgets.QLineEdit()
@@ -271,7 +273,7 @@ class WebuiPage(BasePage):
         hbox_port.addStretch(1)
         form_layout.addLayout(hbox_port, 0, 0, 1, 2)
 
-        # --- 自动打开浏览器 (三选下拉 + 指定浏览器路径按钮) ---
+        # 自动打开浏览器 (三选下拉 + 指定浏览器路径按钮)
         open_label = QtWidgets.QLabel("自动打开浏览器：")
         open_label.setStyleSheet(lbl_style)
         self._open_combo = NoWheelComboBox()
@@ -305,27 +307,46 @@ class WebuiPage(BasePage):
         form_layout.addWidget(open_label, 1, 0)
         form_layout.addLayout(row_open, 1, 1)
 
-        layout.addWidget(form_group)
+        # --- 右: 按钮列 (固定宽 200px, 仿 launch_page right_container) ---
+        right_container = QtWidgets.QWidget()
+        right_container.setFixedWidth(200)
+        right_layout = QtWidgets.QVBoxLayout(right_container)
+        right_layout.setContentsMargins(0, 0, 0, 0)
+        right_layout.setSpacing(8)
+        top_row.addWidget(right_container, 0)
 
-        # === 服务信息 (port / pid / env / uptime) ===
-        info_group = QtWidgets.QGroupBox("服务信息")
-        info_layout = QtWidgets.QFormLayout(info_group)
-        info_layout.setContentsMargins(10, 8, 10, 8)
-        info_layout.setSpacing(6)
+        # 启动/停止 大按钮 (随状态变文字)
+        self._btn_primary = QtWidgets.QPushButton()
+        self._btn_primary.setCursor(QtCore.Qt.PointingHandCursor)
+        self._btn_primary.setSizePolicy(QtWidgets.QSizePolicy.Expanding, QtWidgets.QSizePolicy.Expanding)
+        self._btn_primary.clicked.connect(self._on_primary_clicked)
+        self._btn_primary.setMinimumHeight(60)
+        right_layout.addWidget(self._btn_primary, 4)
 
-        self._info_port = QtWidgets.QLabel("-")
-        self._info_pid = QtWidgets.QLabel("-")
-        self._info_url = QtWidgets.QLabel("-")
-        self._info_env = QtWidgets.QLabel("-")
-        self._info_since = QtWidgets.QLabel("-")
-        info_layout.addRow("端口:", self._info_port)
-        info_layout.addRow("PID:", self._info_pid)
-        info_layout.addRow("URL:", self._info_url)
-        info_layout.addRow("Env:", self._info_env)
-        info_layout.addRow("启动时间:", self._info_since)
-        layout.addWidget(info_group)
+        # 底部横排: 打开网页 + 更新 (复刻 launch_page bottom_row)
+        bottom_row = QtWidgets.QWidget()
+        bottom_layout = QtWidgets.QHBoxLayout(bottom_row)
+        bottom_layout.setContentsMargins(0, 0, 0, 0)
+        bottom_layout.setSpacing(4)
 
-        # === 日志区域 ===
+        self._btn_open = QtWidgets.QPushButton("🌐 打开网页")
+        self._btn_open.setCursor(QtCore.Qt.PointingHandCursor)
+        self._btn_open.setSizePolicy(QtWidgets.QSizePolicy.Expanding, QtWidgets.QSizePolicy.Expanding)
+        self._btn_open.setMinimumHeight(40)
+        self._btn_open.clicked.connect(self._on_open_browser)
+        bottom_layout.addWidget(self._btn_open)
+
+        self._btn_update = QtWidgets.QPushButton("🔄 更新")
+        self._btn_update.setCursor(QtCore.Qt.PointingHandCursor)
+        self._btn_update.setSizePolicy(QtWidgets.QSizePolicy.Expanding, QtWidgets.QSizePolicy.Expanding)
+        self._btn_update.setMinimumHeight(40)
+        self._btn_update.clicked.connect(self._on_update_clicked)
+        self._btn_update.setToolTip("git pull 更新 WebUI工作台到最新版本")
+        bottom_layout.addWidget(self._btn_update)
+
+        right_layout.addWidget(bottom_row, 1)
+
+        # === 日志区域 (实时 tail, 与实时日志页一致) ===
         log_group = QtWidgets.QGroupBox("日志 (launcher/webui.log)")
         log_layout = QtWidgets.QVBoxLayout(log_group)
         log_layout.setContentsMargins(8, 8, 8, 8)
@@ -333,15 +354,15 @@ class WebuiPage(BasePage):
 
         self._log_view = QtWidgets.QPlainTextEdit()
         self._log_view.setReadOnly(True)
-        self._log_view.setMaximumBlockCount(500)
+        self._log_view.setMaximumBlockCount(_MAX_LOG_LINES)
         log_layout.addWidget(self._log_view)
 
         log_toolbar = QtWidgets.QHBoxLayout()
         log_toolbar.setSpacing(4)
-        self._btn_log_refresh = QtWidgets.QPushButton("🔄 刷新日志")
-        self._btn_log_refresh.setCursor(QtCore.Qt.PointingHandCursor)
-        self._btn_log_refresh.clicked.connect(self._refresh_log)
-        log_toolbar.addWidget(self._btn_log_refresh)
+        self._btn_log_clear = QtWidgets.QPushButton("🧹 清空")
+        self._btn_log_clear.setCursor(QtCore.Qt.PointingHandCursor)
+        self._btn_log_clear.clicked.connect(self._on_clear_log)
+        log_toolbar.addWidget(self._btn_log_clear)
 
         self._btn_log_open = QtWidgets.QPushButton("📂 打开日志文件")
         self._btn_log_open.setCursor(QtCore.Qt.PointingHandCursor)
@@ -366,7 +387,6 @@ class WebuiPage(BasePage):
         """允许局域网访问勾选框: 隐式决定 display_host (勾=0.0.0.0 / 不勾=127.0.0.1)."""
         self._save_webui_option("listen_lan", bool(checked))
         self._save_webui_option("display_host", "0.0.0.0" if checked else "127.0.0.1")
-        self._update_info_panel()  # URL 随 host 变
 
     def _on_open_mode_changed(self, idx: int) -> None:
         mode = _BROWSER_OPEN_OPTS[idx][1] if 0 <= idx < len(_BROWSER_OPEN_OPTS) else "default"
@@ -399,11 +419,13 @@ class WebuiPage(BasePage):
         super().update_theme(theme_styles)
         styles = theme_styles if theme_styles is not None else self.theme_manager.styles
         input_ss = styles.input_style()
+        primary_ss = styles.primary_button_style()
         # 按钮
-        self._btn_primary.setStyleSheet(styles.primary_button_style())
-        self._btn_update.setStyleSheet(styles.primary_button_style())
+        self._btn_primary.setStyleSheet(primary_ss)
+        self._btn_open.setStyleSheet(primary_ss)
+        self._btn_update.setStyleSheet(primary_ss)
         self._btn_refresh.setStyleSheet(styles.secondary_button_style())
-        self._btn_log_refresh.setStyleSheet(styles.secondary_button_style())
+        self._btn_log_clear.setStyleSheet(styles.secondary_button_style())
         self._btn_log_open.setStyleSheet(styles.secondary_button_style())
         # 输入控件
         self._port_edit.setStyleSheet(input_ss)
@@ -411,7 +433,6 @@ class WebuiPage(BasePage):
         self._cpath_btn.setStyleSheet(input_ss)
         # 文本/日志
         self._log_view.setStyleSheet(self._log_view_style())
-        self._detail_label.setStyleSheet(self._label_muted_style())
         self._status_text.setStyleSheet(self._status_text_style())
         self._update_cpath_vis()
         # 状态圆点颜色重算 (深/浅版不同)
@@ -423,7 +444,6 @@ class WebuiPage(BasePage):
         cfg = getattr(self.app, "config", None)
         webui_options = (cfg or {}).get("webui_options") or {}
         port = int(webui_options.get("port") or 8199)
-        # display_host 由 listen_lan 隐式决定 (兼容老配置里直接写的 host)
         if "listen_lan" in webui_options:
             display_host = "0.0.0.0" if webui_options.get("listen_lan") else "127.0.0.1"
         else:
@@ -450,20 +470,17 @@ class WebuiPage(BasePage):
         webui_path = info["webui_path"]
         py_path = info["python_path"]
 
-        # 1. 是否在跑 (ProcessManager 已知)
         if self._pm is None:
             self._pm = WebuiProcessManager(self.app)
         running = self._pm.is_running()
         if running:
             return STATE_RUNNING
 
-        # 2. webui 路径 + 入口
         if webui_path is None or not webui_path.exists():
             return STATE_NOT_INSTALLED
         if not (webui_path / "app" / "flask_app.py").exists():
             return STATE_NOT_INSTALLED
 
-        # 3. python 依赖 (带缓存: 同一 (py, webui_path) 不重复探测)
         if py_path is None or not py_path.exists():
             return STATE_NO_DEPS
         cache_key = (str(py_path), str(webui_path))
@@ -481,8 +498,6 @@ class WebuiPage(BasePage):
     def _refresh_state(self):
         self._state = self._detect_state()
         self._update_ui_for_state()
-        self._update_info_panel()
-        self._refresh_log()
 
     def _poll_status(self):
         """定时器: running 状态会变, 勤跑探测."""
@@ -491,7 +506,6 @@ class WebuiPage(BasePage):
             if new_state != self._state:
                 self._state = new_state
                 self._update_ui_for_state()
-            self._update_info_panel()
         except Exception:
             pass
 
@@ -505,32 +519,20 @@ class WebuiPage(BasePage):
         webui_path = info["webui_path"]
         version = _read_workbench_version(webui_path) if webui_path else None
 
+        # 状态文案: 只留一句话描述, 不带路径/操作提示 (按需求精简)
         if self._state == STATE_NOT_INSTALLED:
             txt = "WebUI工作台未安装"
-            detail = "期望位置: %s" % (str(webui_path) if webui_path else "未解析")
-            if webui_path:
-                detail += "\n点击 [下载WebUI工作台] 拉取最新版本"
         elif self._state == STATE_NO_DEPS:
             txt = "待安装依赖"
-            detail = "位置: %s\nPython 缺少 flask / requests / websockets, 点击 [安装依赖]" % (
-                str(webui_path) if webui_path else "?"
-            )
         elif self._state == STATE_READY:
             v_str = " v" + version if version else ""
             txt = "WebUI工作台就绪" + v_str
-            detail = "位置: %s\nPython: %s\n点击 [一键启动] 拉起服务" % (
-                str(webui_path) if webui_path else "?",
-                str(info["python_path"]) if info["python_path"] else "?",
-            )
         elif self._state == STATE_RUNNING:
             txt = "工作中"
-            detail = "服务已起, 浏览器打开 http://%s:%s/" % (info["display_host"], info["port"])
         else:
             txt = self._state
-            detail = ""
 
         self._status_text.setText(txt)
-        self._detail_label.setText(detail)
 
         # 主按钮 (随状态变文字)
         if self._state == STATE_NOT_INSTALLED:
@@ -549,24 +551,10 @@ class WebuiPage(BasePage):
             self._btn_primary.setText("...")
             self._btn_primary.setEnabled(False)
 
-        # 更新按钮: 仅 ready (已安装) 可用; 更新中/启动停止中禁用
-        can_update = (self._state == STATE_READY and not self._updating)
-        self._btn_update.setEnabled(can_update)
-
-    def _update_info_panel(self):
-        info = self._resolve_paths()
-        self._info_port.setText(str(info["port"]))
-        self._info_url.setText("http://%s:%s/" % (info["display_host"], info["port"]))
-        self._info_env.setText(str(info["env_id"]) if info["env_id"] else "-")
-
-        if self._pm is None:
-            self._pm = WebuiProcessManager(self.app)
-        try:
-            st = self._pm.status()
-        except Exception:
-            st = {}
-        self._info_pid.setText(str(st["pid"]) if st.get("pid") else "-")
-        self._info_since.setText(str(st["since"]) if st.get("since") else "-")
+        # 打开网页按钮: 仅 running 可用 (没跑起来打开无意义)
+        self._btn_open.setEnabled(self._state == STATE_RUNNING)
+        # 更新按钮: 仅 ready (已安装未跑) 可用; 更新中/启动停止中禁用
+        self._btn_update.setEnabled(self._state == STATE_READY and not self._updating)
 
     # ---------------- 按钮回调 ----------------
     def _on_primary_clicked(self):
@@ -628,12 +616,10 @@ class WebuiPage(BasePage):
 
     def _start_with_prompt(self):
         """弹 3 选 1 dialog: 同时启动 / 只启 WebUI工作台 / 取消."""
-        # ComfyUI 在跑 -> 直接启 WebUI工作台 (不弹 dialog)
         if self._is_comfyui_running():
             self._start_webui(with_comfyui=False)
             return
 
-        # ComfyUI 没跑, 弹 3 选 1 (走 CustomConfirmDialog, 主题化)
         dlg = CustomConfirmDialog(
             parent=self,
             title="启动 WebUI工作台",
@@ -697,7 +683,6 @@ class WebuiPage(BasePage):
             res = self._pm.start_webui(timeout=60)
             if res.get("ok"):
                 self._state = STATE_RUNNING
-                # 自动打开浏览器
                 if self._should_auto_open():
                     info = self._resolve_paths()
                     self._open_url("http://%s:%s/" % (info["display_host"], info["port"]))
@@ -721,7 +706,6 @@ class WebuiPage(BasePage):
         """是否启动后自动打开浏览器 (browser_open_mode != disable)."""
         mode = self._webui_options().get("browser_open_mode")
         if mode is None:
-            # 兼容老字段 auto_open_browser
             return bool(self._webui_options().get("auto_open_browser", False))
         return mode != "disable"
 
@@ -742,7 +726,6 @@ class WebuiPage(BasePage):
                         self.app.logger.warning("用指定浏览器打开失败: %s, 回退默认", e)
                     except Exception:
                         pass
-            # 路径无效或失败 -> 回退默认浏览器
         try:
             webbrowser.open(url)
         except Exception as e:
@@ -750,6 +733,11 @@ class WebuiPage(BasePage):
                 self.app.logger.warning("打开浏览器失败: %s", e)
             except Exception:
                 pass
+
+    def _on_open_browser(self):
+        """打开网页按钮."""
+        info = self._resolve_paths()
+        self._open_url("http://%s:%s/" % (info["display_host"], info["port"]))
 
     def _stop_webui(self):
         if self._pm is None:
@@ -868,24 +856,107 @@ class WebuiPage(BasePage):
         self._deps_cache_result = None
         self._refresh_state()
 
-    # ---------------- 日志 ----------------
-    def _refresh_log(self):
-        log_path = Path(self.app._cwd) / "launcher" / "webui.log" if hasattr(self.app, "_cwd") else Path("launcher/webui.log")
-        if not log_path.exists():
-            self._log_view.setPlainText("# 日志文件不存在 (WebUI工作台还没启动过或路径未配置)\n")
+    # ---------------- 日志 (实时 tail, 复刻 LogViewerPage) ----------------
+    def _resolve_log_path(self) -> Path:
+        try:
+            cwd = Path(getattr(self.app, "_cwd", ".") or ".")
+        except Exception:
+            cwd = Path(".")
+        return cwd / "launcher" / "webui.log"
+
+    def showEvent(self, event):
+        """页面首次显示时按需加载最近历史 (之后靠 tailer 跟随)."""
+        super().showEvent(event)
+        if not self._history_loaded:
+            self._history_loaded = True
+            try:
+                self._load_recent_history()
+            except Exception:
+                pass
+
+    def _load_recent_history(self):
+        """读日志文件最后 N 行批量填进视图 (复刻 LogViewerPage)."""
+        path = self._log_path
+        if path is None:
             return
         try:
-            with log_path.open("r", encoding="utf-8", errors="ignore") as f:
-                lines = f.readlines()
-            tail = lines[-200:]
-            self._log_view.setPlainText("".join(tail))
-            sb = self._log_view.verticalScrollBar()
-            sb.setValue(sb.maximum())
-        except Exception as e:
-            self._log_view.setPlainText("# 读取日志失败: %s\n" % e)
+            lines = read_tail_lines(path, _RECENT_HISTORY_LINES)
+        except Exception:
+            return
+        for line in lines:
+            self._enqueue_batch(line)
+
+    def _start_log_tail(self) -> None:
+        """启动 tailer (从 EOF 跟新行). 复刻 LogViewerPage.start_tailing."""
+        self._log_path = self._resolve_log_path()
+        if self._log_path is None:
+            return
+        if self._tailer is not None:
+            return
+        self._tailer = LogTailer(
+            self._log_path,
+            on_line=self._on_line_from_tailer,
+            start_from_beginning=False,
+        )
+        # 每次启动用全新 emitter (1:1 与 tailer 生命周期), 避免 disconnect 静默失败导致重复渲染
+        self._emitter = _LineEmitter()
+        self._emitter.line_received.connect(
+            self._on_line_main,
+            QtCore.Qt.QueuedConnection | QtCore.Qt.UniqueConnection,
+        )
+        self._tailer.start()
+
+    def _stop_log_tail(self) -> None:
+        """停止 tailer (清 tailer + emitter 引用). 复刻 LogViewerPage.stop_tailing."""
+        if self._tailer is not None:
+            try:
+                self._tailer.stop()
+            except Exception:
+                pass
+            self._tailer = None
+        self._emitter = None
+
+    def _on_line_from_tailer(self, line: str) -> None:
+        """tailer 线程回调: 通过 signal 投到 UI 线程. stop 后丢弃尾包."""
+        emitter = self._emitter
+        if emitter is None:
+            return
+        emitter.line_received.emit(line)
+
+    def _on_line_main(self, line: str) -> None:
+        """UI 线程: 入批量缓冲 (50ms 定时器统一 flush)."""
+        self._enqueue_batch(line)
+
+    def _enqueue_batch(self, line) -> None:
+        """行入缓冲, 启动 50ms 定时器统一 flush (复刻 LogViewerPage)."""
+        if line is not None:
+            self._batch_buffer.append(line)
+        if self._batch_timer is None:
+            self._batch_timer = QtCore.QTimer(self)
+            self._batch_timer.setSingleShot(True)
+            self._batch_timer.timeout.connect(self._flush_batch)
+        if not self._batch_timer.isActive():
+            self._batch_timer.start(_BATCH_INTERVAL_MS)
+
+    def _flush_batch(self) -> None:
+        """把缓冲行一次性 insertText + 滚到底 (一次 DOM 写入, 复刻 LogViewerPage)."""
+        if not self._batch_buffer:
+            return
+        text = "\n".join(self._batch_buffer)
+        self._batch_buffer.clear()
+        cursor = self._log_view.textCursor()
+        cursor.movePosition(QtGui.QTextCursor.End)
+        cursor.insertText(text + "\n")
+        bar = self._log_view.verticalScrollBar()
+        if bar is not None:
+            bar.setValue(bar.maximum())
+
+    def _on_clear_log(self):
+        """清空日志视图."""
+        self._log_view.clear()
 
     def _open_log_file(self):
-        log_path = Path(self.app._cwd) / "launcher" / "webui.log" if hasattr(self.app, "_cwd") else Path("launcher/webui.log")
+        log_path = self._resolve_log_path()
         try:
             if sys.platform == "win32":
                 os.startfile(str(log_path.parent))
@@ -901,6 +972,12 @@ class WebuiPage(BasePage):
             # env 换了, py/webui_path 可能变, 失效探测缓存
             self._deps_cache_key = None
             self._deps_cache_result = None
+            # 日志 tailer 重定向到新路径 (复刻 qt_app 对 LogViewerPage 的处理)
+            self._stop_log_tail()
+            self._history_loaded = False
+            self._log_view.clear()
+            self._log_path = self._resolve_log_path()
+            self._start_log_tail()
             self._refresh_state()
         except Exception:
             pass

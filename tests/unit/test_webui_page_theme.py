@@ -49,6 +49,15 @@ def _make_app(cwd, webui_path, py_path, webui_options=None):
     return app
 
 
+def _safe_stop_tailer(page):
+    """测试清理: 停掉 page 的日志 tailer 线程, 避免泄漏."""
+    try:
+        if hasattr(page, "_stop_log_tail"):
+            page._stop_log_tail()
+    except Exception:
+        pass
+
+
 class _Fixture(unittest.TestCase):
     @classmethod
     def setUpClass(cls):
@@ -65,6 +74,8 @@ class _Fixture(unittest.TestCase):
             page._state_check_timer.stop()
         except Exception:
             pass
+        # 停掉日志 tailer 线程, 避免测试间线程泄漏/污染
+        self.addCleanup(lambda: _safe_stop_tailer(page))
         return page, app
 
     def _scaffold(self, theme_manager, webui_options=None):
@@ -214,6 +225,57 @@ class TestUpdateButton(_Fixture):
         page, app, _ = self._make_page(webui_path, py, ThemeManager(dark=True)) + (webui_path,)
         page._update_ui_for_state()
         self.assertFalse(page._btn_update.isEnabled())
+
+
+class TestNewLayout(_Fixture):
+    """新左右布局 + 打开网页按钮 + 日志实时化."""
+
+    def test_open_button_exists_and_disabled_until_running(self):
+        """新增「打开网页」按钮存在, 且仅在 running 时可用."""
+        page, app, _ = self._scaffold(ThemeManager(dark=True))
+        # ready 状态: 打开网页禁用
+        page._update_ui_for_state()
+        self.assertFalse(page._btn_open.isEnabled(), "ready 时打开网页应禁用")
+        # 模拟 running
+        page._state = wp_module.STATE_RUNNING
+        page._update_ui_for_state()
+        self.assertTrue(page._btn_open.isEnabled(), "running 时打开网页应可用")
+
+    def test_no_service_info_panel(self):
+        """服务信息面板已删除 (无 _info_* 控件, 无 _update_info_panel 方法)."""
+        page, app, _ = self._scaffold(ThemeManager(dark=True))
+        for attr in ("_info_port", "_info_pid", "_info_url", "_info_env", "_info_since"):
+            self.assertFalse(hasattr(page, attr), "服务信息控件 %s 应已删除" % attr)
+        self.assertFalse(hasattr(page, "_update_info_panel"), "_update_info_panel 应已删除")
+
+    def test_log_view_max_lines(self):
+        """日志控件 maxBlockCount 对齐实时日志页 (5000)."""
+        page, app, _ = self._scaffold(ThemeManager(dark=True))
+        self.assertEqual(page._log_view.document().maximumBlockCount(), 5000)
+
+    def test_log_tailer_started_on_init(self):
+        """页面构造时启动日志 tailer (实时 tail, 不再手动刷新)."""
+        page, app, _ = self._scaffold(ThemeManager(dark=True))
+        self.assertIsNotNone(page._tailer, "tailer 应在构造时启动")
+        self.assertIsNotNone(page._log_path)
+
+    def test_log_tailer_restart_on_env_switch(self):
+        """env 切换时 tailer 重定向到新路径 (stop + restart)."""
+        page, app, _ = self._scaffold(ThemeManager(dark=True))
+        old_tailer = page._tailer
+        page.refresh_after_env_switch()
+        self.assertIsNotNone(page._tailer, "env 切换后 tailer 应重启")
+        self.assertIsNot(old_tailer, page._tailer, "应是新的 tailer 实例")
+
+    def test_batch_flush_appends_lines(self):
+        """_enqueue_batch + _flush_batch 把行追加到日志视图."""
+        page, app, _ = self._scaffold(ThemeManager(dark=True))
+        page._log_view.clear()
+        page._enqueue_batch("line1")
+        page._enqueue_batch("line2")
+        page._flush_batch()
+        self.assertIn("line1", page._log_view.toPlainText())
+        self.assertIn("line2", page._log_view.toPlainText())
 
 
 if __name__ == "__main__":
