@@ -247,12 +247,20 @@ def test_stop_kills_real_process_via_pidfile(fake_app):
     assert res["ok"] is True
     pid = res["pid"]
     assert _is_pid_alive(pid)
+    # 保留被丢弃的 Popen 引用: 测试末尾 poll() 一下, 让 Popen 刷新 returncode,
+    # 避免 GC 时 __del__ 误报 "subprocess still running" (-W error 下 ResourceWarning).
+    dropped_popen = pm.webui_process
     pm.webui_process = None
     stop_res = pm.stop_webui(timeout=5.0)
     assert stop_res["ok"] is True
     assert stop_res["killed"] is True
     time.sleep(0.5)
     assert not _is_pid_alive(pid)
+    if dropped_popen is not None:
+        try:
+            dropped_popen.poll()  # 子进程已被 taskkill; poll 刷新 returncode, 清掉 ResourceWarning 源
+        except Exception:
+            pass
 
 
 def test_double_stop_is_idempotent(fake_app):

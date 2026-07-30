@@ -61,6 +61,7 @@ class WebuiProcessManager:
         self.webui_process: Optional[subprocess.Popen] = None
         self._stopping = False
         self._log_file_handle: Optional[Any] = None
+        self._drain_thread: Optional[Any] = None
 
     # ---------------- pidfile ----------------
     def _pidfile_path(self) -> Path:
@@ -234,11 +235,15 @@ class WebuiProcessManager:
             # drain thread: 把 stdout 写到 log file
             log_path_for_drain = log_path
             def _drain_and_log():
+                # 持有 stream 引用, 遍历到 EOF 后在 finally 显式关闭, 避免留下
+                # unclosed BufferedReader/FileIO (-W error 下会报 ResourceWarning).
+                stream = None
                 try:
                     proc = self.webui_process
                     if proc is None or proc.stdout is None:
                         return
-                    for raw in proc.stdout:
+                    stream = proc.stdout
+                    for raw in stream:
                         try:
                             with open(log_path_for_drain, "ab") as lf:
                                 lf.write(raw)
@@ -246,13 +251,20 @@ class WebuiProcessManager:
                             pass
                 except Exception:
                     pass
+                finally:
+                    if stream is not None:
+                        try:
+                            stream.close()
+                        except Exception:
+                            pass
 
             import threading as _threading
-            _threading.Thread(
+            self._drain_thread = _threading.Thread(
                 target=_drain_and_log,
                 daemon=True,
                 name="webui_drain",
-            ).start()
+            )
+            self._drain_thread.start()
         except Exception as e:
             return {
                 "ok": False, "pid": None, "port": port, "url": "",
@@ -407,6 +419,15 @@ class WebuiProcessManager:
         except Exception:
             pass
 
+        # 6. 等 drain thread 收尾 (它在 stream.close() 后会自然退出; 给短超时防卡).
+        # 进程已停 -> stdout 读到 EOF -> drain 循环结束 -> finally 关 stream -> 线程退出.
+        if self._drain_thread is not None:
+            try:
+                self._drain_thread.join(timeout=2.0)
+            except Exception:
+                pass
+            self._drain_thread = None
+
         self.webui_process = None
 
         return {
@@ -445,8 +466,12 @@ class WebuiProcessManager:
         return {
             "running": process_running,
             "pid": pd.get("pid") if pd else (
-                # pidfile 缺失时, 若 Popen 句柄活, 回退到句柄 PID (避免 running=True 但 pid=None)
-                self.webui_process.pid if (self.webui_process is not None) else None
+                # pidfile 缺失时, 仅当 Popen 句柄仍存活才回退到句柄 PID.
+                # 句柄存在但进程已退出 (poll() 非 None) 不算, 避免返回 running=False + 旧 PID.
+                self.webui_process.pid
+                if (self.webui_process is not None
+                    and self.webui_process.poll() is None)
+                else None
             ),
             "port": port,
             "url": f"http://127.0.0.1:{port}",

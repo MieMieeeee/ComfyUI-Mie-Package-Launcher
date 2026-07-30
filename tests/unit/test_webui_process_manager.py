@@ -80,23 +80,56 @@ def test_status_port_occupied_by_other_when_no_process(tmp_path):
     """无 pidfile/Popen, 但配置端口被其他服务监听 -> running=False, http_reachable=True (#1).
 
     http_reachable 无条件探测: 端口可能被其他进程占用, 不能假设"没进程就端口不通".
+    绑端口 0 拿临时端口 (#3): 避免固定 8199 在本机 webui 在跑时 Address already in use.
     """
     import socket
     from core.webui_process_manager import WebuiProcessManager
-    app = _App(cwd=tmp_path)
+
+    # 拿一个 OS 分配的空闲端口, 同步写进 app 配置 (pm.status 读 config.port)
+    sock_holder = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+    sock_holder.bind(("127.0.0.1", 0))
+    free_port = sock_holder.getsockname()[1]
+    sock_holder.close()
+
+    cfg = {
+        "environments": [{"id": "env_a", "comfyui_root": str(tmp_path), "python_path": "python"}],
+        "active_env_id": "env_a",
+        "webui_options": {"port": str(free_port), "display_host": "127.0.0.1"},
+    }
+    app = _App(cwd=tmp_path, cfg=cfg)
     pm = WebuiProcessManager(app)
 
-    # 在 8199 起一个真实监听 socket (模拟"别的进程占了配置端口")
+    # 在 free_port 起一个真实监听 socket (模拟"别的进程占了配置端口")
     srv = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
     srv.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
-    srv.bind(("127.0.0.1", 8199))
+    srv.bind(("127.0.0.1", free_port))
     srv.listen(5)
     try:
         s = pm.status()
         assert s["running"] is False  # 我们没进程
         assert s["http_reachable"] is True  # 但端口确实有东西在监听
+        assert s["port"] == free_port
     finally:
         srv.close()
+
+
+def test_status_exited_popen_returns_no_pid(tmp_path):
+    """Popen 句柄仍在但进程已退出 (poll 非 None) -> running=False, pid=None (#1).
+
+    回退 PID 必须只在 Popen 存活 (poll() is None) 时生效, 否则会返 running=False + 旧 PID.
+    """
+    from core.webui_process_manager import WebuiProcessManager
+    app = _App(cwd=tmp_path)
+    pm = WebuiProcessManager(app)
+
+    class _ExitedPopen:
+        pid = 99999
+
+        def poll(self): return 1  # 进程已退出 (退出码 1)
+    pm.webui_process = _ExitedPopen()
+    s = pm.status()
+    assert s["running"] is False  # 进程已退出
+    assert s["pid"] is None  # 不回退旧 PID (句柄在但进程死了)
 
 
 def test_stop_when_no_pidfile(tmp_path):
