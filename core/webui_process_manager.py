@@ -322,6 +322,9 @@ class WebuiProcessManager:
         # 7. spawn. 用 PIPE + 自定义 drain 线程, 把 stdout 写到 log file.
         # Python 3.13 _readerthread cp1252 异常已被 stderr 过滤吞, 这里不重搞 drain.
         try:
+            # win32 必须显式 CREATE_NO_WINDOW, 否则 GUI 模式下会弹黑色 cmd 窗口.
+            # (Popen 不会自动加这个 flag; installer/dependencies 走 run_hidden 也各自显式设.)
+            creationflags = subprocess.CREATE_NO_WINDOW if os.name == "nt" else 0
             self.webui_process = subprocess.Popen(
                 cmd,
                 stdin=subprocess.DEVNULL,
@@ -330,10 +333,8 @@ class WebuiProcessManager:
                 cwd=run_cwd,
                 env=env,
                 close_fds=True,
+                creationflags=creationflags,
             )
-            if os.name == "nt":
-                # 加 CREATE_NO_WINDOW (Popen 已默认会加, 但显式一遍更稳)
-                pass
 
             # drain thread: 把 stdout 写到 log file
             log_path_for_drain = log_path
@@ -488,6 +489,10 @@ class WebuiProcessManager:
                             ["taskkill", "/PID", str(opid), "/F"],
                             capture_output=True, text=True, timeout=5,
                         )
+                    else:
+                        # POSIX: 没有 taskkill, 走 SIGTERM
+                        import signal
+                        os.kill(int(opid), signal.SIGTERM)
                     port_killed = True
                 except Exception:
                     pass

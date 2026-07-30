@@ -84,12 +84,9 @@ def build_webui_launch_params(
         "from app.flask_app import main;"
         "main(*" + repr(extra_pieces) + ")"
     )
+    # cmd 恒为 [py, "-c", inner]; extra_args 只通过 inner 里的 main(*[...]) 传入,
+    # 不再 append 到 cmd 尾部 (那会让 sys.argv 和 main() 参数双份, 解析冲突).
     cmd = [str(py), "-c", inner]
-    if extra_args_str:
-        try:
-            cmd.extend(shlex.split(extra_args_str))
-        except Exception:
-            cmd.extend(extra_args_str.split())
 
     # 4. env: 基于系统 + launcher 上下文
     env = os.environ.copy()

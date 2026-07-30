@@ -37,6 +37,9 @@ def test_basic_cmd_and_env():
     app = _make_app()
     cmd, env, cwd, py, webui_root = build_webui_launch_params(app)
     assert cmd[0].endswith("python.exe")
+    # cmd 恒为 [py, "-c", inner], extra_args 只走 inner 里的 main(*[...]); 不再 append 到 cmd.
+    # 锁死长度 3, 防止 extra_args 双重传参回归 (一度被 append 到 cmd 尾部变成 5).
+    assert len(cmd) == 3
     # cmd[1] = "-c", cmd[2] 是 python -c 后的 inner 脚本
     assert cmd[1] == "-c"
     inner = cmd[2]
