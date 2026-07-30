@@ -508,3 +508,95 @@ class TestUpdatePipIniBuiltinMirrors:
         content = pip_ini.read_text(encoding="utf-8")
         assert "proxy = http://proxy.local:8080" in content
         assert PYPI_HUAWEICLOUD_URL in content
+
+
+class _StrVar:
+    """tk Variable 替身: 暴露 .get()."""
+    def __init__(self, v):
+        self._v = v
+    def get(self):
+        return self._v
+
+
+class _ExplodingVar:
+    """.get() 永远抛异常 (模拟 tk 变量在错误线程被读)."""
+    def get(self):
+        raise RuntimeError("tk var not readable here")
+
+
+class _App:
+    """最小 app 替身, 按需带 pypi_proxy_mode / pypi_proxy_url."""
+    def __init__(self, mode=None, url=None):
+        if mode is not None:
+            self.pypi_proxy_mode = mode
+        if url is not None:
+            self.pypi_proxy_url = url
+
+
+class TestResolvePypiIndexUrl:
+    """Tests for utils.net.resolve_pypi_index_url (#7)."""
+
+    def test_aliyun_returns_builtin_url(self):
+        from utils.net import resolve_pypi_index_url, PYPI_ALIYUN_URL
+        app = _App(mode=_StrVar("aliyun"))
+        assert resolve_pypi_index_url(app) == PYPI_ALIYUN_URL
+
+    def test_tsinghua_returns_builtin_url(self):
+        from utils.net import resolve_pypi_index_url, PYPI_TSINGHUA_URL
+        app = _App(mode=_StrVar("tsinghua"))
+        assert resolve_pypi_index_url(app) == PYPI_TSINGHUA_URL
+
+    def test_huaweicloud_returns_builtin_url(self):
+        from utils.net import resolve_pypi_index_url, PYPI_HUAWEICLOUD_URL
+        app = _App(mode=_StrVar("huaweicloud"))
+        assert resolve_pypi_index_url(app) == PYPI_HUAWEICLOUD_URL
+
+    def test_custom_returns_proxy_url(self):
+        from utils.net import resolve_pypi_index_url
+        app = _App(mode=_StrVar("custom"), url=_StrVar("https://my.mirror/simple/"))
+        assert resolve_pypi_index_url(app) == "https://my.mirror/simple/"
+
+    def test_custom_strips_whitespace_from_url(self):
+        """只含空格 / 带首尾空格的 custom URL 应被 strip."""
+        from utils.net import resolve_pypi_index_url
+        # 带首尾空格 -> strip 后用
+        app = _App(mode=_StrVar("custom"), url=_StrVar("  https://my.mirror/simple/  "))
+        assert resolve_pypi_index_url(app) == "https://my.mirror/simple/"
+        # 全是空格 -> 视为空, 回退内置 (custom 模式无内置 -> None)
+        app2 = _App(mode=_StrVar("custom"), url=_StrVar("   "))
+        assert resolve_pypi_index_url(app2) is None
+
+    def test_none_returns_none(self):
+        from utils.net import resolve_pypi_index_url
+        app = _App(mode=_StrVar("none"))
+        assert resolve_pypi_index_url(app) is None
+
+    def test_unknown_mode_returns_none(self):
+        from utils.net import resolve_pypi_index_url
+        app = _App(mode=_StrVar("totally-unknown-mode"))
+        assert resolve_pypi_index_url(app) is None
+
+    def test_missing_mode_attr_returns_none(self):
+        """app 完全没 pypi_proxy_mode 属性 -> 安全返 None."""
+        from utils.net import resolve_pypi_index_url
+        app = _App()  # 不设任何属性
+        assert resolve_pypi_index_url(app) is None
+
+    def test_mode_get_raising_returns_none(self):
+        """.get() 抛异常 -> 安全回退 None."""
+        from utils.net import resolve_pypi_index_url
+        app = _App(mode=_ExplodingVar())
+        assert resolve_pypi_index_url(app) is None
+
+    def test_custom_missing_url_attr_returns_none(self):
+        """custom 模式但 app 没 pypi_proxy_url -> None (custom 无内置 URL)."""
+        from utils.net import resolve_pypi_index_url
+        app = _App(mode=_StrVar("custom"))  # 不设 url
+        assert resolve_pypi_index_url(app) is None
+
+    def test_custom_url_get_raising_falls_back_safely(self):
+        """custom + url.get() 抛异常 -> 不抛, 回退 (custom 无内置 -> None)."""
+        from utils.net import resolve_pypi_index_url
+        app = _App(mode=_StrVar("custom"), url=_ExplodingVar())
+        # 不抛异常即算通过; custom 无内置 URL 故 None
+        assert resolve_pypi_index_url(app) is None

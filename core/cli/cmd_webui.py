@@ -253,17 +253,9 @@ def _do_install(app, args) -> dict:
             "exit_code": 0,
         }
 
-    # 走 pypi proxy
-    from utils.net import get_pypi_index_url_for_mode
-    pypi_mode = (getattr(app, "pypi_proxy_mode", None) or type("V", (), {"get": lambda self: "none"})()).get()
-    idx_url = get_pypi_index_url_for_mode(pypi_mode)
-    if pypi_mode == "custom":
-        try:
-            u = (getattr(app, "pypi_proxy_url", None) or type("V", (), {"get": lambda self: ""})()).get()
-            if u:
-                idx_url = u
-        except Exception:
-            pass
+    # 走 pypi proxy (统一走 utils.net.resolve_pypi_index_url)
+    from utils.net import resolve_pypi_index_url
+    idx_url = resolve_pypi_index_url(app)
 
     dep_res = install_webui_requirements(Path(py), req, index_url=idx_url)
     return {
@@ -300,22 +292,8 @@ def _do_setup(app, args) -> dict:
     if not py or not Path(py).exists():
         return {"ok": False, "error": "python 不可用: " + str(py), "exit_code": 1}
 
-    from utils.net import get_pypi_index_url_for_mode
-    pypi_mode = "none"
-    try:
-        v = getattr(app, "pypi_proxy_mode", None)
-        if v:
-            pypi_mode = v.get() or "none"
-    except Exception:
-        pypi_mode = "none"
-    idx_url = get_pypi_index_url_for_mode(pypi_mode)
-    if pypi_mode == "custom":
-        try:
-            u = getattr(app, "pypi_proxy_url", None)
-            if u:
-                idx_url = u.get() or idx_url
-        except Exception:
-            pass
+    from utils.net import resolve_pypi_index_url
+    idx_url = resolve_pypi_index_url(app)
 
     dep_res = install_webui_requirements(Path(py), req, index_url=idx_url)
     return {

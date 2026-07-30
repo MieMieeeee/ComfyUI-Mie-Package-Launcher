@@ -35,6 +35,35 @@ def get_pypi_index_url_for_mode(mode: str) -> str | None:
     return None
 
 
+def resolve_pypi_index_url(app) -> str | None:
+    """从 app 的 pypi proxy 配置解析 pypi index URL.
+
+    统一 webui install / setup / GUI 三处的解析逻辑:
+    - aliyun / tsinghua / huaweicloud -> 对应内置 URL
+    - custom -> 读 app.pypi_proxy_url.get() (去首尾空格, 空则回退内置)
+    - none / 未知 / 缺属性 / .get() 抛异常 -> None
+
+    app.pypi_proxy_mode / pypi_proxy_url 是 tk Variable (有 .get()), 本函数对
+    属性缺失和 .get() 抛异常都做防御, 安全回退到 None.
+    """
+    try:
+        v = getattr(app, 'pypi_proxy_mode', None)
+        mode = (v.get() or 'none').strip() if v else 'none'
+    except Exception:
+        mode = 'none'
+    idx_url = get_pypi_index_url_for_mode(mode)
+    if mode == PYPI_MODE_CUSTOM:
+        try:
+            uv = getattr(app, 'pypi_proxy_url', None)
+            if uv:
+                u = (uv.get() or '').strip()
+                if u:
+                    idx_url = u
+        except Exception:
+            pass
+    return idx_url
+
+
 def ensure_trailing_slash(url: str) -> str:
     u = (url or '').strip()
     if not u:

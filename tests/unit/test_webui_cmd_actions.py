@@ -452,8 +452,9 @@ def test_do_setup_with_python_missing(tmp_path):
 
 
 def test_do_setup_with_pypi_proxy():
-    """pypi proxy 走 app.pypi_proxy_mode (从 launcher config 读)."""
+    """pypi proxy 走 app.pypi_proxy_mode (从 launcher config 读) 且 index_url 正确透传."""
     from core.cli import cmd_webui
+    from utils.net import PYPI_HUAWEICLOUD_URL
     import tempfile
     with tempfile.TemporaryDirectory() as tmp:
         tmp = Path(tmp)
@@ -466,6 +467,8 @@ def test_do_setup_with_pypi_proxy():
             "environments": [{"id": "env_a", "comfyui_root": str(tmp), "python_path": sys.executable}],
             "active_env_id": "env_a",
         })
+        # 覆盖 mode 为 huaweicloud, 验证 index_url 经 resolve_pypi_index_url 解析后透传
+        app.pypi_proxy_mode.get = lambda: "huaweicloud"
         app._cwd = str(tmp)
         with patch("core.webui_dependencies.install_webui_requirements",
                    return_value={"ok": True, "deps_ok": True, "deps_installed": [], "deps_satisfied": ["flask"]}) as mock_install:
@@ -476,6 +479,8 @@ def test_do_setup_with_pypi_proxy():
         call = mock_install.call_args
         assert call.args[0] is not None  # py
         assert call.args[1] is not None  # req
+        # index_url 必须是 huaweicloud 内置 URL (锁死 resolve_pypi_index_url 透传)
+        assert call.kwargs.get("index_url") == PYPI_HUAWEICLOUD_URL
 
 
 # === _do_update ===

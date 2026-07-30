@@ -44,7 +44,7 @@ def test_status_no_pidfile(tmp_path):
 
 
 def test_status_with_alive_pid_but_no_http(tmp_path):
-    """有 pidfile 指向活 PID, 端口没监听 -> running=False (http_reachable=False)."""
+    """有 pidfile 指向活 PID, 端口没监听 -> running=True (进程在), http_reachable=False (HTTP 没就绪)."""
     from core.cli.webui_pidfile import write
     from core.webui_process_manager import WebuiProcessManager
     app = _App(cwd=tmp_path)
@@ -54,8 +54,24 @@ def test_status_with_alive_pid_but_no_http(tmp_path):
     s = pm.status()
     assert s["pid"] == os.getpid()
     assert s["port"] == 8199
-    assert s["running"] is False  # http 不可达
-    assert s["http_reachable"] is False
+    # 新语义 (#9): running 表进程存在 (含启动中), http_reachable 独立表达 HTTP 就绪度.
+    assert s["running"] is True  # 进程在跑 (pidfile 活 PID)
+    assert s["http_reachable"] is False  # 但 HTTP 端口没监听
+
+
+def test_status_popen_alive_no_pidfile(tmp_path):
+    """Popen 句柄活但无 pidfile -> running=True (进程在), http_reachable=False."""
+    from core.webui_process_manager import WebuiProcessManager
+    app = _App(cwd=tmp_path)
+    pm = WebuiProcessManager(app)
+
+    class _FakePopen:
+        def poll(self): return None
+    pm.webui_process = _FakePopen()
+    s = pm.status()
+    assert s["running"] is True  # Popen 句柄活 -> 进程在
+    assert s["http_reachable"] is False  # 端口没真监听
+    assert s["pid"] is None  # 没 pidfile
 
 
 def test_stop_when_no_pidfile(tmp_path):

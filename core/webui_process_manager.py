@@ -43,115 +43,13 @@ def _webui_log_path(app: Any) -> Path:
     return cwd / "launcher" / "webui.log"
 
 
-_UNRAISABLE_HOOK_INSTALLED = False
-
-def _install_unraisable_hook() -> None:
-    """把 Python 3.13 的 _readerthread UnicodeDecodeError 吞掉.
-
-    subprocess 在 3.13 上读 stdout/stderr 时按 UTF-8 strict 解码,
-    Windows cp1252 字节 (webui print 出来的中文/emoji) 会触发
-    UnicodeDecodeError. 这是 Python bug (issue 118526 + 121633),
-    跟我们 launcher 本身无关. 走 3 道防线: unraisablehook (async 类) + excepthook (thread 类)
-    + stderr 过滤 (subprocess 直接 print 出来的线程 traceback).
-    """
-    global _UNRAISABLE_HOOK_INSTALLED
-    if _UNRAISABLE_HOOK_INSTALLED:
-        return
-    _UNRAISABLE_HOOK_INSTALLED = True
-    import sys as _sys
-    prev = _sys.unraisablehook
-    def _hook(unraisable):
-        try:
-            ex = unraisable.exc_value
-        except Exception:
-            ex = None
-        msg = str(ex) if ex else ""
-        if isinstance(ex, UnicodeDecodeError):
-            # 只吞 cp1252 / utf-8 解码类的 unraisable
-            return
-        # 其它走原 hook
-        try:
-            if prev:
-                prev(unraisable)
-        except Exception:
-            pass
-    _sys.unraisablehook = _hook
-
-
-def _install_excepthook() -> None:
-    """sys.excepthook: 过滤 subprocess._readerthread 的 UnicodeDecodeError 输出.
-
-    Python 3.13 线程里的 uncaught exception 走 sys.excepthook.
-    让 _readerthread 那个 cp1252 字节异常安静下来 (unraisablehook 不够, 还得拦 excepthook).
-    """
-    import sys as _sys
-    prev = _sys.excepthook
-    def _hook(exc_type, exc_value, exc_tb):
-        if exc_type is UnicodeDecodeError:
-            return  # 吞
-        try:
-            prev(exc_type, exc_value, exc_tb)
-        except Exception:
-            pass
-    _sys.excepthook = _hook
-
-
-def _install_stderr_filter() -> None:
-    """把 sys.stderr 整个换成有过滤的 wrapper, 屏蔽 subprocess._readerthread
-    UnicodeDecodeError traceback (Python 3.13 内部直接 print, 走 sys.stderr.write
-    钩子拦不住).
-
-    做法: 包一层 TextIO-like, 写时检测 _readerthread + UnicodeDecodeError 模式,
-    命中时吞掉 (返 0). 其它照常 write.
-    """
-    import sys as _sys
-    _real_stderr = _sys.stderr
-
-    class _FilteredStderr:
-        def __init__(self, real):
-            self._real = real
-            self._in_traceback = False
-            self._line = 0
-
-        def _should_suppress(self, s):
-            try:
-                text = s if isinstance(s, str) else s.decode("utf-8", errors="replace")
-            except Exception:
-                return False
-            if text.startswith("Exception in thread") and ("_readerthread" in text or "UnicodeDecodeError" in text):
-                self._in_traceback = True
-                self._line = 0
-                return True
-            if self._in_traceback:
-                self._line += 1
-                if text.strip() == "" or text.startswith("Exception in thread") or self._line > 80:
-                    self._in_traceback = False
-                return True
-            return False
-
-        def write(self, s):
-            if self._should_suppress(s):
-                return 0
-            return self._real.write(s)
-
-        def flush(self):
-            try:
-                self._real.flush()
-            except Exception:
-                pass
-
-        def __getattr__(self, name):
-            # 其他属性 (fileno, isatty, etc) 透传给真的 stderr
-            return getattr(self._real, name)
-
-    _sys.stderr = _FilteredStderr(_real_stderr)
-
-
-# 模块加载时立即生效
-_install_unraisable_hook()
-_install_excepthook()
-_install_stderr_filter()
-
+# 历史说明: 此处曾装过 3 道全局 hook (unraisablehook / sys.excepthook / sys.stderr
+# 猴补丁) 想吞掉 subprocess._readerthread 在 Python 3.13 上读 cp1252 字节时的
+# UnicodeDecodeError (CPython issue 118526 / 121633). 但子线程未捕获异常走的是
+# threading.excepthook 而非 sys.excepthook, 所以那 3 道 hook 对目标无效, 徒增全局
+# 副作用, 已删除. 子进程 Python 自身的 stdout encoding 由 spawn env 里的
+# PYTHONIOENCODING=utf-8 + PYTHONLEGACYWINDOWSSTDIO=1 兜底 (见 build_webui_launch_params);
+# 残留的 readerthread cp1252 warning 属已知 cosmetic 噪声.
 
 
 class WebuiProcessManager:
@@ -524,9 +422,14 @@ class WebuiProcessManager:
 
     # ---------------- status ----------------
     def status(self) -> dict:
-        """查询 WebUI 状态 (pidfile + http probe)."""
+        """查询 WebUI 状态 (进程层 + HTTP 探活, 分开表达).
+
+        语义分层 (跟 is_running / http_reachable 对齐):
+        - running: 进程是否存在 (pidfile 活 / Popen 句柄活), 含 Flask 启动中.
+        - http_reachable: HTTP 端口是否已就绪; 仅当进程在跑时才探 (避免对不存在的进程探).
+        启动中场景: running=True, http_reachable=False.
+        """
         from core.cli.webui_pidfile import read as read_pidfile
-        import socket
 
         start_t = time.time()
         pd = read_pidfile(self._pidfile_path())
@@ -537,16 +440,12 @@ class WebuiProcessManager:
         except Exception:
             port = 8199
 
-        http_ok = False
-        try:
-            with socket.create_connection(("127.0.0.1", port), timeout=1.0):
-                http_ok = True
-        except Exception:
-            http_ok = False
+        process_running = self.is_running()
+        # 进程在跑才探 HTTP; 没进程时端口必然不通, 不做无意义探测.
+        http_ok = self.is_http_reachable(port, timeout=1.0) if process_running else False
 
-        running = (pd is not None) and http_ok
         return {
-            "running": running,
+            "running": process_running,
             "pid": pd.get("pid") if pd else None,
             "port": port,
             "url": f"http://127.0.0.1:{port}",

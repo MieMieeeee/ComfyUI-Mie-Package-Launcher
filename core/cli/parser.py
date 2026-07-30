@@ -199,7 +199,7 @@ Exit codes:
   0  success
   1  general error (path missing / IO / timeout)
   2  start 拒绝重复 (webui 已在跑)
-  3  status 未在跑
+  3  status 进程未在跑
   6  webui start 时检测到 ComfyUI 未运行 (用了 --with-comfyui)
   7  webui 路径未安装 (用 install 子动作拉)
   8  webui 依赖缺失 (用 setup 子动作装)
@@ -221,11 +221,11 @@ Output schema (default human / --json):
     killed       (bool)  - 是否真的杀到进程
 
   status:
-    running        (bool) - webui 是否在跑
+    running        (bool) - webui 进程是否存在 (pidfile/Popen 活, 含 Flask 启动中)
     pid            (int)  - 跟踪到的 PID, null 时无
     port           (int)  - 端口
     url            (str)  - http://127.0.0.1:<port>
-    http_reachable (bool) - HTTP 端口活
+    http_reachable (bool) - HTTP 端口是否已就绪 (启动中时 running=True 但此处 False)
     log_path       (str)  - 启动器日志路径
     since          (str)  - 启动时间 ISO 8601
     env_id         (str)  - 启动时的 env id

@@ -29,7 +29,7 @@ from core.webui_launcher_cmd import build_webui_launch_params
 from core.webui_process_manager import WebuiProcessManager
 from core.webui_dependencies import check_webui_dependencies, install_webui_requirements
 from core.webui_installer import clone_webui, pull_webui
-from utils.net import get_pypi_index_url_for_mode
+from utils.net import resolve_pypi_index_url
 
 
 STATE_NOT_INSTALLED = "not_installed"
@@ -83,6 +83,10 @@ class WebuiPage(BasePage):
         self._state: str = STATE_NOT_INSTALLED
         self._state_check_timer = None
         self._pm: Optional[WebuiProcessManager] = None
+        # 依赖探测缓存: 同一 (py, webui_path) 不重复 spawn 3 个 python 子进程.
+        # 失效点: _after_setup / refresh_after_env_switch (路径或依赖可能变).
+        self._deps_cache_key: Optional[tuple] = None
+        self._deps_cache_result: Optional[dict] = None
         self._setup_ui()
         self._refresh_state()
 
@@ -286,10 +290,16 @@ class WebuiPage(BasePage):
         if not (webui_path / "app" / "flask_app.py").exists():
             return STATE_NOT_INSTALLED
 
-        # 3. python 依赖
+        # 3. python 依赖 (带缓存: 同一 (py, webui_path) 不重复探测)
         if py_path is None or not py_path.exists():
             return STATE_NO_DEPS
-        dep = check_webui_dependencies(py_path)
+        cache_key = (str(py_path), str(webui_path))
+        if self._deps_cache_key == cache_key and self._deps_cache_result is not None:
+            dep = self._deps_cache_result
+        else:
+            dep = check_webui_dependencies(py_path)
+            self._deps_cache_key = cache_key
+            self._deps_cache_result = dep
         if not dep["ok"]:
             return STATE_NO_DEPS
 
@@ -604,22 +614,8 @@ class WebuiPage(BasePage):
             self._refresh_state()
             return
 
-        # 走 pypi proxy
-        pypi_mode = "none"
-        try:
-            v = getattr(self.app, "pypi_proxy_mode", None)
-            if v:
-                pypi_mode = v.get() or "none"
-        except Exception:
-            pypi_mode = "none"
-        idx_url = get_pypi_index_url_for_mode(pypi_mode)
-        if pypi_mode == "custom":
-            try:
-                u = getattr(self.app, "pypi_proxy_url", None)
-                if u and u.get():
-                    idx_url = u.get()
-            except Exception:
-                pass
+        # 走 pypi proxy (统一走 utils.net.resolve_pypi_index_url)
+        idx_url = resolve_pypi_index_url(self.app)
 
         self._state = STATE_STARTING
         self._btn_primary.setText("⏳ 安装依赖中...")
@@ -646,6 +642,9 @@ class WebuiPage(BasePage):
                 self, "依赖安装失败",
                 "pip install 失败: %s\n\n请查看 launcher/webui.log" % (err or "未知"),
             )
+        # 依赖刚装过, 失效探测缓存 (下次 _detect_state 重新探测)
+        self._deps_cache_key = None
+        self._deps_cache_result = None
         self._refresh_state()
 
     def _on_config_clicked(self):
@@ -707,6 +706,9 @@ class WebuiPage(BasePage):
     def refresh_after_env_switch(self):
         """env 切换后刷新 (QtApp.refresh_after_env_switch 调)."""
         try:
+            # env 换了, py/webui_path 可能变, 失效探测缓存
+            self._deps_cache_key = None
+            self._deps_cache_result = None
             self._refresh_state()
         except Exception:
             pass
@@ -751,11 +753,6 @@ class WebuiConfigDialog(QtWidgets.QDialog):
         self._extra_args = QtWidgets.QLineEdit(str(initial.get("extra_args") or ""))
         form_layout.addRow("附加参数 (透传给 app.flask_app):", self._extra_args)
 
-        # pypi proxy mode (from app.config)
-        try:
-            v = getattr(self.app, "pypi_proxy_mode", None) if hasattr(self, "app") else None
-        except Exception:
-            v = None
         # 提示
         info_label = QtWidgets.QLabel(
             "提示: 端口 / 监听 / Git URL / 额外参数写在这里, 依赖安装 / 下载复用现有 "
