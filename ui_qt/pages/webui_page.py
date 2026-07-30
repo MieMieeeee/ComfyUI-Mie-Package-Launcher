@@ -56,8 +56,19 @@ STATE_NOT_INSTALLED = "not_installed"
 STATE_NO_DEPS = "no_deps"
 STATE_READY = "ready"
 STATE_RUNNING = "running"
-STATE_STARTING = "starting"
+STATE_STARTING = "starting"            # WebUI 工作台启动中
 STATE_STOPPING = "stopping"
+STATE_CHECKING = "checking"            # 检测 ComfyUI 是否在跑
+STATE_WAITING_COMFYUI = "waiting_comfyui"  # 等待 ComfyUI 启动就绪
+STATE_DOWNLOADING = "downloading"      # 下载 WebUI 工作台中
+STATE_INSTALLING_DEPS = "installing_deps"  # 安装依赖中
+
+# 所有"中间态"——有后台操作进行中, 按钮禁用, 轮询/刷新不覆盖.
+_BUSY_STATES = frozenset({
+    STATE_CHECKING, STATE_WAITING_COMFYUI,
+    STATE_STARTING, STATE_STOPPING,
+    STATE_DOWNLOADING, STATE_INSTALLING_DEPS,
+})
 
 # 自动打开浏览器三选项 (跟首页 launch_controls_section 一致: disable/default/webbrowser)
 _BROWSER_OPEN_OPTS = [
@@ -125,6 +136,19 @@ class WebuiPage(BasePage):
         self._refresh_state()
         self._start_log_tail()
 
+    def _is_busy(self) -> bool:
+        """是否有后台操作进行中 (启动/停止/检测/下载/装依赖等中间态).
+
+        这些状态期间: 主按钮禁用; 轮询 (_poll_status) 和刷新 (_refresh_state) 不覆盖
+        _state (中间态退出权交给 worker 回调 _after_*); _on_primary_clicked 拒绝重复点击.
+        """
+        return self._state in _BUSY_STATES
+
+    def _set_state(self, state: str) -> None:
+        """切换 _state 并立即刷新 UI (主线程, 文案/可用性统一由 _update_ui_for_state 出)."""
+        self._state = state
+        self._update_ui_for_state()
+
     # ---------------- 主题 helper ----------------
     def _c(self, key: str, default: str = "") -> str:
         """读 theme_manager.colors token (含缺失兜底)."""
@@ -145,6 +169,20 @@ class WebuiPage(BasePage):
             "}"
         )
 
+    def _version_card_style(self) -> str:
+        """版本信息卡片容器 QSS: card_bg + card_border + 圆角 (深浅自适应).
+
+        把版本/配置状态两个条目包成一个视觉整体, 跟右边更新按钮形成"左信息卡 + 右按钮"
+        的平衡结构, 避免更新按钮孤立突兀.
+        """
+        return (
+            "QFrame {"
+            f"  background-color: {self._c('card_bg', '#1F2937')};"
+            f"  border: 1px solid {self._c('card_border', '#374151')};"
+            "  border-radius: 6px;"
+            "}"
+        )
+
     def _label_muted_style(self) -> str:
         return (
             f'font: 9pt "Microsoft YaHei UI"; color: {self._c("label_muted", "#9CA3AF")};'
@@ -153,6 +191,65 @@ class WebuiPage(BasePage):
     def _config_label_style(self) -> str:
         """配置项标签样式 (复刻首页 lbl_style: label_muted + bold)."""
         return f'color: {self._c("label_muted", "#9CA3AF")}; font-weight: bold;'
+
+    def _create_version_item(self, title: str, value: str, icon_str: str):
+        """版本信息卡片条目 (复刻首页 version_section._create_version_item 格式).
+
+        一行: <图标> <标题 :> <值>. 标题 label_muted bold 9pt, 值 text bold 10pt.
+        返回 QFrame; 值标签存 ref 供 update_theme 重应用样式.
+        """
+        card = QtWidgets.QFrame()
+        card.setAttribute(QtCore.Qt.WA_StyledBackground, True)
+        card.setStyleSheet("QFrame { background: transparent; border: none; }")
+
+        hb = QtWidgets.QHBoxLayout(card)
+        hb.setContentsMargins(5, 2, 5, 2)
+        hb.setSpacing(8)
+        hb.setAlignment(QtCore.Qt.AlignCenter)
+
+        icon_lbl = QtWidgets.QLabel(icon_str)
+        icon_lbl.setStyleSheet("font-size: 14pt; background: transparent;")
+        hb.addWidget(icon_lbl)
+
+        t = QtWidgets.QLabel("%s :" % title)
+        t.setStyleSheet(
+            f'color: {self._c("label_muted", "#9CA3AF")};'
+            f' font: bold 9pt "Microsoft YaHei UI"; background: transparent;'
+        )
+        hb.addWidget(t)
+
+        v = QtWidgets.QLabel(value)
+        v.setStyleSheet(
+            f'font: bold 10pt "Segoe UI", "Microsoft YaHei UI";'
+            f' color: {self._c("text", "#E5E7EB")}; background: transparent;'
+        )
+        hb.addWidget(v)
+
+        # 存 ref 供 update_theme 重应用 (值标签可能因状态切 error 色)
+        if not hasattr(self, "_version_value_refs"):
+            self._version_value_refs = []
+        if not hasattr(self, "_version_title_refs"):
+            self._version_title_refs = []
+        self._version_title_refs.append(t)
+        self._version_value_refs.append(v)
+        return card
+
+    def _set_version_item_value(self, card, text: str, is_error: bool = False) -> None:
+        """更新卡片值标签文本 (值标签是 card 里第 3 个子控件)."""
+        try:
+            # HBox 顺序: icon, title, value -> value 是第 3 个 layout item
+            layout = card.layout()
+            if layout is None or layout.count() < 3:
+                return
+            v_lbl = layout.itemAt(2).widget()
+            v_lbl.setText(str(text))
+            color = self._c("error", "#EF4444") if is_error else self._c("text", "#E5E7EB")
+            v_lbl.setStyleSheet(
+                f'font: bold 10pt "Segoe UI", "Microsoft YaHei UI";'
+                f' color: {color}; background: transparent;'
+            )
+        except Exception:
+            pass
 
     # ---------------- 配置读写 (直接读写 config["webui_options"]) ----------------
     def _webui_options(self) -> dict:
@@ -289,19 +386,30 @@ class WebuiPage(BasePage):
         self._btn_open.clicked.connect(self._on_open_browser)
         btn_col.addWidget(self._btn_open, 1)
 
-        # === 段2: 版本与更新 (版本信息 + 更新按钮) ===
+        # === 段2: 版本与更新 (版本/配置状态卡片条目 + 更新按钮) ===
         version_group = QtWidgets.QGroupBox("版本与更新")
         version_layout = QtWidgets.QHBoxLayout(version_group)
         version_layout.setContentsMargins(8, 12, 8, 12)
         version_layout.setSpacing(12)
         layout.addWidget(version_group)
 
-        # 版本信息行 (左, stretch; 已安装时显示"版本：xxxx，已安装配置")
-        self._version_label = QtWidgets.QLabel("")
-        self._version_label.setStyleSheet(self._label_muted_style())
-        version_layout.addWidget(self._version_label, 1)
+        # 左: 版本 + 配置状态两个首页式条目, 套一层卡片容器 (card_bg + card_border),
+        # 让版本信息成视觉整体, 跟右边更新按钮形成"左信息卡 + 右按钮"的平衡结构.
+        self._version_info_card = QtWidgets.QFrame()
+        self._version_info_card.setAttribute(QtCore.Qt.WA_StyledBackground, True)
+        card_inner = QtWidgets.QGridLayout(self._version_info_card)
+        card_inner.setContentsMargins(10, 8, 10, 8)
+        card_inner.setHorizontalSpacing(12)
+        card_inner.setVerticalSpacing(0)
+        self._version_item = self._create_version_item("版本", "—", "🏷️")
+        self._config_status_item = self._create_version_item("配置状态", "—", "⚙️")
+        card_inner.addWidget(self._version_item, 0, 0)
+        card_inner.addWidget(self._config_status_item, 0, 1)
+        card_inner.setColumnStretch(0, 1)
+        card_inner.setColumnStretch(1, 1)
+        version_layout.addWidget(self._version_info_card, 1)
 
-        # 更新按钮 (右)
+        # 右: 更新按钮
         self._btn_update = QtWidgets.QPushButton("🔄 更新")
         self._btn_update.setCursor(QtCore.Qt.PointingHandCursor)
         self._btn_update.setMinimumHeight(36)
@@ -394,9 +502,27 @@ class WebuiPage(BasePage):
         self._cpath_btn.setStyleSheet(input_ss)
         # 文本/日志
         self._log_view.setStyleSheet(self._log_view_style())
+        # 版本信息卡片容器 (card_bg + card_border)
+        self._version_info_card.setStyleSheet(self._version_card_style())
         self._update_cpath_vis()
-        # 状态圆点颜色重算 (深/浅版不同)
-        self._refresh_state()
+        # 版本与更新卡片条目标签重应用主题色 (复刻首页 update_theme)
+        try:
+            label_muted = self._c("label_muted", "#9CA3AF")
+            text_color = self._c("text", "#E5E7EB")
+            for ref in getattr(self, "_version_title_refs", []):
+                ref.setStyleSheet(
+                    f'color: {label_muted}; font: bold 9pt "Microsoft YaHei UI";'
+                    f' background: transparent;'
+                )
+            for ref in getattr(self, "_version_value_refs", []):
+                ref.setStyleSheet(
+                    f'font: bold 10pt "Segoe UI", "Microsoft YaHei UI";'
+                    f' color: {text_color}; background: transparent;'
+                )
+        except Exception:
+            pass
+        # 状态相关文案重算 (版本/配置状态值). force: 主题切换不应被 busy 态吞掉刷新.
+        self._refresh_state(force=True)
 
     # ---------------- 状态探测 ----------------
     def _resolve_paths(self) -> dict:
@@ -455,12 +581,20 @@ class WebuiPage(BasePage):
 
         return STATE_READY
 
-    def _refresh_state(self):
+    def _refresh_state(self, force: bool = False):
+        # 中间态期间不覆盖: 探测到的状态可能 "跑赢" worker (如 STARTING 时进程还没起,
+        # _detect_state 返 READY), 会把按钮刷回可点击态, 破坏状态机. 中间态退出权交给
+        # worker 的 _after_* 回调 (它们用 _set_state 显式切到稳定态).
+        # force=True: env 切换/主题切换等场景, 路径或上下文可能变了, 需强制重新探测.
+        if not force and self._is_busy():
+            return
         self._state = self._detect_state()
         self._update_ui_for_state()
 
     def _poll_status(self):
-        """定时器: running 状态会变, 勤跑探测."""
+        """定时器: running 状态会变, 勤跑探测. 中间态跳过 (防覆盖, 见 _refresh_state)."""
+        if self._is_busy():
+            return
         try:
             new_state = self._detect_state()
             if new_state != self._state:
@@ -474,31 +608,41 @@ class WebuiPage(BasePage):
         webui_path = info["webui_path"]
         version = _read_workbench_version(webui_path) if webui_path else None
 
-        # 版本信息行 (代替旧状态卡; 不再有圆点/状态文案/刷新按钮).
-        # 状态靠右侧一键启动按钮文字体现. 未安装/缺依赖时不显示版本行.
-        if self._state in (STATE_NOT_INSTALLED, STATE_NO_DEPS):
-            ver_txt = ""
-        else:
-            v_str = "版本：%s，" % version if version else ""
-            ver_txt = v_str + "已安装配置"
-        self._version_label.setText(ver_txt)
+        # 版本与更新段: 拆成两个独立卡片条目 (版本 / 配置状态), 仿首页格式.
+        ver_txt = version if version else "—"
+        # 配置状态文案: _state -> 中文 (中间态也中文化, 不再露英文 key).
+        _STATUS_TXT = {
+            STATE_NOT_INSTALLED: "未安装",
+            STATE_NO_DEPS: "待安装依赖",
+            STATE_READY: "已安装配置",
+            STATE_RUNNING: "运行中",
+            STATE_CHECKING: "检测中…",
+            STATE_WAITING_COMFYUI: "等待 ComfyUI 启动…",
+            STATE_STARTING: "启动中…",
+            STATE_STOPPING: "停止中…",
+            STATE_DOWNLOADING: "下载中…",
+            STATE_INSTALLING_DEPS: "安装依赖中…",
+        }
+        status_txt = _STATUS_TXT.get(self._state, self._state)
+        self._set_version_item_value(self._version_item, ver_txt)
+        self._set_version_item_value(self._config_status_item, status_txt)
 
-        # 主按钮 (随状态变文字) — 这是状态的主要表达
-        if self._state == STATE_NOT_INSTALLED:
-            self._btn_primary.setText("⬇ 下载WebUI工作台")
-            self._btn_primary.setEnabled(True)
-        elif self._state == STATE_NO_DEPS:
-            self._btn_primary.setText("⚙ 安装依赖")
-            self._btn_primary.setEnabled(True)
-        elif self._state == STATE_READY:
-            self._btn_primary.setText("🚀 一键启动")
-            self._btn_primary.setEnabled(True)
-        elif self._state == STATE_RUNNING:
-            self._btn_primary.setText("⏹ 停止")
-            self._btn_primary.setEnabled(True)
-        else:
-            self._btn_primary.setText("...")
-            self._btn_primary.setEnabled(False)
+        # 主按钮文案: _state -> 单行文字. 中间态显示进度文案 + 禁用.
+        _BTN_TEXT = {
+            STATE_NOT_INSTALLED: "⬇ 下载WebUI工作台",
+            STATE_NO_DEPS: "⚙ 安装依赖",
+            STATE_READY: "🚀 一键启动",
+            STATE_RUNNING: "⏹ 停止",
+            STATE_CHECKING: "⏳ 检测中…",
+            STATE_WAITING_COMFYUI: "⏳ 等待 ComfyUI 启动中…",
+            STATE_STARTING: "⏳ 启动中…",
+            STATE_STOPPING: "⏳ 停止中…",
+            STATE_DOWNLOADING: "⬇ 下载中…",
+            STATE_INSTALLING_DEPS: "⚙ 安装依赖中…",
+        }
+        self._btn_primary.setText(_BTN_TEXT.get(self._state, "…"))
+        # 中间态禁用按钮 (防重复点击); 四个稳定态可点.
+        self._btn_primary.setEnabled(not self._is_busy())
 
         # 打开网页按钮: 仅 running 可用 (没跑起来打开无意义)
         self._btn_open.setEnabled(self._state == STATE_RUNNING)
@@ -507,6 +651,10 @@ class WebuiPage(BasePage):
 
     # ---------------- 按钮回调 ----------------
     def _on_primary_clicked(self):
+        # 中间态 (检测/启动/停止/下载/装依赖/等 ComfyUI) 拒绝重复点击.
+        # (按钮已 setEnabled(False), 这里是双保险: 防定时器竞态把态刷回稳定态)
+        if self._is_busy():
+            return
         if self._state == STATE_NOT_INSTALLED:
             self._download_webui()
         elif self._state == STATE_NO_DEPS:
@@ -564,11 +712,32 @@ class WebuiPage(BasePage):
             DialogHelper.show_info(self, "已是最新", "WebUI工作台已是最新版本。")
 
     def _start_with_prompt(self):
-        """弹 3 选 1 dialog: 同时启动 / 只启 WebUI工作台 / 取消."""
-        if self._is_comfyui_running():
+        """点「一键启动」后: 先进入「检测中」, 后台线程探活 ComfyUI 是否在跑.
+
+        探活挪到后台线程: is_http_reachable 是 HTTP 探活 (最长 ~1.9s), 在主线程做会
+        短暂冻 UI 且来不及显示「检测中…」. 探活完经 _after_comfyui_check 回主线程:
+        在跑 → 直接启 WebUI工作台; 没跑 → 弹 3 选 1 询问框.
+        """
+        self._set_state(STATE_CHECKING)
+
+        def _worker():
+            running = self._is_comfyui_running()
+            QtCore.QMetaObject.invokeMethod(
+                self, "_after_comfyui_check",
+                QtCore.Qt.QueuedConnection,
+                QtCore.Q_ARG(bool, running),
+            )
+
+        import threading
+        threading.Thread(target=_worker, daemon=True).start()
+
+    @QtCore.pyqtSlot(bool)
+    def _after_comfyui_check(self, comfyui_running: bool):
+        """ComfyUI 探活完成后回主线程: 在跑 -> 直接启; 没跑 -> 弹询问框."""
+        if comfyui_running:
             self._start_webui(with_comfyui=False)
             return
-
+        self._set_state(STATE_READY)  # 先恢复可点击态, 弹框期间按钮可用
         dlg = CustomConfirmDialog(
             parent=self,
             title="启动 WebUI工作台",
@@ -593,30 +762,61 @@ class WebuiPage(BasePage):
             self._start_webui(with_comfyui=False)
 
     def _is_comfyui_running(self) -> bool:
-        """ComfyUI 是否在跑 (HTTP 探活 + pidfile)."""
+        """ComfyUI 是否在跑 (直接 HTTP 探活 /system_stats).
+
+        不能依赖 pidfile: 首页 GUI 启动 ComfyUI (走 core/runner_start + ProcessManager)
+        不写 pidfile (只有 CLI 路径 start_service 才写). 用 pidfile 判断会让"首页启的
+        ComfyUI"永远探不到, 误弹"是否同时启动". 这里跟首页 process_manager.py 用同款
+        is_http_reachable(app), 端口读 app.custom_port, 不碰 pidfile.
+        """
         try:
-            from core.cli.runner import service_status
-            st = service_status(self.app) or {}
-            return bool(st.get("running"))
+            from core.probe import is_http_reachable
+            return bool(is_http_reachable(self.app, _log=False))
         except Exception:
             return False
 
     def _start_comfyui_then_webui(self):
-        """先启 ComfyUI (同步), 成功后再启 WebUI工作台."""
-        try:
-            from core.cli.runner import start_service
-            res = start_service(self.app, no_wait=False, timeout=60)
-            ok = bool(res.get("ok"))
-        except Exception as e:
-            ok = False
+        """先启 ComfyUI (后台线程), 成功后再启 WebUI工作台.
+
+        必须在后台线程调 start_service: start_service 阻塞等就绪, 而 ready 信号
+        (pm.on_start_success) 是经 _post_to_ui 投递到 UI 线程执行的 —— 若在 UI 主线程
+        同步调, 主线程被 wait_for_start 占住收不到那个投递, 死锁到 60s 超时再误判失败
+        (界面也会冻死). 跟 _start_webui/_stop_webui 一样走"后台线程 + invokeMethod 回主线程".
+        """
+        self._set_state(STATE_WAITING_COMFYUI)
+
+        def _worker():
             try:
-                self.app.logger.warning("ComfyUI 启动失败: %s", e)
-            except Exception:
-                pass
+                from core.cli.runner import start_service
+                res = start_service(self.app, no_wait=False, timeout=60) or {}
+                # start_service 返回 started/ready (无 ok 字段); ready=True 才算真就绪.
+                ok = bool(res.get("ready"))
+                err = res.get("error")
+            except Exception as e:
+                ok = False
+                err = str(e)
+                try:
+                    self.app.logger.warning("ComfyUI 启动异常: %s", e)
+                except Exception:
+                    pass
+            QtCore.QMetaObject.invokeMethod(
+                self, "_after_comfyui_start",
+                QtCore.Qt.QueuedConnection,
+                QtCore.Q_ARG(bool, ok),
+                QtCore.Q_ARG(str, err or ""),
+            )
+
+        import threading
+        threading.Thread(target=_worker, daemon=True).start()
+
+    @QtCore.pyqtSlot(bool, str)
+    def _after_comfyui_start(self, ok: bool, err: str):
+        """ComfyUI 启动完成后回主线程: 成功 -> 继续启 WebUI工作台; 失败 -> 弹窗."""
         if not ok:
+            self._refresh_state()  # 恢复按钮状态
             DialogHelper.show_warning(
                 self, "ComfyUI 启动失败",
-                "ComfyUI 启动失败, WebUI工作台不启动。\n请查看 ComfyUI 日志排查。",
+                "ComfyUI 启动失败, WebUI工作台不启动。\n请查看 ComfyUI 日志排查。\n\n%s" % (err or ""),
             )
             return
         self._start_webui(with_comfyui=False)
@@ -625,19 +825,18 @@ class WebuiPage(BasePage):
         """后台启 WebUI工作台."""
         if self._pm is None:
             self._pm = WebuiProcessManager(self.app)
-        self._state = STATE_STARTING
-        self._update_ui_for_state()
+        self._set_state(STATE_STARTING)
 
         def _worker():
             res = self._pm.start_webui(timeout=60)
             started_ok = bool(res.get("ok"))
-            if started_ok:
-                self._state = STATE_RUNNING
-            else:
-                self._state = STATE_READY
+            err = res.get("error")
+            # _state 切换交回主线程 slot 做 (不跨线程写); err 在主线程弹窗.
             QtCore.QMetaObject.invokeMethod(
                 self, "_after_action_done",
                 QtCore.Qt.QueuedConnection,
+                QtCore.Q_ARG(bool, started_ok),
+                QtCore.Q_ARG(str, err or ""),
             )
             # 自动打开浏览器必须在主线程做: webbrowser.open 在后台线程会静默失败
             # (Windows 上注册表查询/COM 初始化依赖主线程). 启动成功才考虑打开.
@@ -646,22 +845,19 @@ class WebuiPage(BasePage):
                     self, "_open_url_after_start",
                     QtCore.Qt.QueuedConnection,
                 )
-            err = res.get("error")
-            if err:
-                DialogHelper.show_warning(
-                    None, "WebUI工作台启动失败",
-                    "WebUI工作台启动失败: %s\n\n请查看 launcher/webui.log" % err,
-                )
 
         import threading
         threading.Thread(target=_worker, daemon=True).start()
 
     def _should_auto_open(self) -> bool:
-        """是否启动后自动打开浏览器 (browser_open_mode != disable)."""
-        mode = self._webui_options().get("browser_open_mode")
-        if mode is None:
-            return bool(self._webui_options().get("auto_open_browser", False))
-        return mode != "disable"
+        """是否启动后自动打开浏览器.
+
+        browser_open_mode 缺省视为 "default" (跟下拉框默认选中 "使用默认浏览器" 一致),
+        不再回退到老的 auto_open_browser 布尔 (老字段默认 False, 会让"看起来已开启"的
+        下拉选项静默失效). 只有显式 disable / none 才不打开.
+        """
+        mode = (self._webui_options().get("browser_open_mode") or "default").strip().lower()
+        return mode not in ("disable", "none")
 
     def _open_url(self, url: str) -> None:
         """按 browser_open_mode 打开 URL (disable/default/webbrowser)."""
@@ -688,38 +884,60 @@ class WebuiPage(BasePage):
             except Exception:
                 pass
 
+    def _browser_url(self) -> str:
+        """供"打开浏览器"用的 URL: 永远走 127.0.0.1, 不用 display_host.
+
+        display_host 是服务端 *绑定* 地址, listen_lan 勾选时为 0.0.0.0 ——
+        浏览器把 0.0.0.0 当客户端地址打不开 (跟首页 open_web 一律用 127.0.0.1 同理).
+        """
+        info = self._resolve_paths()
+        return "http://127.0.0.1:%s/" % info["port"]
+
     def _on_open_browser(self):
         """打开网页按钮."""
-        info = self._resolve_paths()
-        self._open_url("http://%s:%s/" % (info["display_host"], info["port"]))
+        self._open_url(self._browser_url())
 
     def _stop_webui(self):
         if self._pm is None:
             self._pm = WebuiProcessManager(self.app)
-        self._state = STATE_STOPPING
-        self._update_ui_for_state()
+        self._set_state(STATE_STOPPING)
 
         def _worker():
             self._pm.stop_webui(timeout=10)
-            self._state = STATE_READY
+            # _state 切换交回主线程 slot 做 (不跨线程写).
             QtCore.QMetaObject.invokeMethod(
                 self, "_after_action_done",
                 QtCore.Qt.QueuedConnection,
+                QtCore.Q_ARG(bool, False),  # is_start=False -> 停止完成
+                QtCore.Q_ARG(str, ""),
             )
 
         import threading
         threading.Thread(target=_worker, daemon=True).start()
 
-    @QtCore.pyqtSlot()
-    def _after_action_done(self):
-        self._refresh_state()
+    @QtCore.pyqtSlot(bool, str)
+    def _after_action_done(self, started_ok: bool, err: str):
+        """启动/停止 worker 完成后回主线程切换 _state + 刷新 UI.
+
+        统一入口: 启动成功 -> RUNNING; 启动失败 -> READY (弹 err); 停止完成 -> READY.
+        _state 只在此 (主线程) 写, 避免 worker 跨线程写.
+        """
+        if started_ok:
+            self._set_state(STATE_RUNNING)
+            return
+        # 启动失败或停止完成: 回 READY. 启动失败且有 err 则弹窗 (停止无 err 不弹).
+        self._set_state(STATE_READY)
+        if err:
+            DialogHelper.show_warning(
+                None, "WebUI工作台启动失败",
+                "WebUI工作台启动失败: %s\n\n请查看 launcher/webui.log" % err,
+            )
 
     @QtCore.pyqtSlot()
     def _open_url_after_start(self):
         """启动成功后在主线程打开浏览器 (webbrowser.open 在后台线程会静默失败)."""
         if self._should_auto_open():
-            info = self._resolve_paths()
-            self._open_url("http://%s:%s/" % (info["display_host"], info["port"]))
+            self._open_url(self._browser_url())
 
     def _download_webui(self):
         """下载 (git clone) + 完成后自动 setup deps."""
@@ -729,9 +947,7 @@ class WebuiPage(BasePage):
             return
         download_url = info["download_url"]
 
-        self._state = STATE_STARTING
-        self._btn_primary.setText("⏳ 下载中...")
-        self._btn_primary.setEnabled(False)
+        self._set_state(STATE_DOWNLOADING)
 
         def _worker():
             try:
@@ -761,23 +977,28 @@ class WebuiPage(BasePage):
     @QtCore.pyqtSlot(str)
     def _after_download(self, msg: str):
         if msg.startswith("下载失败"):
-            self._state = STATE_NOT_INSTALLED
+            self._set_state(STATE_NOT_INSTALLED)
             DialogHelper.show_warning(self, "下载失败", msg)
         self._refresh_state()
 
     def _setup_deps(self, silent: bool = False):
-        """装依赖 (BackgroundTask 风格)."""
+        """装依赖 (BackgroundTask 风格).
+
+        注: silent=True 时本方法在 _download_webui 的 worker 线程被调, 早退分支里的
+        _set_state 会跨线程写 _state —— 但那只是回 NO_DEPS, 后续 _after_download 的
+        _refresh_state 会重新探测纠正, 实际无害 (且 silent 早退极罕见: 仅 py/req 缺失).
+        """
         info = self._resolve_paths()
         py = info["python_path"]
         req = info["webui_path"] / "requirements.txt" if info["webui_path"] else None
         if not py or not py.exists():
-            self._state = STATE_NO_DEPS
+            self._set_state(STATE_NO_DEPS)
             if not silent:
                 DialogHelper.show_warning(self, "Python 不可用", "Python 路径无效: %s" % py)
             self._refresh_state()
             return
         if not req or not req.exists():
-            self._state = STATE_NO_DEPS
+            self._set_state(STATE_NO_DEPS)
             if not silent:
                 DialogHelper.show_warning(
                     self, "requirements.txt 不存在",
@@ -788,9 +1009,7 @@ class WebuiPage(BasePage):
 
         idx_url = resolve_pypi_index_url(self.app)
 
-        self._state = STATE_STARTING
-        self._btn_primary.setText("⏳ 安装依赖中...")
-        self._btn_primary.setEnabled(False)
+        self._set_state(STATE_INSTALLING_DEPS)
 
         def _worker():
             res = install_webui_requirements(py, req, index_url=idx_url)
@@ -861,10 +1080,18 @@ class WebuiPage(BasePage):
         )
         # 每次启动用全新 emitter (1:1 与 tailer 生命周期), 避免 disconnect 静默失败导致重复渲染
         self._emitter = _LineEmitter()
-        self._emitter.line_received.connect(
-            self._on_line_main,
-            QtCore.Qt.QueuedConnection | QtCore.Qt.UniqueConnection,
-        )
+        # UniqueConnection 作双保险防重复挂同一 slot; 但它在测试/某些 PyQt5 环境下偶发抛
+        # TypeError('connection is not unique') (Qt 跨实例信号槽注册冲突), 失败时回退普通连接.
+        try:
+            self._emitter.line_received.connect(
+                self._on_line_main,
+                QtCore.Qt.QueuedConnection | QtCore.Qt.UniqueConnection,
+            )
+        except TypeError:
+            self._emitter.line_received.connect(
+                self._on_line_main,
+                QtCore.Qt.QueuedConnection,
+            )
         self._tailer.start()
 
     def _stop_log_tail(self) -> None:
@@ -933,12 +1160,21 @@ class WebuiPage(BasePage):
             # env 换了, py/webui_path 可能变, 失效探测缓存
             self._deps_cache_key = None
             self._deps_cache_result = None
-            # 日志 tailer 重定向到新路径 (复刻 qt_app 对 LogViewerPage 的处理)
-            self._stop_log_tail()
-            self._history_loaded = False
-            self._log_view.clear()
-            self._log_path = self._resolve_log_path()
-            self._start_log_tail()
+            # 日志 tailer 重定向到新路径 (复刻 qt_app 对 LogViewerPage 的处理).
+            # tailer 部分单独 try: 即使 tailer 重建失败 (如测试环境 UniqueConnection
+            # 偶发冲突), 也不能拖累后面的 _refresh_state (状态机必须刷新).
+            try:
+                self._stop_log_tail()
+                self._history_loaded = False
+                self._log_view.clear()
+                self._log_path = self._resolve_log_path()
+                self._start_log_tail()
+            except Exception as e:
+                try:
+                    self.app.logger.warning("refresh_after_env_switch: 日志 tailer 重建失败: %s", e)
+                except Exception:
+                    pass
+            # 状态刷新独立于 tailer: 不带 force (env 切换 GUI 侧已限制; 本页 busy 时不打断).
             self._refresh_state()
         except Exception:
             pass

@@ -137,6 +137,32 @@ def _is_http_reachable(app) -> bool:
         return False
 
 
+def _sync_comfyui_running_ui(app, running: bool) -> None:
+    """把 ComfyUI 运行状态同步到首页大按钮/托盘 (线程安全).
+
+    start_service 用 CliProcessManager (PM 替身), 它的 on_start_success 只 set event,
+    不像 GUI ProcessManager.on_start_success 那样更新 app.big_btn. 结果: 从 WebUI 工作台
+    "同时启动"调 start_service 时, ComfyUI 起来了但首页大按钮一直卡在"启动中…".
+
+    这里在 ready/fail 时主动同步 UI 状态 (跟 GUI ProcessManager._apply_running_state 一致):
+    - running=True -> "正常运行"/"点击停止"
+    - running=False -> "🚀 一键启动"
+    经 app.ui_post 投递到主线程 (start_service 可能在工作线程跑, 不能直接碰 Qt 控件).
+    无 _apply_comfyui_running_ui / 无事件循环时 (纯 CLI) 是 no-op, 无副作用.
+    """
+    fn = getattr(app, "_apply_comfyui_running_ui", None)
+    if not callable(fn):
+        return  # 纯 CLI (HeadlessAppContext) 无此方法 -> 无 UI 可更新
+    try:
+        post = getattr(app, "ui_post", None)
+        if callable(post):
+            post(lambda: fn(running))  # 投递到主线程
+        else:
+            fn(running)
+    except Exception:
+        pass
+
+
 # ---------- start_service ----------
 
 def start_service(app, *, no_wait: bool = False, timeout: int = 60, env_id=None) -> dict:
@@ -254,6 +280,12 @@ def start_service(app, *, no_wait: bool = False, timeout: int = 60, env_id=None)
 
     if ready and pid and not read_pidfile(default_path(app._cwd)):
         write_pidfile(default_path(app._cwd), pid, port, log_path, env_id=effective_env_id)
+
+    # 同步首页 ComfyUI 大按钮状态: CliProcessManager.on_start_success 不会更新 UI,
+    # 这里主动推进到"运行中". 仅 ready=True 时同步: 未就绪时进程可能仍在启动中
+    # (runner_start 的 120s 轮询可能跑赢 start_service 的 60s 等待), 不应贸然重置为 idle.
+    if ready:
+        _sync_comfyui_running_ui(app, True)
 
     return {
         "started": pid is not None,

@@ -147,13 +147,25 @@ def clone_webui(
         pass
 
     try:
-        proc = subprocess.Popen(
-            [git_exe, "clone", "--depth", "1", clone_url, str(target_dir)],
+        # GUI 模式下必须显式 CREATE_NO_WINDOW + STARTUPINFO + stdin=DEVNULL, 否则 git 进程
+        # attach console 时继承无效句柄, subprocess._get_handles 抛 [WinError 6] 句柄无效.
+        # (跟 utils.common.run_hidden 同源修法; 这里要流式 drain stdout, 不能直接用 run_hidden)
+        popen_kwargs = dict(
             stdout=subprocess.PIPE,
             stderr=subprocess.STDOUT,
+            stdin=subprocess.DEVNULL,
             text=True,
             encoding="utf-8",
             errors="ignore",
+        )
+        if os.name == "nt":
+            si = subprocess.STARTUPINFO()
+            si.dwFlags |= subprocess.STARTF_USESHOWWINDOW
+            popen_kwargs["startupinfo"] = si
+            popen_kwargs["creationflags"] = subprocess.CREATE_NO_WINDOW
+        proc = subprocess.Popen(
+            [git_exe, "clone", "--depth", "1", clone_url, str(target_dir)],
+            **popen_kwargs,
         )
     except Exception as e:
         return {
@@ -255,14 +267,25 @@ def pull_webui(
         pass
 
     try:
-        proc = subprocess.Popen(
-            [git_exe, "pull", "--depth", "1"],
+        # 同 clone_webui: GUI 模式下补 CREATE_NO_WINDOW + STARTUPINFO + stdin=DEVNULL,
+        # 否则 git pull 继承无效句柄抛 [WinError 6] (跟 utils.common.run_hidden 同源).
+        pull_kwargs = dict(
             cwd=str(repo_dir),
             stdout=subprocess.PIPE,
             stderr=subprocess.STDOUT,
+            stdin=subprocess.DEVNULL,
             text=True,
             encoding="utf-8",
             errors="ignore",
+        )
+        if os.name == "nt":
+            si = subprocess.STARTUPINFO()
+            si.dwFlags |= subprocess.STARTF_USESHOWWINDOW
+            pull_kwargs["startupinfo"] = si
+            pull_kwargs["creationflags"] = subprocess.CREATE_NO_WINDOW
+        proc = subprocess.Popen(
+            [git_exe, "pull", "--depth", "1"],
+            **pull_kwargs,
         )
     except Exception as e:
         return {

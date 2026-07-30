@@ -790,11 +790,19 @@ if _HAS_QT:
             # 不降),导致切环境后 line_received 上累积多个指向 _on_line_main 的
             # 连接,每行日志被触发多次(用户实测重复 2 次)。
             self._emitter = _LineEmitter()
-            # UniqueConnection 作双保险:即使同一 emitter 上也不会重复挂同一 slot。
-            self._emitter.line_received.connect(
-                self._on_line_main,
-                QtCore.Qt.QueuedConnection | QtCore.Qt.UniqueConnection,
-            )
+            # UniqueConnection 作双保险:即使同一 emitter 上也不会重复挂同一 slot.
+            # 但它在测试/某些 PyQt5 环境下偶发抛 TypeError('connection is not unique')
+            # (Qt 跨实例信号槽注册冲突), 失败时回退普通连接, 不让整个 start_tailing 挂掉.
+            try:
+                self._emitter.line_received.connect(
+                    self._on_line_main,
+                    QtCore.Qt.QueuedConnection | QtCore.Qt.UniqueConnection,
+                )
+            except TypeError:
+                self._emitter.line_received.connect(
+                    self._on_line_main,
+                    QtCore.Qt.QueuedConnection,
+                )
             self._tailer.start()
             self.logger.info(
                 "start_tailing path=%s start_from_beginning=%s receivers=%d",

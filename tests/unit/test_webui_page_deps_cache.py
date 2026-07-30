@@ -70,7 +70,19 @@ class _Fixture(unittest.TestCase):
         # 清掉构造时探测留下的缓存, 让每个测试的第一次 _detect_state 在自己 patch 下重新探
         page._deps_cache_key = None
         page._deps_cache_result = None
+        # 停掉日志 tailer 线程 (构造时 __init__ 启动了), 避免测试间线程残留竞态.
+        # test_refresh_after_env_switch_clears_cache 会重建 tailer, cleanup 时再停一次当前 tailer.
+        self.addCleanup(self._stop_tailer, page)
         return page
+
+    @staticmethod
+    def _stop_tailer(page):
+        """停掉 page 当前的日志 tailer 线程 (避免跨测试残留)."""
+        try:
+            if hasattr(page, "_stop_log_tail"):
+                page._stop_log_tail()
+        except Exception:
+            pass
 
 
 class TestDepsProbeCache(_Fixture):

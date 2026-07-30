@@ -96,9 +96,10 @@ class ProfileCard(QtWidgets.QFrame):
 class HeroCard(QtWidgets.QFrame):
     """英雄卡片 - 关于页面顶部大卡片"""
 
-    def __init__(self, title: str, theme_styles: ThemeStyles, parent=None):
+    def __init__(self, title: str, theme_styles: ThemeStyles, title_font_size: int = 40, parent=None):
         super().__init__(parent)
         self.theme_styles = theme_styles
+        self._title_font_size = title_font_size
         self.setObjectName("HeroCard")
         self.setAttribute(QtCore.Qt.WA_StyledBackground, True)
         self._apply_style()
@@ -113,11 +114,11 @@ class HeroCard(QtWidgets.QFrame):
         layout.setContentsMargins(20, 10, 20, 10)
         layout.setAlignment(QtCore.Qt.AlignCenter)
 
-        # 标题
+        # 标题 (字号可定制; 默认 40, 较长标题如"ComfyUI 启动器"传更小值避免占太多视觉权重)
         self._title_label = QtWidgets.QLabel(title)
         self._title_label.setAlignment(QtCore.Qt.AlignCenter)
         self._title_label.setStyleSheet(f"""
-            font: bold 40px "Microsoft YaHei UI";
+            font: bold {self._title_font_size}px "Microsoft YaHei UI";
             color: {self.theme_styles.c.get('sidebar_text')};
             background: transparent;
         """)
@@ -129,7 +130,7 @@ class HeroCard(QtWidgets.QFrame):
         self._apply_style()
         try:
             if hasattr(self, "_title_label"):
-                self._title_label.setStyleSheet(f"font: bold 40px \"Microsoft YaHei UI\"; color: {self.theme_styles.c.get('sidebar_text')}; background: transparent;")
+                self._title_label.setStyleSheet(f"font: bold {self._title_font_size}px \"Microsoft YaHei UI\"; color: {self.theme_styles.c.get('sidebar_text')}; background: transparent;")
         except Exception:
             pass
 

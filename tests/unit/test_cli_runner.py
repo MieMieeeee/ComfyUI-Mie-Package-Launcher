@@ -205,6 +205,87 @@ class TestStartService:
         # 文件存在且非 stale 意味着写过（write() 一定写盘）
         assert default_path(tmp_path).exists()
 
+    def test_success_syncs_comfyui_button_to_running(self, tmp_path):
+        """成功启动后应同步首页 ComfyUI 大按钮到"运行中" (回归).
+
+        start_service 用 CliProcessManager (PM 替身), 它的 on_start_success 只 set event,
+        不更新 app.big_btn. 结果从 WebUI 工作台"同时启动"调 start_service 时, ComfyUI
+        起来了但首页大按钮一直卡在"启动中…". 修复: ready=True 时经 ui_post 投递
+        _apply_comfyui_running_ui(True) 到主线程.
+        """
+        app = _make_app(tmp_path)
+        # app 是 MagicMock, _apply_comfyui_running_ui / ui_post 自动存在; 但要确认
+        # ui_post 被调用并投递了 fn. 让 ui_post 立即执行 fn 以便断言.
+        posted = {"called": False, "running": None}
+
+        def fake_ui_post(fn):
+            posted["called"] = True
+            try:
+                fn()
+            except Exception:
+                pass
+
+        app.ui_post = fake_ui_post
+        app._apply_comfyui_running_ui = lambda running: posted.__setitem__("running", running)
+
+        fake_proc = MagicMock(pid=88888)
+        fake_proc.poll.return_value = None
+
+        def fake_runner_start(a, pm, cmd, env, run_cwd, log_path=None):
+            pm.comfyui_process = fake_proc
+            pm.on_start_success()
+
+        with patch("core.cli.runner.runner_start", side_effect=fake_runner_start), \
+             patch("core.cli.runner.build_launch_params") as mock_build, \
+             patch("core.cli.runner._resolve_log_path") as mock_log:
+            fake_py = tmp_path / "python.exe"
+            fake_py.write_text("")
+            fake_main = tmp_path / "main.py"
+            fake_main.write_text("")
+            mock_build.return_value = (["python", str(fake_main)], {}, str(tmp_path), fake_py, fake_main)
+            mock_log.return_value = tmp_path / "logs" / "x.log"
+
+            start_service(app, no_wait=False, timeout=5)
+
+        assert posted["called"], "应经 ui_post 投递 UI 同步"
+        assert posted["running"] is True, "ready=True 应把大按钮同步到运行中"
+
+    def test_not_ready_does_not_force_reset_button(self, tmp_path):
+        """ready=False 时不强制重置大按钮 (进程可能仍在启动中).
+
+        runner_start 的 120s 轮询可能跑赢 start_service 的 60s 等待, 此时 ready=False
+        但 ComfyUI 仍在启动, 不应贸然把按钮重置为 idle. 仅 ready=True 才同步.
+        """
+        app = _make_app(tmp_path)
+        posted = {"called": False}
+
+        def fake_ui_post(fn):
+            posted["called"] = True
+
+        app.ui_post = fake_ui_post
+        app._apply_comfyui_running_ui = MagicMock()
+
+        fake_proc = MagicMock(pid=77777)
+        fake_proc.poll.return_value = None
+
+        def fake_runner_start(a, pm, cmd, env, run_cwd, log_path=None):
+            pm.comfyui_process = fake_proc
+            pm.on_start_failed("启动超时")  # ready=False
+
+        with patch("core.cli.runner.runner_start", side_effect=fake_runner_start), \
+             patch("core.cli.runner.build_launch_params") as mock_build, \
+             patch("core.cli.runner._resolve_log_path") as mock_log:
+            fake_py = tmp_path / "python.exe"
+            fake_py.write_text("")
+            fake_main = tmp_path / "main.py"
+            fake_main.write_text("")
+            mock_build.return_value = (["python", str(fake_main)], {}, str(tmp_path), fake_py, fake_main)
+            mock_log.return_value = tmp_path / "logs" / "x.log"
+
+            start_service(app, no_wait=False, timeout=5)
+
+        assert posted["called"] is False, "ready=False 不应同步 UI (避免误重置)"
+
     def test_failure_returns_ready_false(self, tmp_path):
         """启动失败时 ready=False，pidfile 不应被写。"""
         app = _make_app(tmp_path)
@@ -366,7 +447,10 @@ class TestServiceStatus:
     def test_status_not_running(self, tmp_path):
         """pidfile 不存在 → running=False。"""
         app = _make_app(tmp_path)
-        result = service_status(app)
+        # mock 掉真实 HTTP 探活: 本机若正好有服务跑在 8188 (如开发时的 ComfyUI),
+        # 会让 http_reachable=True 造成假阳性. running 由 pidfile 决定, 不依赖网络.
+        with patch("core.cli.runner._is_http_reachable", return_value=False):
+            result = service_status(app)
         assert result["running"] is False
         assert result["pid"] is None
         assert result["http_reachable"] is False

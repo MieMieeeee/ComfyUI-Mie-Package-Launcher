@@ -93,12 +93,17 @@ class AboutLauncherPage(BasePage):
         from ui_qt.widgets.cards import HeroCard
         from ui import assets_helper as ASSETS
 
-        card = HeroCard("ComfyUI 启动器", self.theme_manager.styles)
+        card = HeroCard("ComfyUI 启动器", self.theme_manager.styles, title_font_size=26)
 
         layout = card.layout()
-        layout.setContentsMargins(0, 20, 0, 12)
-        layout.setSpacing(12)
+        layout.setContentsMargins(0, 24, 0, 16)
+        # 增大 spacing: 兔子和描述之间留足明确间距. 原来靠 minimumHeight 勉强塞下,
+        # offscreen 算出 gap 仅 3px, 实际 Windows + DPI 缩放下字体/图标度量略大,
+        # 3px 余量会变负 -> 兔子和描述重叠. 这里直接拉大 spacing 留足余量.
+        layout.setSpacing(20)
         layout.setAlignment(QtCore.Qt.AlignTop | QtCore.Qt.AlignHCenter)
+        # minimumHeight 留足余量 (标题 + 兔子 180 + 描述 + 间距), 不靠刚好塞下.
+        card.setMinimumHeight(420)
 
         # Logo (Rabbit Image)
         logo_label = QtWidgets.QLabel()
@@ -152,7 +157,8 @@ class AboutLauncherPage(BasePage):
         content.setStyleSheet("background: transparent;")
         content_layout = QtWidgets.QVBoxLayout(content)
         content_layout.setAlignment(QtCore.Qt.AlignCenter)
-        content_layout.setContentsMargins(40, 0, 30, 0)
+        # 对称小 margins, 不再收窄描述行宽 (原 40/30 非对称把文字挤在窄区).
+        content_layout.setContentsMargins(10, 0, 10, 0)
         content_layout.setSpacing(10)
         content_layout.addWidget(desc)
 

@@ -176,3 +176,61 @@ def test_pull_success(monkeypatch, tmp_path):
     app = _FakeApp()
     res = pull_webui(app, target)
     assert res["ok"] is True
+
+
+# ---------- 回归: WinError 6 (git clone/pull 在 GUI 模式下继承无效句柄) ----------
+
+def _capture_popen_kwargs(monkeypatch):
+    """monkeypatch subprocess.Popen, 捕获 (cmd, kwargs). 返回 captured list."""
+    captured = []
+
+    class _FakePopen:
+        def __init__(self, cmd, **kw):
+            captured.append((cmd, kw))
+            self.stdout = iter(["Cloning...\n"])
+
+        def wait(self):
+            return 0
+
+    monkeypatch.setattr(subprocess, "Popen", lambda cmd, **kw: _FakePopen(cmd, **kw))
+    return captured
+
+
+def test_clone_sets_stdin_devnull_to_avoid_winerror6(monkeypatch, tmp_path):
+    """clone_webui 的 Popen 必须传 stdin=DEVNULL (GUI 模式下避免 [WinError 6] 句柄无效).
+
+    回归: 原实现 Popen 没设 stdin/creationflags/startupinfo, git 进程 attach console
+    时继承无效句柄, subprocess._get_handles 抛 [WinError 6], 用户点"下载工作台"失败.
+    """
+    from core.webui_installer import clone_webui
+
+    captured = _capture_popen_kwargs(monkeypatch)
+    # 让 clone 走到 Popen (target 空 + git 可用)
+    target = tmp_path / "webui"
+    # 校验入口会失败 (没创建 flask_app.py), 但 Popen kwargs 已被捕获
+    clone_webui(_FakeApp(), target)
+    assert captured, "应调用 Popen"
+    _, kw = captured[0]
+    assert kw.get("stdin") == subprocess.DEVNULL, "clone Popen 应设 stdin=DEVNULL 避免 WinError 6"
+    # win32 还应有 CREATE_NO_WINDOW + startupinfo
+    import os
+    if os.name == "nt":
+        assert kw.get("creationflags", 0) & subprocess.CREATE_NO_WINDOW, "win32 应设 CREATE_NO_WINDOW"
+        assert kw.get("startupinfo") is not None, "win32 应设 startupinfo"
+
+
+def test_pull_sets_stdin_devnull_to_avoid_winerror6(monkeypatch, tmp_path):
+    """pull_webui 的 Popen 必须传 stdin=DEVNULL (同 clone 的 WinError 6 修复)."""
+    from core.webui_installer import pull_webui
+
+    captured = _capture_popen_kwargs(monkeypatch)
+    target = tmp_path / "webui"
+    target.mkdir()
+    (target / ".git").mkdir()  # pull 要求 .git 存在
+    pull_webui(_FakeApp(), target)
+    assert captured, "应调用 Popen"
+    _, kw = captured[0]
+    assert kw.get("stdin") == subprocess.DEVNULL, "pull Popen 应设 stdin=DEVNULL 避免 WinError 6"
+    import os
+    if os.name == "nt":
+        assert kw.get("creationflags", 0) & subprocess.CREATE_NO_WINDOW, "win32 应设 CREATE_NO_WINDOW"

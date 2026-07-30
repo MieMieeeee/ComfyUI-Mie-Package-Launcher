@@ -905,6 +905,10 @@ class PyQtLauncher(QtWidgets.QMainWindow, process_events.ProcessCallback):
         base_root = PATHS.resolve_base_root()
         self.base_root = base_root
         os.chdir(base_root)
+        # _cwd: 启动器根目录, 对齐 HeadlessApp._cwd。
+        # core/cli/runner.py 的 start_service/stop_service/service_status 直接读 app._cwd
+        # (7 处), GUI 缺这个属性时从 WebUI 页调 start_service (同时启 ComfyUI) 会崩。
+        self._cwd = base_root
         self.logger = install_logging(log_root=base_root)
         cfg_file = (Path.cwd() / "launcher" / "config.json").resolve()
         self.config_manager = ConfigManager(cfg_file, self.logger)
@@ -2135,7 +2139,7 @@ class PyQtLauncher(QtWidgets.QMainWindow, process_events.ProcessCallback):
 
         btns = {
             "launch": NavBtn("🚀 启动与更新"),
-            "webui": NavBtn("🧪 WebUI工作台"),
+            "webui": NavBtn("🧪 WebUI 工作台"),
             "logs": NavBtn("📋 ComfyUI 实时日志"),
             "plugins": NavBtn("🧩 插件管理"),
             "version": NavBtn("🧬 内核版本管理"),
@@ -2150,8 +2154,8 @@ class PyQtLauncher(QtWidgets.QMainWindow, process_events.ProcessCallback):
         # 为导航按钮添加工具提示和存储完整文字
         btns["launch"].setToolTip("启动、停止ComfyUI，查看运行状态")
         btns["launch"].setProperty("full_text", "🚀 启动与更新")
-        btns["webui"].setToolTip("启动 Comfyui-Workbench-Mie 多工作流 WebUI工作台")
-        btns["webui"].setProperty("full_text", "🧪 WebUI工作台")
+        btns["webui"].setToolTip("启动 Comfyui-Workbench-Mie 多工作流 WebUI 工作台")
+        btns["webui"].setProperty("full_text", "🧪 WebUI 工作台")
         btns["logs"].setToolTip("实时显示 ComfyUI 运行日志")
         btns["logs"].setProperty("full_text", "📋 ComfyUI 实时日志")
         btns["version"].setToolTip("管理ComfyUI内核版本，切换提交")
@@ -4046,6 +4050,61 @@ class PyQtLauncher(QtWidgets.QMainWindow, process_events.ProcessCallback):
         except Exception:
             return False
 
+    def _stop_webui_sync(self) -> bool:
+        """同步停止 WebUI 工作台 (阻塞到进程退出). 幂等: 未跑返 True.
+
+        关闭启动器 ("停止 ComfyUI 并退出") 时调用: 工作台依赖 ComfyUI 后台,
+        ComfyUI 停了工作台没意义, 必须一起停. 用 WebuiProcessManager.stop_webui
+        (靠 pidfile + taskkill, 不依赖页面 _pm 是否持有 Popen 句柄).
+        """
+        try:
+            from core.webui_process_manager import WebuiProcessManager
+
+            pm = WebuiProcessManager(self)
+            res = pm.stop_webui(timeout=8) or {}
+            ok = bool(res.get("ok"))
+            try:
+                if self.logger:
+                    self.logger.info("退出时停止 WebUI 工作台: ok=%s", ok)
+            except Exception:
+                pass
+            return ok
+        except Exception as e:
+            try:
+                if self.logger:
+                    self.logger.warning("退出时停止 WebUI 工作台失败: %s", e)
+            except Exception:
+                pass
+            return False
+
+    def _stop_comfyui_and_webui_on_exit(self) -> None:
+        """关闭启动器时同步停止 ComfyUI + WebUI 工作台.
+
+        "停止 ComfyUI 并退出" 语义 (托盘菜单 / 主窗口 X 选"停止并退出") 的统一入口:
+        先停工作台 (依赖方), 再停 ComfyUI (被依赖方), 顺序避免工作台在 ComfyUI
+        已死后还尝试通信. 两者都幂等, 任一失败不阻断退出.
+        """
+        # 1. 先停工作台 (它依赖 ComfyUI, 先停依赖方)
+        self._stop_webui_sync()
+        # 同步刷新工作台页状态 (停完后回 READY, 不然下次打开还显示运行中)
+        try:
+            page = getattr(self, "_webui_page", None)
+            if page is not None and hasattr(page, "_refresh_state"):
+                page._refresh_state(force=True)
+        except Exception:
+            pass
+        # 2. 再停 ComfyUI
+        try:
+            pm = getattr(self, "process_manager", None)
+            if pm and hasattr(pm, "stop_comfyui_sync"):
+                pm.stop_comfyui_sync()
+        except Exception as e:
+            try:
+                if self.logger:
+                    self.logger.warning("退出时停止 ComfyUI 失败: %s", e)
+            except Exception:
+                pass
+
     def closeEvent(self, event):
         """主窗口关闭事件。
 
@@ -4070,16 +4129,8 @@ class PyQtLauncher(QtWidgets.QMainWindow, process_events.ProcessCallback):
 
         # ---- 场景 1b: 从托盘菜单退出并关闭 ComfyUI ----
         if getattr(self, "_tray_quit_and_stop_requested", False):
-            try:
-                pm = getattr(self, "process_manager", None)
-                if pm and hasattr(pm, "stop_comfyui_sync"):
-                    pm.stop_comfyui_sync()
-            except Exception as e:
-                try:
-                    if getattr(self, "logger", None):
-                        self.logger.warning("从托盘退出时停止 ComfyUI 失败: %s", e)
-                except Exception:
-                    pass
+            # 停 ComfyUI + WebUI 工作台 (工作台依赖 ComfyUI, 一起停).
+            self._stop_comfyui_and_webui_on_exit()
             self._perform_shutdown(event)
             return
 
@@ -4124,12 +4175,8 @@ class PyQtLauncher(QtWidgets.QMainWindow, process_events.ProcessCallback):
                         pass
                     return
                 if idx == 2:  # 停止并退出
-                    try:
-                        pm = getattr(self, "process_manager", None)
-                        if pm and hasattr(pm, "stop_comfyui_sync"):
-                            pm.stop_comfyui_sync()
-                    except Exception:
-                        pass
+                    # 停 ComfyUI + WebUI 工作台 (工作台依赖 ComfyUI, 一起停).
+                    self._stop_comfyui_and_webui_on_exit()
                 # idx == 1 (仅退出启动器) 不停 ComfyUI
         except Exception:
             pass
