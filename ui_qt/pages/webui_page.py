@@ -1,17 +1,20 @@
 """WebUI工作台页面 (Comfyui-Workbench-Mie 启停 / 配置 / 更新 / 日志).
 
-布局 (纵向三段式):
-  ┌─ 启动控制 ────────────────────────────┐
-  │ 端口号 [8199] ☑允许局域网访问         │
-  │ 自动打开浏览器 [默认▾]                 │
-  │ [🚀一键启动]      [🌐打开网页]        │
-  └──────────────────────────────────────┘
-  ┌─ 版本与更新 ──────────────────────────┐
-  │ 版本：xxxx，已安装配置      [🔄更新]  │
-  └──────────────────────────────────────┘
-  ┌─ 实时日志 ────────────────────────────┐
-  │ ...log tail...                        │
-  └──────────────────────────────────────┘
+布局 (纵向三段式; 启动控制段内部是左右结构, 仿首页 launch_page):
+  ┌─ 启动控制 ──────────────────────────────────────┐
+  │ 端口号 [8199] ☑允许局域网访问   ┌────────────┐ │
+  │ 自动打开浏览器 [默认▾]          │ 🚀一键启动 │ │
+  │                                 ├────────────┤ │
+  │                                 │ 🌐打开网页 │ │
+  │                                 └────────────┘ │
+  └────────────────────────────────────────────────┘
+  ┌─ 版本与更新 ────────────────────────────────────┐
+  │ 版本：xxxx，已安装配置              [🔄更新]   │
+  └────────────────────────────────────────────────┘
+  ┌─ 实时日志 ──────────────────────────────────────┐
+  │ ...实时 tail 日志...                            │
+  │ [🧹清空] [📂打开日志文件]                       │
+  └────────────────────────────────────────────────┘
 
 状态机 (状态靠一键启动按钮文字体现):
   not_installed -> [下载WebUI工作台]  打开网页/更新禁用
@@ -186,19 +189,21 @@ class WebuiPage(BasePage):
 
         lbl_style = self._config_label_style()
 
-        # === 段1: 启动控制 (配置项 + 启动/打开网页 按钮) ===
+        # === 段1: 启动控制 (左配置项 + 右按钮列, 仿首页 launch_page 左右结构) ===
         launch_group = QtWidgets.QGroupBox("启动控制")
-        launch_layout = QtWidgets.QVBoxLayout(launch_group)
+        launch_layout = QtWidgets.QHBoxLayout(launch_group)
         launch_layout.setContentsMargins(8, 12, 8, 12)
-        launch_layout.setSpacing(8)
+        launch_layout.setSpacing(15)
         layout.addWidget(launch_group)
 
-        # 配置项 grid (端口/监听 + 自动打开浏览器)
-        form_layout = QtWidgets.QGridLayout()
+        # --- 左: 配置项 (端口/监听 + 自动打开浏览器) ---
+        form_widget = QtWidgets.QWidget()
+        form_layout = QtWidgets.QGridLayout(form_widget)
         form_layout.setColumnStretch(1, 1)
         form_layout.setHorizontalSpacing(20)
         form_layout.setVerticalSpacing(8)
-        launch_layout.addLayout(form_layout)
+        form_layout.setContentsMargins(0, 0, 0, 0)
+        launch_layout.addWidget(form_widget, 1)
 
         # 端口号 + 允许局域网访问 (同一行 HBox, 复刻 launch_controls_section)
         port_label = QtWidgets.QLabel("端口号：")
@@ -260,24 +265,29 @@ class WebuiPage(BasePage):
         form_layout.addWidget(open_label, 1, 0)
         form_layout.addLayout(row_open, 1, 1)
 
-        # 启动/停止 大按钮 + 打开网页 (横排; 主按钮随状态变文字)
-        btn_row = QtWidgets.QHBoxLayout()
-        btn_row.setContentsMargins(0, 0, 0, 0)
-        btn_row.setSpacing(8)
+        # --- 右: 按钮列 (固定宽, 一键启动大按钮 + 打开网页, 上下堆叠) ---
+        btn_container = QtWidgets.QWidget()
+        btn_container.setFixedWidth(180)
+        btn_col = QtWidgets.QVBoxLayout(btn_container)
+        btn_col.setContentsMargins(0, 0, 0, 0)
+        btn_col.setSpacing(8)
+        launch_layout.addWidget(btn_container, 0)
 
+        # 一键启动 大按钮 (随状态变文字; stretch 4 跟左侧配置项高度对齐)
         self._btn_primary = QtWidgets.QPushButton()
         self._btn_primary.setCursor(QtCore.Qt.PointingHandCursor)
+        self._btn_primary.setSizePolicy(QtWidgets.QSizePolicy.Expanding, QtWidgets.QSizePolicy.Expanding)
         self._btn_primary.clicked.connect(self._on_primary_clicked)
-        self._btn_primary.setMinimumHeight(44)
-        btn_row.addWidget(self._btn_primary, 3)
+        self._btn_primary.setMinimumHeight(60)
+        btn_col.addWidget(self._btn_primary, 4)
 
+        # 打开网页 (stretch 1, 紧贴一键启动下方)
         self._btn_open = QtWidgets.QPushButton("🌐 打开网页")
         self._btn_open.setCursor(QtCore.Qt.PointingHandCursor)
-        self._btn_open.setMinimumHeight(44)
+        self._btn_open.setSizePolicy(QtWidgets.QSizePolicy.Expanding, QtWidgets.QSizePolicy.Expanding)
+        self._btn_open.setMinimumHeight(40)
         self._btn_open.clicked.connect(self._on_open_browser)
-        btn_row.addWidget(self._btn_open, 1)
-
-        launch_layout.addLayout(btn_row)
+        btn_col.addWidget(self._btn_open, 1)
 
         # === 段2: 版本与更新 (版本信息 + 更新按钮) ===
         version_group = QtWidgets.QGroupBox("版本与更新")
