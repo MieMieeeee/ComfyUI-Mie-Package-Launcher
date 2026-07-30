@@ -14,10 +14,8 @@ GUI 层 (ui_qt.pages.webui_page) 只是绑定 UI 状态机, 真正干活交给�
 from __future__ import annotations
 
 import os
-import sys
 import time
 import subprocess
-import threading
 from datetime import datetime
 from pathlib import Path
 from typing import Any, Optional
@@ -218,7 +216,6 @@ class WebuiProcessManager:
             pass
 
         # 7. spawn. 用 PIPE + 自定义 drain 线程, 把 stdout 写到 log file.
-        # Python 3.13 _readerthread cp1252 异常已被 stderr 过滤吞, 这里不重搞 drain.
         try:
             # win32 必须显式 CREATE_NO_WINDOW, 否则 GUI 模式下会弹黑色 cmd 窗口.
             # (Popen 不会自动加这个 flag; installer/dependencies 走 run_hidden 也各自显式设.)
@@ -357,7 +354,7 @@ class WebuiProcessManager:
                 if os.name == "nt":
                     r = run_hidden(
                         ["taskkill", "/PID", str(pid), "/F"],
-                        capture_output=True, text=True, timeout=5,
+                        capture_output=True, timeout=5,
                     )
                     port_killed = (r.returncode == 0)
                 else:
@@ -385,7 +382,7 @@ class WebuiProcessManager:
                     if os.name == "nt":
                         run_hidden(
                             ["taskkill", "/PID", str(opid), "/F"],
-                            capture_output=True, text=True, timeout=5,
+                            capture_output=True, timeout=5,
                         )
                     else:
                         # POSIX: 没有 taskkill, 走 SIGTERM
@@ -426,8 +423,9 @@ class WebuiProcessManager:
 
         语义分层 (跟 is_running / http_reachable 对齐):
         - running: 进程是否存在 (pidfile 活 / Popen 句柄活), 含 Flask 启动中.
-        - http_reachable: HTTP 端口是否已就绪; 仅当进程在跑时才探 (避免对不存在的进程探).
-        启动中场景: running=True, http_reachable=False.
+        - http_reachable: 配置端口是否有服务在监听 (无条件探测, 可能是别的进程占用).
+        四状态矩阵: 进程在+端口通=就绪; 进程在+端口不通=启动中;
+                    进程不在+端口通=端口被占(非本进程); 进程不在+端口不通=未跑.
         """
         from core.cli.webui_pidfile import read as read_pidfile
 
@@ -441,12 +439,15 @@ class WebuiProcessManager:
             port = 8199
 
         process_running = self.is_running()
-        # 进程在跑才探 HTTP; 没进程时端口必然不通, 不做无意义探测.
-        http_ok = self.is_http_reachable(port, timeout=1.0) if process_running else False
+        # 无条件探测端口: 端口可能被其他进程占用, 不能假设"没进程就端口不通".
+        http_ok = self.is_http_reachable(port, timeout=1.0)
 
         return {
             "running": process_running,
-            "pid": pd.get("pid") if pd else None,
+            "pid": pd.get("pid") if pd else (
+                # pidfile 缺失时, 若 Popen 句柄活, 回退到句柄 PID (避免 running=True 但 pid=None)
+                self.webui_process.pid if (self.webui_process is not None) else None
+            ),
             "port": port,
             "url": f"http://127.0.0.1:{port}",
             "http_reachable": http_ok,

@@ -94,7 +94,11 @@ class TestDepsProbeCache(_Fixture):
                 self.assertEqual(mock_dep.call_count, 1, "同路径第二次应命中缓存, 不重复探测")
 
     def test_path_change_reprobes(self):
-        """py 或 webui_path 变化 -> 缓存 key 不匹配 -> 重新探测."""
+        """py 路径从 py1 改成 py2 -> 旧缓存失效 -> 重新探测.
+
+        顺序 (审查 #3): 必须先建立 py1 缓存, 再改成 py2, 才算真验证失效.
+        断言精确 call_count == 2 (py1 一次 + py2 一次), 不用 >= 1 这种弱断言.
+        """
         with tempfile.TemporaryDirectory() as d:
             d = Path(d)
             webui_path = d / "Comfyui-Workbench-Mie"
@@ -109,15 +113,17 @@ class TestDepsProbeCache(_Fixture):
             with patch("core.webui_process_manager.WebuiProcessManager.is_running", return_value=False), \
                  patch("ui_qt.pages.webui_page.check_webui_dependencies",
                        return_value={"ok": True, "missing": [], "available": []}) as mock_dep:
-                # 第一次用 py1
-                page._resolve_paths  # noqa (确认属性存在)
-                # 手动喂不同 py_path 触发 key 变化: 直接改 config 路径
-                page.app.config["environments"][0]["python_path"] = str(py2)
+                # 1. 用 py1 探一次, 建立缓存
                 page._detect_state()
-                page._detect_state()  # py2 同路径第二次命中
-                # 两次探测 (第一次 py2 miss, 第二次 py2 hit) -> 但首次构造时 _refresh_state 已探过 py1
-                # 这里只验证: 改路径后确实重新探测了 (call_count >= 1 表示没被旧缓存挡住)
-                self.assertGreaterEqual(mock_dep.call_count, 1, "路径变化应重新探测, 不被旧缓存挡住")
+                self.assertEqual(mock_dep.call_count, 1, "py1 首次探测")
+                # 2. 改 config 路径为 py2 (key 变化)
+                page.app.config["environments"][0]["python_path"] = str(py2)
+                # 3. 再探一次: py2 key != py1 缓存 key -> 失效 -> 重新探测
+                page._detect_state()
+                self.assertEqual(mock_dep.call_count, 2, "路径变 py2 后应重新探测 (py1→py2 失效)")
+                # 4. py2 再探一次: 现在命中 py2 缓存, 不再探测
+                page._detect_state()
+                self.assertEqual(mock_dep.call_count, 2, "py2 同路径应命中缓存, 不重复探测")
 
     def test_after_setup_clears_cache(self):
         """_after_setup 应清缓存 -> 下次 _detect_state 重新探测."""

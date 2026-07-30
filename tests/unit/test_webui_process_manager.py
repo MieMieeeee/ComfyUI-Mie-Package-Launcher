@@ -60,18 +60,43 @@ def test_status_with_alive_pid_but_no_http(tmp_path):
 
 
 def test_status_popen_alive_no_pidfile(tmp_path):
-    """Popen 句柄活但无 pidfile -> running=True (进程在), http_reachable=False."""
+    """Popen 句柄活但无 pidfile -> running=True, pid 回退到句柄 PID, http_reachable=False."""
     from core.webui_process_manager import WebuiProcessManager
     app = _App(cwd=tmp_path)
     pm = WebuiProcessManager(app)
 
     class _FakePopen:
+        pid = 99999  # 提供有效 PID, 验证 pidfile 缺失时回退到句柄 PID
+
         def poll(self): return None
     pm.webui_process = _FakePopen()
     s = pm.status()
     assert s["running"] is True  # Popen 句柄活 -> 进程在
     assert s["http_reachable"] is False  # 端口没真监听
-    assert s["pid"] is None  # 没 pidfile
+    assert s["pid"] == 99999  # 没 pidfile, 回退到 webui_process.pid (#4)
+
+
+def test_status_port_occupied_by_other_when_no_process(tmp_path):
+    """无 pidfile/Popen, 但配置端口被其他服务监听 -> running=False, http_reachable=True (#1).
+
+    http_reachable 无条件探测: 端口可能被其他进程占用, 不能假设"没进程就端口不通".
+    """
+    import socket
+    from core.webui_process_manager import WebuiProcessManager
+    app = _App(cwd=tmp_path)
+    pm = WebuiProcessManager(app)
+
+    # 在 8199 起一个真实监听 socket (模拟"别的进程占了配置端口")
+    srv = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+    srv.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
+    srv.bind(("127.0.0.1", 8199))
+    srv.listen(5)
+    try:
+        s = pm.status()
+        assert s["running"] is False  # 我们没进程
+        assert s["http_reachable"] is True  # 但端口确实有东西在监听
+    finally:
+        srv.close()
 
 
 def test_stop_when_no_pidfile(tmp_path):
