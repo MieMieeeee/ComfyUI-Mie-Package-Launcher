@@ -180,11 +180,6 @@ class WebuiPage(BasePage):
         layout.setContentsMargins(12, 12, 12, 12)
         layout.setSpacing(8)
 
-        # === 版本信息行 (代替旧状态卡; 状态靠右侧一键启动按钮文字体现) ===
-        self._version_label = QtWidgets.QLabel("")
-        self._version_label.setStyleSheet(self._label_muted_style())
-        layout.addWidget(self._version_label)
-
         # === 顶部行: 左启动控制 + 右按钮列 (仿 launch_page top_row) ===
         top_row = QtWidgets.QHBoxLayout()
         top_row.setSpacing(15)
@@ -297,6 +292,12 @@ class WebuiPage(BasePage):
         self._btn_update.clicked.connect(self._on_update_clicked)
         self._btn_update.setToolTip("git pull 更新 WebUI工作台到最新版本")
         bottom_layout.addWidget(self._btn_update)
+
+        # 版本信息行: 紧贴更新按钮上方 (版本号 ↔ 更新动作 语义相邻)
+        self._version_label = QtWidgets.QLabel("")
+        self._version_label.setStyleSheet(self._label_muted_style())
+        self._version_label.setAlignment(QtCore.Qt.AlignCenter)
+        right_layout.addWidget(self._version_label)
 
         right_layout.addWidget(bottom_row, 1)
 
