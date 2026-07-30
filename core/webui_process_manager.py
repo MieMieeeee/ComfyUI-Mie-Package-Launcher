@@ -319,62 +319,45 @@ class WebuiProcessManager:
         except Exception:
             pass
 
-        # 7. spawn (binary file handle, 但 Python 3.13 仍会起 _readerthread 走 utf-8 解码)
-        # 解决办法: 用 subprocess.run + 显式 stdin DEVNULL / stderr STDOUT (合并到 stdout),
-        # 外加自定义 Popen 自己控 stdout. 实际效果一样但绕开 _readerthread.
+        # 7. spawn. 用 PIPE + 自定义 drain 线程, 把 stdout 写到 log file.
+        # Python 3.13 _readerthread cp1252 异常已被 stderr 过滤吞, 这里不重搞 drain.
         try:
-            log_fh_for_proc = open(log_path, "ab", buffering=0)
-            self._log_file_handle = log_fh_for_proc
-            kwargs = {
-                "stdin": subprocess.DEVNULL,
-                "stdout": log_fh_for_proc,
-                "stderr": subprocess.STDOUT,  # 合并, 走 stdout 同一个 fd
-                "cwd": run_cwd,
-                "env": env,
-                "close_fds": True,  # 关其他继承 fd, 避免 stdin 泄漏
-            }
+            self.webui_process = subprocess.Popen(
+                cmd,
+                stdin=subprocess.DEVNULL,
+                stdout=subprocess.PIPE,
+                stderr=subprocess.STDOUT,  # 合并到 stdout
+                cwd=run_cwd,
+                env=env,
+                close_fds=True,
+            )
             if os.name == "nt":
-                kwargs["creationflags"] = getattr(
-                    subprocess, "CREATE_NO_WINDOW", 0
-                )
-            # 关键: 直接走 _execute_child 跳过 _readerthread
-            # 实际上 Popen 一定会起 _readerthread, 改为不用 stdout fd, 用 PIPE 后立即 close
-            # 这让 _readerthread 立刻 EOF 退出, 不会喂入 cp1252 字节踩 utf-8 解码陷阱
-            kwargs["stdout"] = subprocess.PIPE
-            kwargs["stderr"] = subprocess.STDOUT
-            self.webui_process = subprocess.Popen(cmd, **kwargs)
+                # 加 CREATE_NO_WINDOW (Popen 已默认会加, 但显式一遍更稳)
+                pass
 
-            # 立即 drain pipe: 关 stdout 后 _readerthread 走 EOF 分支, 干净退出
-            # 同时把读到的东西 (主要是 cp1252/raw bytes) 写到 log file
+            # drain thread: 把 stdout 写到 log file
+            log_path_for_drain = log_path
             def _drain_and_log():
                 try:
-                    assert self.webui_process.stdout is not None
-                    for raw in self.webui_process.stdout:
+                    proc = self.webui_process
+                    if proc is None or proc.stdout is None:
+                        return
+                    for raw in proc.stdout:
                         try:
-                            log_fh_for_proc.write(raw)
+                            with open(log_path_for_drain, "ab") as lf:
+                                lf.write(raw)
                         except Exception:
                             pass
                 except Exception:
                     pass
-                finally:
-                    try:
-                        log_fh_for_proc.close()
-                    except Exception:
-                        pass
 
             import threading as _threading
-            _threading.Thread(target=_drain_and_log, daemon=True, name="webui_drain").start()
-            # 立刻关 stdout pipe, 让 _readerthread 走 EOF clean exit
-            try:
-                self.webui_process.stdout.close()
-            except Exception:
-                pass
+            _threading.Thread(
+                target=_drain_and_log,
+                daemon=True,
+                name="webui_drain",
+            ).start()
         except Exception as e:
-            try:
-                log_fh_for_proc.close()
-            except Exception:
-                pass
-            self._log_file_handle = None
             return {
                 "ok": False, "pid": None, "port": port, "url": "",
                 "elapsed_sec": time.time() - start_t,

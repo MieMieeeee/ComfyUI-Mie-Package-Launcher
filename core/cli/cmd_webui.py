@@ -121,6 +121,7 @@ def _do_start(app, args) -> dict:
     eff_timeout = 10 if no_wait else timeout
     res = pm.start_webui(timeout=eff_timeout)
     # pidfile 中 env_id 一致化 (build_webui_launch_params 已经在 pm.start_webui 里走完了)
+    # 把 pm.start_webui 的所有字段透传 (含 already_running / log_path 等)
     return {
         "ok": res.get("ok") is True,
         "pid": res.get("pid"),
@@ -130,6 +131,7 @@ def _do_start(app, args) -> dict:
         "error": res.get("error"),
         "env_id": res.get("env_id"),
         "log_path": res.get("log_path"),
+        "already_running": res.get("already_running", False),
         "exit_code": 0 if res.get("ok") else 1,
     }
 

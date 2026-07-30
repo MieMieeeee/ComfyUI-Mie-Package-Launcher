@@ -88,10 +88,6 @@ def main(argv: Optional[list] = None) -> int:
     return dispatch(args)
 
 
-if __name__ == "__main__":  # pragma: no cover
-    sys.exit(main())
-
-
 def _ensure_model_path_migrated(app) -> None:
     """Migrate the legacy external-model yaml on demand. Idempotent."""
     try:
@@ -101,4 +97,8 @@ def _ensure_model_path_migrated(app) -> None:
             mp.migrate_legacy_yaml()
     except Exception:
         pass
+
+
+if __name__ == "__main__":  # pragma: no cover
+    sys.exit(main())
 
