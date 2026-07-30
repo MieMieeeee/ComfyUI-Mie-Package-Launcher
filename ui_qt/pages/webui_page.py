@@ -52,25 +52,6 @@ STATE_RUNNING = "running"
 STATE_STARTING = "starting"
 STATE_STOPPING = "stopping"
 
-# 状态圆点配色: 项目主题没有 green/blue 状态 token, 用固定现代色板.
-# 深色版用 500 档 (明亮), 浅色版用 600 档 (加深保证对比度), 在 update_theme 里切换.
-_STATE_COLORS_DARK = {
-    STATE_NOT_INSTALLED: "#EF4444",  # 红
-    STATE_NO_DEPS: "#F59E0B",        # 黄
-    STATE_READY: "#10B981",          # 绿
-    STATE_RUNNING: "#10B981",
-    STATE_STARTING: "#3B82F6",       # 蓝
-    STATE_STOPPING: "#3B82F6",
-}
-_STATE_COLORS_LIGHT = {
-    STATE_NOT_INSTALLED: "#DC2626",
-    STATE_NO_DEPS: "#D97706",
-    STATE_READY: "#059669",
-    STATE_RUNNING: "#059669",
-    STATE_STARTING: "#2563EB",
-    STATE_STOPPING: "#2563EB",
-}
-
 # 自动打开浏览器三选项 (跟首页 launch_controls_section 一致: disable/default/webbrowser)
 _BROWSER_OPEN_OPTS = [
     ("不自动打开", "disable"),
@@ -145,12 +126,6 @@ class WebuiPage(BasePage):
         except Exception:
             return default
 
-    def _state_color(self, state: str) -> str:
-        """按当前深/浅主题选状态圆点色."""
-        is_dark = bool(getattr(self.theme_manager, "is_dark", True))
-        palette = _STATE_COLORS_DARK if is_dark else _STATE_COLORS_LIGHT
-        return palette.get(state, self._c("label_dim", "#888"))
-
     def _log_view_style(self) -> str:
         """日志视图 QSS: 走 input_readonly_* token (深浅自适应), 终端字体保留."""
         return (
@@ -166,11 +141,6 @@ class WebuiPage(BasePage):
     def _label_muted_style(self) -> str:
         return (
             f'font: 9pt "Microsoft YaHei UI"; color: {self._c("label_muted", "#9CA3AF")};'
-        )
-
-    def _status_text_style(self) -> str:
-        return (
-            f'font: bold 11pt "Microsoft YaHei UI"; color: {self._c("label", "#E5E7EB")};'
         )
 
     def _config_label_style(self) -> str:
@@ -210,26 +180,10 @@ class WebuiPage(BasePage):
         layout.setContentsMargins(12, 12, 12, 12)
         layout.setSpacing(8)
 
-        # === 状态卡 (横跨顶部) ===
-        status_group = QtWidgets.QGroupBox("WebUI工作台状态")
-        status_layout = QtWidgets.QHBoxLayout(status_group)
-        status_layout.setContentsMargins(10, 8, 10, 8)
-        status_layout.setSpacing(12)
-
-        self._status_dot = QtWidgets.QLabel()
-        self._status_dot.setFixedSize(20, 20)
-        status_layout.addWidget(self._status_dot)
-
-        self._status_text = QtWidgets.QLabel("检测中...")
-        self._status_text.setStyleSheet(self._status_text_style())
-        status_layout.addWidget(self._status_text, 1)
-
-        self._btn_refresh = QtWidgets.QPushButton("🔄 刷新")
-        self._btn_refresh.setCursor(QtCore.Qt.PointingHandCursor)
-        self._btn_refresh.clicked.connect(self._refresh_state)
-        status_layout.addWidget(self._btn_refresh)
-
-        layout.addWidget(status_group)
+        # === 版本信息行 (代替旧状态卡; 状态靠右侧一键启动按钮文字体现) ===
+        self._version_label = QtWidgets.QLabel("")
+        self._version_label.setStyleSheet(self._label_muted_style())
+        layout.addWidget(self._version_label)
 
         # === 顶部行: 左启动控制 + 右按钮列 (仿 launch_page top_row) ===
         top_row = QtWidgets.QHBoxLayout()
@@ -424,7 +378,6 @@ class WebuiPage(BasePage):
         self._btn_primary.setStyleSheet(primary_ss)
         self._btn_open.setStyleSheet(primary_ss)
         self._btn_update.setStyleSheet(primary_ss)
-        self._btn_refresh.setStyleSheet(styles.secondary_button_style())
         self._btn_log_clear.setStyleSheet(styles.secondary_button_style())
         self._btn_log_open.setStyleSheet(styles.secondary_button_style())
         # 输入控件
@@ -433,7 +386,6 @@ class WebuiPage(BasePage):
         self._cpath_btn.setStyleSheet(input_ss)
         # 文本/日志
         self._log_view.setStyleSheet(self._log_view_style())
-        self._status_text.setStyleSheet(self._status_text_style())
         self._update_cpath_vis()
         # 状态圆点颜色重算 (深/浅版不同)
         self._refresh_state()
@@ -510,31 +462,20 @@ class WebuiPage(BasePage):
             pass
 
     def _update_ui_for_state(self):
-        color = self._state_color(self._state)
-        self._status_dot.setStyleSheet(
-            "background-color: %s; border-radius: 10px;" % color
-        )
-
         info = self._resolve_paths()
         webui_path = info["webui_path"]
         version = _read_workbench_version(webui_path) if webui_path else None
 
-        # 状态文案: 只留一句话描述, 不带路径/操作提示 (按需求精简)
-        if self._state == STATE_NOT_INSTALLED:
-            txt = "WebUI工作台未安装"
-        elif self._state == STATE_NO_DEPS:
-            txt = "待安装依赖"
-        elif self._state == STATE_READY:
-            v_str = " v" + version if version else ""
-            txt = "WebUI工作台就绪" + v_str
-        elif self._state == STATE_RUNNING:
-            txt = "工作中"
+        # 版本信息行 (代替旧状态卡; 不再有圆点/状态文案/刷新按钮).
+        # 状态靠右侧一键启动按钮文字体现. 未安装/缺依赖时不显示版本行.
+        if self._state in (STATE_NOT_INSTALLED, STATE_NO_DEPS):
+            ver_txt = ""
         else:
-            txt = self._state
+            v_str = "版本：%s，" % version if version else ""
+            ver_txt = v_str + "已安装配置"
+        self._version_label.setText(ver_txt)
 
-        self._status_text.setText(txt)
-
-        # 主按钮 (随状态变文字)
+        # 主按钮 (随状态变文字) — 这是状态的主要表达
         if self._state == STATE_NOT_INSTALLED:
             self._btn_primary.setText("⬇ 下载WebUI工作台")
             self._btn_primary.setEnabled(True)
@@ -681,17 +622,22 @@ class WebuiPage(BasePage):
 
         def _worker():
             res = self._pm.start_webui(timeout=60)
-            if res.get("ok"):
+            started_ok = bool(res.get("ok"))
+            if started_ok:
                 self._state = STATE_RUNNING
-                if self._should_auto_open():
-                    info = self._resolve_paths()
-                    self._open_url("http://%s:%s/" % (info["display_host"], info["port"]))
             else:
                 self._state = STATE_READY
             QtCore.QMetaObject.invokeMethod(
                 self, "_after_action_done",
                 QtCore.Qt.QueuedConnection,
             )
+            # 自动打开浏览器必须在主线程做: webbrowser.open 在后台线程会静默失败
+            # (Windows 上注册表查询/COM 初始化依赖主线程). 启动成功才考虑打开.
+            if started_ok and self._should_auto_open():
+                QtCore.QMetaObject.invokeMethod(
+                    self, "_open_url_after_start",
+                    QtCore.Qt.QueuedConnection,
+                )
             err = res.get("error")
             if err:
                 DialogHelper.show_warning(
@@ -759,6 +705,13 @@ class WebuiPage(BasePage):
     @QtCore.pyqtSlot()
     def _after_action_done(self):
         self._refresh_state()
+
+    @QtCore.pyqtSlot()
+    def _open_url_after_start(self):
+        """启动成功后在主线程打开浏览器 (webbrowser.open 在后台线程会静默失败)."""
+        if self._should_auto_open():
+            info = self._resolve_paths()
+            self._open_url("http://%s:%s/" % (info["display_host"], info["port"]))
 
     def _download_webui(self):
         """下载 (git clone) + 完成后自动 setup deps."""

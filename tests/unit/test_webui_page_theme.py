@@ -115,17 +115,17 @@ class TestUpdateTheme(_Fixture):
         page.update_theme()
         page.update_theme(ThemeManager(dark=True).styles)
 
-    def test_status_dot_color_changes_with_theme(self):
-        """状态圆点颜色随深/浅主题切换 (绿: 深色 #10B981 / 浅色 #059669)."""
+    def test_version_label_shown_when_installed(self):
+        """已安装 (ready/running) 时版本信息行显示"已安装配置"; 未安装时不显示."""
         page, app, _ = self._scaffold(ThemeManager(dark=True))
+        # ready: 应显示版本信息
         page._state = wp_module.STATE_READY
         page._update_ui_for_state()
-        self.assertIn("#10B981", page._status_dot.styleSheet())
-        # 切浅色
-        tm_light = ThemeManager(dark=False)
-        page.theme_manager = tm_light
-        page.update_theme(tm_light.styles)
-        self.assertIn("#059669", page._status_dot.styleSheet())
+        self.assertIn("已安装配置", page._version_label.text())
+        # not_installed: 版本行应为空
+        page._state = wp_module.STATE_NOT_INSTALLED
+        page._update_ui_for_state()
+        self.assertEqual(page._version_label.text(), "")
 
 
 class TestConfigControls(_Fixture):
@@ -187,6 +187,20 @@ class TestOpenUrl(_Fixture):
         with patch("ui_qt.pages.webui_page.webbrowser.open") as m_open:
             page._open_url("http://127.0.0.1:8199/")
             m_open.assert_called_once_with("http://127.0.0.1:8199/")
+
+    def test_open_url_after_start_slot_opens_on_main_thread(self):
+        """_open_url_after_start 是主线程 slot, 启动成功后按 mode 打开 (回归 #1).
+
+        webbrowser.open 在后台线程会静默失败, 所以自动打开必须经此 slot 走主线程.
+        """
+        page, app, _ = self._scaffold(
+            ThemeManager(dark=True),
+            webui_options={"port": 8199, "browser_open_mode": "default"},
+        )
+        with patch("ui_qt.pages.webui_page.webbrowser.open") as m_open:
+            page._open_url_after_start()
+            m_open.assert_called_once()
+            self.assertIn("127.0.0.1:8199", m_open.call_args[0][0])
 
     def test_webbrowser_mode_with_path_uses_popen(self):
         """webbrowser 模式 + 有效路径 -> subprocess.Popen([path, url])."""
