@@ -2132,3 +2132,225 @@ class TestProgressAndBackgroundTask(_Fixture):
 
         # 要么不传 hf_endpoint, 要么传但是 None
         hf_ep = captured.get("hf_endpoint")
+        self.assertIsNone(hf_ep,
+            f"proxy_settings 为空时 hf_endpoint 应为 None, 实际 {hf_ep!r}")
+
+
+class TestRemoveWorkbenchButton(_Fixture):
+
+    """TDD RED: 工作台移除按钮契约.
+
+    行为:
+    - 按钮位置: 版本与更新卡片右侧, 跟更新按钮成列.
+    - 启用条件: STATE_NO_DEPS 或 STATE_READY (有目录可删).
+    - 禁用条件: STATE_NOT_INSTALLED (没东西删), STATE_RUNNING (必须先停),
+      以及所有 busy 态.
+    - 点击: 弹 CustomConfirmDialog (destructive role) 显示要删的路径,
+      确认 -> shutil.rmtree(webui_path) -> 刷新状态.
+    - 取消 / 错误: 不动目录, 弹错误对话框.
+    """
+
+    def test_remove_button_exists_in_version_card(self):
+
+        """工作台页面必须有 self._btn_remove, 在 version 卡片右列.
+
+        现状: 还没有这个按钮. RED.
+
+        """
+        page, _, _ = self._scaffold(ThemeManager(dark=True))
+        self.assertTrue(hasattr(page, "_btn_remove"),
+            "WebuiPage 应有 self._btn_remove 按钮, 实际没有")
+
+    def test_remove_button_enabled_when_installed(self):
+
+        """STATE_READY 时 remove 按钮可用.
+
+        """
+        page, _, webui_path = self._scaffold(ThemeManager(dark=True))
+        (webui_path / "requirements.txt").write_text("flask\n")
+        page._set_state(wp_module.STATE_READY)
+        self.assertTrue(page._btn_remove.isEnabled(),
+            "STATE_READY 时 remove 按钮应可用")
+
+    def test_remove_button_enabled_when_no_deps(self):
+
+        """STATE_NO_DEPS 时 remove 按钮也可用 (目录在, 依赖坏, 用户可重装/移除).
+
+        """
+        page, _, _ = self._scaffold(ThemeManager(dark=True))
+        page._set_state(wp_module.STATE_NO_DEPS)
+        self.assertTrue(page._btn_remove.isEnabled(),
+            "STATE_NO_DEPS 时 remove 按钮应可用")
+
+    def test_remove_button_disabled_when_not_installed(self):
+
+        """STATE_NOT_INSTALLED 时没东西删, 按钮禁用.
+
+        """
+        page, _, _ = self._scaffold(ThemeManager(dark=True))
+        page._set_state(wp_module.STATE_NOT_INSTALLED)
+        self.assertFalse(page._btn_remove.isEnabled(),
+            "STATE_NOT_INSTALLED 时 remove 按钮应禁用 (没东西删)")
+
+    def test_remove_button_disabled_when_running(self):
+
+        """STATE_RUNNING 时必须先停, 按钮禁用.
+
+        """
+        page, _, _ = self._scaffold(ThemeManager(dark=True))
+        page._set_state(wp_module.STATE_RUNNING)
+        self.assertFalse(page._btn_remove.isEnabled(),
+            "STATE_RUNNING 时 remove 按钮应禁用 (必须先停工作台)")
+
+    def test_remove_button_disabled_in_busy_states(self):
+
+        """所有 _BUSY_STATES (下载/装依赖/检测/等 ComfyUI/启动/停止) 时禁用.
+
+        """
+        page, _, _ = self._scaffold(ThemeManager(dark=True))
+        for busy in [wp_module.STATE_CHECKING, wp_module.STATE_WAITING_COMFYUI,
+                     wp_module.STATE_STARTING, wp_module.STATE_STOPPING,
+                     wp_module.STATE_DOWNLOADING, wp_module.STATE_INSTALLING_DEPS]:
+            page._set_state(busy)
+            self.assertFalse(page._btn_remove.isEnabled(),
+                f"busy state {busy} 时 remove 按钮应禁用")
+
+    def test_on_remove_clicked_shows_confirmation_with_path(self):
+
+        """点击 remove -> 弹 CustomConfirmDialog, 内容含 webui 路径.
+
+        现状: _on_remove_clicked 还没实现. RED.
+
+        """
+        page, _, webui_path = self._scaffold(ThemeManager(dark=True))
+        (webui_path / "requirements.txt").write_text("flask\n")
+        page._set_state(wp_module.STATE_READY)
+
+        captured = {}
+
+        class FakeDlg:
+
+            def __init__(self, parent, title, content, buttons, default_index, theme_manager):
+
+                captured["title"] = title
+
+                captured["content"] = content
+
+                captured["buttons"] = buttons
+
+                captured["default_index"] = default_index
+
+                captured["theme_manager"] = theme_manager
+
+            def exec_(self):
+
+                captured["exec_called"] = True
+
+                return QtWidgets.QDialog.Rejected  # 用户取消, 不删
+
+            def get_result(self):
+
+                return None
+
+        with patch("ui_qt.pages.webui_page.CustomConfirmDialog", FakeDlg):
+            page._on_remove_clicked()
+
+        self.assertTrue(captured.get("exec_called"), "应弹确认对话框")
+        # Windows 上 pathlib 返回 8.3 短名 (ADMINI~1) 而 Path.resolve 返回完整名,
+        # 比较 basename 即可.
+        self.assertIn(webui_path.name, captured.get("content", ""),
+            f"确认对话框内容应含 webui 目录名 ({webui_path.name}), 实际 {captured.get('content')!r}")
+        # 至少有一个按钮是 destructive role (红色, 主操作)
+        roles = [b.get("role") for b in captured.get("buttons", [])]
+        self.assertIn("destructive", roles,
+            f"确认对话框应有 destructive 按钮, 实际 {roles}")
+
+    def test_on_remove_confirmed_deletes_directory(self):
+
+        """确认 -> shutil.rmtree(webui_path) -> 目录不存在.
+
+        """
+        page, _, webui_path = self._scaffold(ThemeManager(dark=True))
+        (webui_path / "requirements.txt").write_text("flask\n")
+        (webui_path / "app" / "flask_app.py").write_text("# stub")
+        self.assertTrue(webui_path.exists(), "前置: webui_path 应存在")
+        page._set_state(wp_module.STATE_READY)
+
+        class AcceptDlg:
+
+            def __init__(self, *a, **kw):
+
+                pass
+
+            def exec_(self):
+
+                return QtWidgets.QDialog.Accepted
+
+            def get_result(self):
+
+                return 1  # 第 2 个按钮 (destructive)
+
+        with patch("ui_qt.pages.webui_page.CustomConfirmDialog", AcceptDlg):
+            page._on_remove_clicked()
+
+        self.assertFalse(webui_path.exists(),
+            f"确认后 webui_path 应被删, 实际还在: {webui_path}")
+
+    def test_on_remove_cancelled_keeps_directory(self):
+
+        """取消 -> 目录保留.
+
+        """
+        page, _, webui_path = self._scaffold(ThemeManager(dark=True))
+        (webui_path / "requirements.txt").write_text("flask\n")
+        page._set_state(wp_module.STATE_READY)
+
+        class RejectDlg:
+
+            def __init__(self, *a, **kw):
+
+                pass
+
+            def exec_(self):
+
+                return QtWidgets.QDialog.Rejected
+
+            def get_result(self):
+
+                return 0  # 第 1 个按钮 (取消)
+
+        with patch("ui_qt.pages.webui_page.CustomConfirmDialog", RejectDlg):
+            page._on_remove_clicked()
+
+        self.assertTrue(webui_path.exists(), "取消时 webui_path 应保留")
+
+    def test_on_remove_handles_rmtree_error(self):
+
+        """rmtree 抛异常 (文件被占用 / 权限) -> 弹错误对话框, 不崩.
+
+        """
+        page, _, webui_path = self._scaffold(ThemeManager(dark=True))
+        (webui_path / "requirements.txt").write_text("flask\n")
+        page._set_state(wp_module.STATE_READY)
+
+        class AcceptDlg:
+
+            def __init__(self, *a, **kw):
+
+                pass
+
+            def exec_(self):
+
+                return QtWidgets.QDialog.Accepted
+
+            def get_result(self):
+
+                return 1
+
+        with patch("ui_qt.pages.webui_page.CustomConfirmDialog", AcceptDlg), \
+             patch("ui_qt.pages.webui_page.DialogHelper.show_warning") as m_warn, \
+             patch("shutil.rmtree", side_effect=PermissionError("file in use")):
+            page._on_remove_clicked()  # 不应抛异常
+
+        self.assertTrue(m_warn.called,
+            "rmtree 失败时 应弹错误对话框")

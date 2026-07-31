@@ -30,6 +30,7 @@
 from __future__ import annotations
 
 import os
+import shutil
 import sys
 import subprocess
 import webbrowser
@@ -430,13 +431,34 @@ class WebuiPage(BasePage):
         card_inner.setColumnStretch(1, 1)
         version_layout.addWidget(self._version_info_card, 1)
 
-        # 右: 更新按钮
+        # 右: 更新 + 移除按钮 (垂直排列, 移除 destructive 红色)
+        update_col = QtWidgets.QVBoxLayout()
+        update_col.setSpacing(6)
+        version_layout.addLayout(update_col)
+
         self._btn_update = QtWidgets.QPushButton("🔄 更新")
         self._btn_update.setCursor(QtCore.Qt.PointingHandCursor)
         self._btn_update.setMinimumHeight(36)
         self._btn_update.clicked.connect(self._on_update_clicked)
         self._btn_update.setToolTip("git pull 更新 WebUI工作台到最新版本")
-        version_layout.addWidget(self._btn_update)
+        update_col.addWidget(self._btn_update)
+
+        # 移除按钮: destructive 红色, 仅当有目录可删时启用 (NO_DEPS / READY).
+        self._btn_remove = QtWidgets.QPushButton("🗑 移除")
+        self._btn_remove.setCursor(QtCore.Qt.PointingHandCursor)
+        self._btn_remove.setMinimumHeight(36)
+        self._btn_remove.clicked.connect(self._on_remove_clicked)
+        self._btn_remove.setToolTip(
+            "删除 WebUI工作台目录 (弹确认). "
+            "工作台运行时禁用, 必须先停止."
+        )
+        try:
+            styles = self.theme_manager.styles
+            if hasattr(styles, "destructive_outline_button_style"):
+                self._btn_remove.setStyleSheet(styles.destructive_outline_button_style())
+        except Exception:
+            pass
+        update_col.addWidget(self._btn_remove)
 
         # === 段3: 实时日志 (实时 tail, 与实时日志页一致) ===
         log_group = QtWidgets.QGroupBox("实时日志")
@@ -515,6 +537,10 @@ class WebuiPage(BasePage):
         self._btn_primary.setStyleSheet(primary_ss)
         self._btn_open.setStyleSheet(primary_ss)
         self._btn_update.setStyleSheet(primary_ss)
+        try:
+            self._btn_remove.setStyleSheet(styles.destructive_outline_button_style())
+        except Exception:
+            pass
         self._btn_log_clear.setStyleSheet(styles.secondary_button_style())
         self._btn_log_open.setStyleSheet(styles.secondary_button_style())
         # 输入控件
@@ -669,6 +695,8 @@ class WebuiPage(BasePage):
         self._btn_open.setEnabled(self._state == STATE_RUNNING)
         # 更新按钮: 仅 ready (已安装未跑) 可用; 更新中/启动停止中禁用
         self._btn_update.setEnabled(self._state == STATE_READY and not self._updating)
+        # 移除按钮: 仅 NO_DEPS/READY 可用 (有目录可删); NOT_INSTALLED 没东西删, RUNNING 必须先停, busy 全禁用.
+        self._btn_remove.setEnabled(self._state in (STATE_NO_DEPS, STATE_READY))
 
     # ---------------- 按钮回调 ----------------
     def _on_primary_clicked(self):
@@ -955,6 +983,66 @@ class WebuiPage(BasePage):
                 None, "WebUI工作台启动失败",
                 "WebUI工作台启动失败: %s\n\n请查看 launcher/webui.log" % err,
             )
+
+    def _on_remove_clicked(self):
+        """移除工作台: 弹确认 -> 删 webui 目录.
+
+        双保险: 按钮 setEnabled(False) 已经禁用了 NOT_INSTALLED/RUNNING/busy 状态,
+        这里再补一道 _is_busy / running 检查防定时器竞态.
+        """
+        # 双保险: 中间态拒绝 (防定时器竞态把态刷回稳定态)
+        if self._is_busy():
+            return
+        info = self._resolve_paths()
+        webui_path = info["webui_path"]
+        if webui_path is None or not webui_path.exists():
+            DialogHelper.show_warning(self, "无法移除", "WebUI工作台目录不存在，无需移除。")
+            return
+        # 双保险: 检查 webui 仍在跑 (按钮已禁用但兜底)
+        if self._pm is None:
+            self._pm = WebuiProcessManager(self.app)
+        if self._pm.is_running():
+            DialogHelper.show_warning(
+                self, "无法移除",
+                "WebUI工作台正在运行，请先停止后再移除。",
+            )
+            return
+
+        dlg = CustomConfirmDialog(
+            parent=self,
+            title="移除 WebUI工作台",
+            content=(
+                f"将永久删除以下目录及其全部内容:\n\n"
+                f"  {webui_path}\n\n"
+                f"此操作不可撤销。是否继续?"
+            ),
+            buttons=[
+                {"text": "取消", "role": "normal"},
+                {"text": "确认移除", "role": "destructive"},
+            ],
+            default_index=0,
+            theme_manager=self.theme_manager,
+        )
+        dlg.exec_()
+        result = dlg.get_result()
+        if result != 1:
+            # 取消 (或弹窗关闭)
+            return
+
+        # 确认 -> rmtree
+        try:
+            shutil.rmtree(webui_path)
+        except Exception as e:
+            DialogHelper.show_warning(
+                self, "移除失败",
+                f"删除目录失败: {e}\n\n请检查文件是否被占用, 关闭可能使用该目录的程序后重试.",
+            )
+            return
+
+        # 失效 deps 缓存, 重新探测状态
+        self._deps_cache_key = None
+        self._deps_cache_result = None
+        self._refresh_state(force=True)
 
     @QtCore.pyqtSlot()
     def _open_url_after_start(self):
