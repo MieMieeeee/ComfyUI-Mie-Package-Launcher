@@ -148,9 +148,16 @@ class ProgressDialog(FramelessDraggableDialog):
         # 宽度固定（420 够放进度条 + 多行状态文字 + 按钮行），高度随 set_status 的 adjustSize 自适应。
         # 之前用 setMinimumSize(350,160)+setMaximumWidth(500)，但某些字体/缩放下 minimumSizeHint
         # 宽度算出来超 500 上限，触发 QWindowsWindow::setGeometry 警告。固定宽度后宽高不再打架。
-        self.setMinimumHeight(160)
+        #
+        # v6.1: minimumHeight 从 160 提到 210. 原因: Windows 对 frameless top-level window 有
+        # 强制最小高度 (~203px, 不同 DPI 系统会变), 当 show_cancel=False 时初始 resize=160,
+        # adjustSize 算出 165 (正好压在 minimum 上), show() 时 Windows 顶到 203 报 "QWindowsWindow::
+        # setGeometry Unable to set geometry 420x165 -> 420x203". 设 minimumSize=(420, 210) 比 Windows
+        # 强制值高 7px, adjustSize 算出来就 >= 210, Windows 不会再顶也不会警告. (高度还是随 set_status
+        # 自适应, 不影响长文本.)
+        self.setMinimumSize(420, 210)
         self.setFixedWidth(420)
-        self.resize(420, 190 if show_cancel else 160)
+        self.resize(420, 210)
         self.setSizePolicy(
             QtWidgets.QSizePolicy.Fixed,
             QtWidgets.QSizePolicy.Preferred,

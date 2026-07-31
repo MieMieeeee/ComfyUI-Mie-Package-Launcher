@@ -74,6 +74,28 @@ class TestProgressDialogAutoSize:
             f"Dialog width should be <= 600, got {dlg.width()}"
         )
 
+    def test_minimum_height_avoids_windows_geometry_override(self, qtbot):
+        """ProgressDialog 的 minimumHeight 必须 >= 200, 否则 Windows 在 show() 时会强制放大到
+        ~203 触发 QWindowsWindow::setGeometry "Unable to set geometry" 警告.
+
+        实际报: requested=420x165, resulting=420x203 (Windows enforced minimum for frameless
+        top-level windows). 当 show_cancel=False (无取消按钮, 初始 resize=160) 时尤其明显,
+        因为 adjustSize() 算出 165 (正好压在 minimum 上) 然后被 Windows 顶到 203.
+
+        修法: minimumSize 设为 (420, 200) 让 adjustSize 算出来就 >= 200, Windows 不会顶.
+        """
+        # show_cancel=False 是 _run_with_progress 的实际用法 (clone/pull/install 都没取消按钮).
+        dlg = ProgressDialog(title="t", show_cancel=False, show_background=True)
+        qtbot.addWidget(dlg)
+        min_size = dlg.minimumSize()
+        assert min_size.height() >= 203, (
+            f"ProgressDialog minimum height must be >= 203 to avoid Windows geometry override, "
+            f"got {min_size.height()} (Windows will resize to ~203 and emit warning)"
+        )
+        assert min_size.width() == 420, (
+            f"ProgressDialog minimum width should be 420, got {min_size.width()}"
+        )
+
 
 class TestProgressDialogDraggable:
     """Frameless dialog must be draggable with left mouse button.
