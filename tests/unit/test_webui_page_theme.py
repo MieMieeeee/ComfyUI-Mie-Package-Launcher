@@ -2354,3 +2354,37 @@ class TestRemoveWorkbenchButton(_Fixture):
 
         self.assertTrue(m_warn.called,
             "rmtree 失败时 应弹错误对话框")
+
+    def test_remove_button_uses_destructive_widget(self):
+        """_btn_remove 必须是 DestructiveButton 实例 (跟 models_page "移除所选" + 退出启动器确认按钮一致).
+
+        之前用 QtWidgets.QPushButton + setStyleSheet(destructive_outline_button_style()) 是错的:
+        - destructive_outline_button_style() 是 ActionBar 次级操作风格 (透明背景 + 红描边),
+          用于"禁用/卸载选中"这种相对温和的破坏性动作
+        - DestructiveButton 是实色 #EF4444, 跟全应用"高风险破坏性操作"视觉一致
+        - 跟 models_page._btn_remove 直接对位 (都是 "remove" 语义)
+        """
+        from ui_qt.widgets.buttons import DestructiveButton
+        page, _, _ = self._scaffold(ThemeManager(dark=True))
+        self.assertIsInstance(page._btn_remove, DestructiveButton,
+            f"_btn_remove 必须是 DestructiveButton (实色红), 实际 {type(page._btn_remove).__name__}")
+        # objectName 跟全应用 DestructiveBtn 命名空间一致 (theme_styles 可针对该名做主题覆盖)
+        self.assertEqual(page._btn_remove.objectName(), "DestructiveBtn",
+            "_btn_remove 应设 objectName='DestructiveBtn' 跟其他 DestructiveButton 一致")
+
+    def test_remove_button_theme_change_reapplies_destructive_style(self):
+        """update_theme() 后 _btn_remove 的样式仍然走 destructive_button_style (实色红).
+
+        DestructiveButton.update_theme() 内部会重 apply, 不能漏掉, 否则切深/浅主题时
+        红色会冻结.
+        """
+        from ui_qt.theme_styles import ThemeStyles
+        page, _, _ = self._scaffold(ThemeManager(dark=True))
+        # 强改 stylesheet 为非 destructive 字符串, 模拟"如果 update_theme 漏 apply 会发生什么"
+        page._btn_remove.setStyleSheet("QPushButton { background: #000000; color: #FFFFFF; }")
+        # 触发 update_theme
+        page.update_theme(page.theme_manager.styles)
+        ss = page._btn_remove.styleSheet()
+        # 应该包含 destructive 实色背景 (light=#EF4444, dark=#EF4444 — 两版统一)
+        self.assertIn("#EF4444", ss.upper(),
+            f"update_theme 应重应用 destructive 样式 (含 #EF4444), 实际 {ss!r}")

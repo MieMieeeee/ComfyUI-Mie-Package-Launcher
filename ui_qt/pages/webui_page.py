@@ -48,6 +48,7 @@ from core.webui_dependencies import check_webui_dependencies, install_webui_requ
 from core.webui_installer import clone_webui, pull_webui
 from utils.net import resolve_pypi_index_url
 from ui_qt.widgets.dialog_helper import DialogHelper
+from ui_qt.widgets.buttons import DestructiveButton
 from ui_qt.widgets.custom_confirm_dialog import CustomConfirmDialog
 from ui_qt.widgets.custom import NoWheelComboBox
 from ui_qt.log_viewer import LogTailer, read_tail_lines
@@ -443,8 +444,11 @@ class WebuiPage(BasePage):
         self._btn_update.setToolTip("git pull 更新 WebUI工作台到最新版本")
         update_col.addWidget(self._btn_update)
 
-        # 移除按钮: destructive 红色, 仅当有目录可删时启用 (NO_DEPS / READY).
-        self._btn_remove = QtWidgets.QPushButton("🗑 移除")
+        # 移除按钮: 实色红 (destructive), 跟 models_page "移除所选" + "退出启动器" 确认按钮一致.
+        # 用 DestructiveButton widget 而不是 setStyleSheet(destructive_outline_button_style()):
+        # - destructive_outline 是 ActionBar 次级操作风格 (禁用/卸载选中), 太克制
+        # - DestructiveButton 是实色 #EF4444, 跟全应用"高风险破坏性操作"视觉一致
+        self._btn_remove = DestructiveButton("🗑 移除", self.theme_manager.styles)
         self._btn_remove.setCursor(QtCore.Qt.PointingHandCursor)
         self._btn_remove.setMinimumHeight(36)
         self._btn_remove.clicked.connect(self._on_remove_clicked)
@@ -452,12 +456,6 @@ class WebuiPage(BasePage):
             "删除 WebUI工作台目录 (弹确认). "
             "工作台运行时禁用, 必须先停止."
         )
-        try:
-            styles = self.theme_manager.styles
-            if hasattr(styles, "destructive_outline_button_style"):
-                self._btn_remove.setStyleSheet(styles.destructive_outline_button_style())
-        except Exception:
-            pass
         update_col.addWidget(self._btn_remove)
 
         # === 段3: 实时日志 (实时 tail, 与实时日志页一致) ===
@@ -537,10 +535,8 @@ class WebuiPage(BasePage):
         self._btn_primary.setStyleSheet(primary_ss)
         self._btn_open.setStyleSheet(primary_ss)
         self._btn_update.setStyleSheet(primary_ss)
-        try:
-            self._btn_remove.setStyleSheet(styles.destructive_outline_button_style())
-        except Exception:
-            pass
+        # DestructiveButton.update_theme() 内部重 apply destructive_button_style (实色红).
+        self._btn_remove.update_theme(styles)
         self._btn_log_clear.setStyleSheet(styles.secondary_button_style())
         self._btn_log_open.setStyleSheet(styles.secondary_button_style())
         # 输入控件
