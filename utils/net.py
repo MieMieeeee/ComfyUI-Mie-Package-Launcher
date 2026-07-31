@@ -94,6 +94,13 @@ def apply_git_proxy_to_url(base: str, proxy_settings: dict | None) -> str:
     - git_proxy_mode == "custom"    ->  <git_proxy_url>/<base>
     - 其他 (none / 缺失)            ->  原样返回 base
 
+    idempotent: base 已经以代理前缀开头, 原样返回 (避免双重 prefix 触发 403).
+
+    实际场景: 用户之前用 gh-proxy clone 过 webui, .git/config 里 remote.origin.url
+    已经是 https://gh-proxy.com/https://github.com/...; pull_webui 用
+    `git remote get-url origin` 读到 raw=已代理 URL, 再 apply 会变成
+    https://gh-proxy.com/https://gh-proxy.com/... gh-proxy 返 403.
+
     跟 services/version_service.py:_apply_proxy_to_path 行为一致, 抽到这里供
     webui clone / 未来一般 git 链接复用, 避免散落 magic.
     """
@@ -104,11 +111,16 @@ def apply_git_proxy_to_url(base: str, proxy_settings: dict | None) -> str:
         cfg = proxy_settings or {}
         mode = (cfg.get("git_proxy_mode") or "none").strip()
         url = (cfg.get("git_proxy_url") or "").strip()
+        # idempotent: 已带 proxy 前缀就原样返回
         if mode == GITHUB_PROXY_MODE_GH_PROXY:
+            if base.lower().startswith(GITHUB_GH_PROXY_BASE.lower()):
+                return base
             return GITHUB_GH_PROXY_BASE + base
         if mode == GITHUB_PROXY_MODE_CUSTOM and url:
             if not url.endswith("/"):
                 url += "/"
+            if base.lower().startswith(url.lower()):
+                return base
             return url + base
     except Exception:
         pass
