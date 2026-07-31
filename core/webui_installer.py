@@ -310,21 +310,28 @@ def pull_webui(
             si.dwFlags |= subprocess.STARTF_USESHOWWINDOW
             pull_kwargs["startupinfo"] = si
             pull_kwargs["creationflags"] = subprocess.CREATE_NO_WINDOW
-        if proxy_url:
-            # 代理模式: fetch 远程 URL + reset --hard origin/HEAD
-            # 避免修改 git remote (不动 .git/config)
-            cmd = [git_exe, "fetch", proxy_url, "--depth", "1"]
-            proc = subprocess.Popen(cmd, **pull_kwargs)
-            rc = proc.wait()
-            if rc == 0:
-                # 合并远程变化到当前分支
-                proc = subprocess.Popen(
-                    [git_exe, "reset", "--hard", "origin/HEAD"],
-                    **pull_kwargs,
-                )
+        # v6.6: 永远走 git fetch + git reset --hard origin/HEAD, 不用 git pull.
+        # 原因: 用户本地 main 跟 origin/main divergent 时, git pull 在 pull.rebase / pull.ff
+        # 三个策略都没设的情况下会 fatal "Need to specify how to reconcile divergent branches".
+        # 用 fetch + reset 永远走 fast-forward 语义, 跟本地状态无关, 不会卡.
+        #
+        # fetch URL 选择:
+        # - 代理模式 + origin 是 github.com + origin 没被代理过 -> fetch 代理 URL
+        # - 代理模式 + origin 已经代理过 (idempotent 后 proxied == raw) -> fetch origin (避免双 prefix)
+        # - 代理模式 + origin 不是 github.com (内网 gitlab) -> fetch origin (防代理锈坏)
+        # - 非代理模式 -> fetch origin
+        if proxy_url and proxied != raw:
+            fetch_url = proxy_url
         else:
+            fetch_url = "origin"
+
+        cmd = [git_exe, "fetch", fetch_url, "--depth", "1"]
+        proc = subprocess.Popen(cmd, **pull_kwargs)
+        rc = proc.wait()
+        if rc == 0:
+            # reset --hard origin/HEAD: 把当前分支对齐到刚 fetch 的 origin/HEAD
             proc = subprocess.Popen(
-                [git_exe, "pull", "--depth", "1"],
+                [git_exe, "reset", "--hard", "origin/HEAD"],
                 **pull_kwargs,
             )
     except Exception as e:

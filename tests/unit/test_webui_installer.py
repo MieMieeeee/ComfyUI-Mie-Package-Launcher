@@ -234,3 +234,84 @@ def test_pull_sets_stdin_devnull_to_avoid_winerror6(monkeypatch, tmp_path):
     import os
     if os.name == "nt":
         assert kw.get("creationflags", 0) & subprocess.CREATE_NO_WINDOW, "win32 应设 CREATE_NO_WINDOW"
+
+
+def test_pull_never_calls_git_pull_to_avoid_divergent_branches(monkeypatch, tmp_path):
+    """pull_webui 必须用 git fetch + reset 而不是 git pull.
+
+    原因: 用户本地 main 跟 origin/main divergent 时, git pull 在 pull.rebase / pull.ff /
+    pull.rebase 三个策略都没设的情况下会 fatal "Need to specify how to reconcile divergent branches".
+    用 fetch + reset --hard origin/HEAD 永远走 fast-forward 语义, 跟本地状态无关, 不会卡.
+
+    回归: v6.2 加 apply_git_proxy_to_url idempotent 后, 用户 origin 是已代理 URL 时
+    proxy_url = None, 落到 git pull 分支就报这个错.
+    """
+    import subprocess as _sp
+    from core.webui_installer import pull_webui
+
+    captured_cmds = []
+
+    class _FakePopen:
+        def __init__(self, cmd, **kw):
+            captured_cmds.append(list(cmd))
+            self.stdout = iter([])
+
+        def wait(self):
+            return 0
+
+    monkeypatch.setattr(_sp, "Popen", _FakePopen)
+    # _FakeApp 默认 proxy_mode=none, 走到非代理分支, 也必须走 fetch 不是 pull
+    target = tmp_path / "webui"
+    target.mkdir()
+    (target / ".git").mkdir()
+    pull_webui(_FakeApp(), target)
+
+    flat = [arg for cmd in captured_cmds for arg in cmd]
+    assert "fetch" in flat, f"pull_webui 应调 git fetch (不走 git pull), 实际 cmd={captured_cmds}"
+    assert "pull" not in flat, f"pull_webui 不应调 git pull (会触发 divergent branches), 实际 cmd={captured_cmds}"
+    assert "reset" in flat, f"pull_webui 应调 git reset --hard origin/HEAD, 实际 cmd={captured_cmds}"
+
+
+def test_pull_uses_origin_when_remote_already_proxied(monkeypatch, tmp_path):
+    """用户的 origin.url 已经是代理 URL 时, pull_webui 应 fetch from origin (避免双 prefix).
+
+    之前 v6.2 改后 apply_git_proxy_to_url idempotent, 在 origin 已代理 + proxy_mode=gh-proxy 时
+    proxied == raw, proxy_url = None, 走到 git pull 分支报 divergent. 应改成 fetch origin.
+    """
+    import subprocess as _sp
+    from core.webui_installer import pull_webui
+
+    captured_cmds = []
+
+    class _FakePopen:
+        def __init__(self, cmd, **kw):
+            captured_cmds.append(list(cmd))
+            self.stdout = iter([])
+
+        def wait(self):
+            return 0
+
+    monkeypatch.setattr(_sp, "Popen", _FakePopen)
+    # 模拟 origin.url 已经被代理过 + 用户开了 gh-proxy
+    app = _FakeApp()
+    app.config["proxy_settings"] = {"git_proxy_mode": "gh-proxy", "git_proxy_url": ""}
+
+    def fake_check_output(cmd, **kw):
+        if cmd[:2] == ["git", "remote"]:
+            return b"https://gh-proxy.com/https://github.com/MieMieeeee/Comfyui-Workbench-Mie.git\n"
+        return b""
+
+    monkeypatch.setattr(_sp, "check_output", fake_check_output)
+
+    target = tmp_path / "webui"
+    target.mkdir()
+    (target / ".git").mkdir()
+    pull_webui(app, target)
+
+    # fetch URL 应是 origin (不是 gh-proxy.com/.../gh-proxy.com/.../双 prefix)
+    fetch_cmds = [cmd for cmd in captured_cmds if "fetch" in cmd]
+    assert fetch_cmds, f"应调 git fetch, 实际 cmd={captured_cmds}"
+    fetch_url = fetch_cmds[0][2]  # cmd[0]=git, cmd[1]=fetch, cmd[2]=url
+    assert fetch_url == "origin", (
+        f"origin 已代理时 fetch URL 应为 'origin' (避免双 prefix), 实际 {fetch_url!r}"
+    )
