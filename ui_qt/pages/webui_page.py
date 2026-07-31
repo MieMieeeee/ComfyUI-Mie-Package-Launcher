@@ -337,7 +337,19 @@ class WebuiPage(BasePage):
         )
 
         self._listen_chk = QtWidgets.QCheckBox("允许局域网访问")
-        listen_lan = bool(self._webui_options().get("listen_lan", False))
+        # v6.5: 默认允许局域网访问 (display_host=0.0.0.0).
+        # v6.5: 默认允许局域网访问 (display_host=0.0.0.0). 显式 listen_lan=False 时仍按用户选择.
+        listen_lan = bool(self._webui_options().get("listen_lan", True))
+        self._listen_chk.setChecked(listen_lan)
+        self._listen_chk.setToolTip("允许局域网内其他设备访问 WebUI工作台")
+        # 把默认值同步到 config: 用户首次进来 config 没 listen_lan/display_host 时,
+        # 让 config 也写出这两个键 (跟 checkbox 状态一致), 后续读 config 永远拿到显式值.
+        # 已有 config 时保留用户原值.
+        opts = self._webui_options()
+        if "listen_lan" not in opts:
+            self._save_webui_option("listen_lan", listen_lan)
+        if "display_host" not in opts:
+            self._save_webui_option("display_host", "0.0.0.0" if listen_lan else "127.0.0.1")
         self._listen_chk.setChecked(listen_lan)
         self._listen_chk.setToolTip("允许局域网内其他设备访问 WebUI工作台")
         self._listen_chk.toggled.connect(self._on_listen_toggled)

@@ -399,6 +399,36 @@ class TestConfigControls(_Fixture):
 
         self.assertFalse(app.config["webui_options"]["listen_lan"])
 
+    def test_listen_chk_defaults_to_true_for_lan_access(self):
+
+        """WebUI 工作台默认允许局域网访问: webui_options 没显式 listen_lan 时, 勾选框默认勾上.
+
+        v6.5: 用户要求工作台默认 LAN 访问 (display_host=0.0.0.0). 这条锁住默认行为,
+        防止哪天有人把默认值改回 False 又没意识到 LAN 默认开启是设计意图.
+
+        跟首页 launch_options.listen_lan 默认值解耦: 工作台是 webui 子模块,
+        行为可以独立 (用户在首页启动 ComfyUI 时仍可走主页默认).
+        """
+
+        # _scaffold 默认 webui_options={"port":8199}, 没 listen_lan 键
+        page, app, _ = self._scaffold(ThemeManager(dark=True))
+
+        self.assertTrue(
+            page._listen_chk.isChecked(),
+            "WebUI 工作台默认应勾上'允许局域网访问' (listen_lan=True), "
+            f"实际未勾. webui_options={app.config.get('webui_options')!r}",
+        )
+
+        # 显式传 listen_lan=False 时仍按用户选择 (不强制 True)
+        page2, app2, _ = self._scaffold(
+            ThemeManager(dark=True),
+            webui_options={"port": 8199, "listen_lan": False},
+        )
+        self.assertFalse(
+            page2._listen_chk.isChecked(),
+            "显式 listen_lan=False 时应尊重用户选择, 不强制勾上",
+        )
+
     def test_port_edit_writes_config(self):
 
         """端口输入写 config.webui_options.port."""
