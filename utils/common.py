@@ -90,6 +90,21 @@ def run_hidden(cmd, **kwargs):
         if kwargs.get("capture_output"):
             kwargs.setdefault("stdin", subprocess.DEVNULL)
 
+    # 文本模式编码兜底：调用方只写 text=True 而不指定 encoding 时，Python 默认
+    # 用 UTF-8 解码子进程输出。中文 Windows 下 taskkill / wmic / git 等命令的
+    # 输出多为 GBK/CP936，非 ASCII 字节（如 0xB2/0xB3）不是合法 UTF-8 起始字节，
+    # 会让 subprocess 内部 _readerthread 抛 UnicodeDecodeError（命令实际已执行
+    # 成功，rc=0，只是丢了输出）。这里统一注入系统首选编码 + errors=ignore，
+    # 与 core/probe.py、core/process_manager.py 已显式指定的写法保持一致。
+    # 已显式传 encoding 的调用方不受影响（setdefault 不覆盖）。
+    if kwargs.get("text") and "encoding" not in kwargs:
+        try:
+            import locale as _locale
+            kwargs["encoding"] = _locale.getpreferredencoding(False) or "utf-8"
+        except Exception:
+            kwargs["encoding"] = "utf-8"
+        kwargs.setdefault("errors", "ignore")
+
     global RUNHIDDEN_SEQ
     RUNHIDDEN_SEQ += 1
     cmd_id = RUNHIDDEN_SEQ
