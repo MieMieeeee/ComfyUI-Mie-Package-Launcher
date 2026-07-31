@@ -445,9 +445,20 @@ class LaunchPage(BasePage):
         except Exception:
             pass
 
+    def _active_root(self):
+        """多环境支持：取激活环境的 ComfyUI 根目录。
+
+        必须走 ``app.get_active_paths()`` 而不是直接读 ``config['paths']`` ——
+        后者是老 schema 的全局回退段，环境切换后不会跟着 ``active_env_id`` 变，
+        会导致快捷目录按钮始终指向原始根目录。
+        """
+        _paths = self.app.get_active_paths() if hasattr(self.app, "get_active_paths") \
+            else self.app.config.get("paths", {})
+        return Path(_paths.get('comfyui_root', '.'))
+
     def _open_root_dir(self):
         """打开根目录"""
-        self._open_path(str(Path(self.app.config.get('paths', {}).get('comfyui_root', '.')).resolve()))
+        self._open_path(str(self._active_root().resolve()))
 
     def _open_logs_dir(self):
         """打开日志目录"""
@@ -455,29 +466,25 @@ class LaunchPage(BasePage):
 
     def _open_output_dir(self):
         """打开输出目录"""
-        root = Path(self.app.config.get('paths', {}).get('comfyui_root', '.'))
-        output = root / "ComfyUI" / "output"
+        output = self._active_root() / "ComfyUI" / "output"
         if output.exists():
             self._open_path(str(output))
 
     def _open_input_dir(self):
         """打开输入目录"""
-        root = Path(self.app.config.get('paths', {}).get('comfyui_root', '.'))
-        input_dir = root / "ComfyUI" / "input"
+        input_dir = self._active_root() / "ComfyUI" / "input"
         if input_dir.exists():
             self._open_path(str(input_dir))
 
     def _open_nodes_dir(self):
         """打开插件目录"""
-        root = Path(self.app.config.get('paths', {}).get('comfyui_root', '.'))
-        nodes = root / "ComfyUI" / "custom_nodes"
+        nodes = self._active_root() / "ComfyUI" / "custom_nodes"
         if nodes.exists():
             self._open_path(str(nodes))
 
     def _open_models_dir(self):
         """打开模型目录"""
-        root = Path(self.app.config.get('paths', {}).get('comfyui_root', '.'))
-        models = root / "ComfyUI" / "models"
+        models = self._active_root() / "ComfyUI" / "models"
         if models.exists():
             self._open_path(str(models))
 
@@ -489,8 +496,7 @@ class LaunchPage(BasePage):
             return
         except Exception:
             pass
-        root = Path(self.app.config.get('paths', {}).get('comfyui_root', '.'))
-        wf = root / "ComfyUI" / "user" / "default" / "workflows"
+        wf = self._active_root() / "ComfyUI" / "user" / "default" / "workflows"
         if wf.exists():
             self._open_path(str(wf))
 
