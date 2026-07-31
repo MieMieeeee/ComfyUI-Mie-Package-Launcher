@@ -259,6 +259,33 @@ def pull_webui(
             "error": "未找到 git 命令",
         }
 
+    # 读 app.config["proxy_settings"] 拿到远程 URL, 加 proxy 前缀.
+    # 仅在当前 remote 是 github.com 时加前缀 (防内网 gitlab 被代理锈坏).
+    # 提前 short-circuit: proxy_mode=none 时不调 check_output (既无意义又干扰 Popen-based 测试).
+    proxy_url: Optional[str] = None
+    try:
+        from utils.net import apply_git_proxy_to_url
+        import subprocess as _sp
+        cfg = getattr(app, "config", {}) or {}
+        ps = cfg.get("proxy_settings", {}) if isinstance(cfg, dict) else {}
+        proxy_mode = (ps.get("git_proxy_mode") or "none").strip() if ps else "none"
+        if proxy_mode != "none":
+            try:
+                raw = _sp.check_output(
+                    [git_exe, "remote", "get-url", "origin"],
+                    cwd=str(repo_dir),
+                    stderr=_sp.DEVNULL,
+                ).decode("utf-8", errors="ignore").strip()
+            except Exception:
+                raw = ""
+            if raw and "github.com" in raw.lower():
+                proxied = apply_git_proxy_to_url(raw, ps)
+                if proxied != raw:
+                    proxy_url = proxied
+                    _log("git pull via proxy: " + proxy_url)
+    except Exception:
+        proxy_url = None
+
     cb = _wrap_progress(on_progress, "[pull]")
     try:
         if cb:
@@ -283,10 +310,23 @@ def pull_webui(
             si.dwFlags |= subprocess.STARTF_USESHOWWINDOW
             pull_kwargs["startupinfo"] = si
             pull_kwargs["creationflags"] = subprocess.CREATE_NO_WINDOW
-        proc = subprocess.Popen(
-            [git_exe, "pull", "--depth", "1"],
-            **pull_kwargs,
-        )
+        if proxy_url:
+            # 代理模式: fetch 远程 URL + reset --hard origin/HEAD
+            # 避免修改 git remote (不动 .git/config)
+            cmd = [git_exe, "fetch", proxy_url, "--depth", "1"]
+            proc = subprocess.Popen(cmd, **pull_kwargs)
+            rc = proc.wait()
+            if rc == 0:
+                # 合并远程变化到当前分支
+                proc = subprocess.Popen(
+                    [git_exe, "reset", "--hard", "origin/HEAD"],
+                    **pull_kwargs,
+                )
+        else:
+            proc = subprocess.Popen(
+                [git_exe, "pull", "--depth", "1"],
+                **pull_kwargs,
+            )
     except Exception as e:
         return {
             "ok": False,

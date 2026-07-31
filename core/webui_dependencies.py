@@ -11,6 +11,7 @@
 from __future__ import annotations
 
 import logging
+import os
 from pathlib import Path
 from typing import Optional
 
@@ -70,6 +71,7 @@ def install_webui_requirements(
     index_url: Optional[str] = None,
     on_progress=None,
     logger_: Optional[logging.Logger] = None,
+    hf_endpoint: Optional[str] = None,
 ) -> dict:
     """装 webui 依赖, 走 utils.pip.install_requirements_file (跟 ComfyUI 升级同源).
 
@@ -102,6 +104,12 @@ def install_webui_requirements(
             "error": "requirements.txt 不存在: " + str(requirements_file),
             "error_code": "REQUIREMENTS_FILE_NOT_FOUND",
         }
+    # 构建 env: hf_endpoint 转 HF_ENDPOINT (首页 HF 镜像透传到装 deps 的 pip 子进程)
+    env = None
+    if hf_endpoint:
+        env = os.environ.copy()
+        env["HF_ENDPOINT"] = hf_endpoint
+
     try:
         res = PIPUTILS.install_requirements_file(
             requirements_file, py,
@@ -109,6 +117,7 @@ def install_webui_requirements(
             upgrade=False,
             logger=log,
             on_progress=on_progress,
+            env=env,
         )
     except Exception as e:
         return {

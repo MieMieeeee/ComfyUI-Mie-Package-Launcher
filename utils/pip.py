@@ -175,6 +175,7 @@ def batch_install_packages(
     index_url: Optional[str] = None,
     upgrade: bool = True,
     logger: Optional[logging.Logger] = None,
+    env: Optional[dict] = None,
 ) -> Dict[str, Dict[str, Any]]:
     if logger is None:
         logger = logging.getLogger(__name__)
@@ -182,7 +183,7 @@ def batch_install_packages(
     for package in packages:
         logger.info(f"开始处理包: {package}")
         results[package] = install_or_update_package(
-            package, python_exec, index_url, upgrade, logger
+            package, python_exec, index_url, upgrade, logger, env=env,
         )
     return results
 

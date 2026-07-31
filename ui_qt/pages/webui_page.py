@@ -144,6 +144,27 @@ class WebuiPage(BasePage):
         """
         return self._state in _BUSY_STATES
 
+    def _resolve_hf_endpoint(self) -> Optional[str]:
+        """从 app.config["proxy_settings"] 解析 HF 镜像 URL.
+
+        与 core/launcher_cmd.py:build_launch_env 同体制 (该函数同时也设 HF_ENDPOINT 环境变量供 ComfyUI 子进程).
+        hf_mirror_mode 为"不使用镜像" / 空 / 未设 → 返回 None (不设 HF_ENDPOINT).
+        """
+        try:
+            cfg = getattr(self.app, "config", None)
+            if not isinstance(cfg, dict):
+                return None
+            ps = cfg.get("proxy_settings", {})
+            if not isinstance(ps, dict):
+                return None
+            mode = (ps.get("hf_mirror_mode") or "").strip()
+            if not mode or mode == "不使用镜像":
+                return None
+            url = (ps.get("hf_mirror_url") or "").strip()
+            return url or None
+        except Exception:
+            return None
+
     def _set_state(self, state: str) -> None:
         """切换 _state 并立即刷新 UI (主线程, 文案/可用性统一由 _update_ui_for_state 出)."""
         self._state = state
@@ -681,35 +702,37 @@ class WebuiPage(BasePage):
         self._btn_update.setText("更新中…")
         self._btn_update.setEnabled(False)
 
-        def _worker():
-            try:
-                res = pull_webui(self.app, webui_path)
-            except Exception as e:
-                res = {"ok": False, "error": str(e), "updated": False}
-            updated = bool(res.get("updated"))
-            ok = bool(res.get("ok"))
-            QtCore.QMetaObject.invokeMethod(
-                self, "_after_update",
-                QtCore.Qt.QueuedConnection,
-                QtCore.Q_ARG(bool, ok),
-                QtCore.Q_ARG(bool, updated),
-                QtCore.Q_ARG(str, res.get("error") or ""),
+        def runner(on_progress):
+            res = pull_webui(
+                self.app, webui_path,
+                on_progress=on_progress,
+                logger=self.app.logger,
             )
+            return {
+                "ok": bool(res.get("ok")),
+                "updated": bool(res.get("updated", False)),
+                "error": res.get("error") or "",
+            }
 
-        import threading
-        threading.Thread(target=_worker, daemon=True).start()
+        def on_done(result):
+            self._after_update(result.get("ok"), result.get("updated"), result.get("error", ""))
+
+        self._run_with_progress("更新 WebUI 工作台", runner, on_done)
 
     @QtCore.pyqtSlot(bool, bool, str)
     def _after_update(self, ok: bool, updated: bool, err: str):
         self._updating = False
         self._btn_update.setText("🔄 更新")
-        self._refresh_state()
+        # success 路径显式 re-detect: _refresh_state 在 busy 时直接 return, 会卡死状态.
         if not ok:
             DialogHelper.show_warning(self, "更新失败", "git pull 失败: %s" % (err or "未知"))
-        elif updated:
-            DialogHelper.show_info(self, "更新完成", "WebUI工作台已更新到最新版本。")
+            self._set_state(self._detect_state())
         else:
-            DialogHelper.show_info(self, "已是最新", "WebUI工作台已是最新版本。")
+            self._set_state(self._detect_state())
+            if updated:
+                DialogHelper.show_info(self, "更新完成", "WebUI工作台已更新到最新版本。")
+            else:
+                DialogHelper.show_info(self, "已是最新", "WebUI工作台已是最新版本。")
 
     def _start_with_prompt(self):
         """点「一键启动」后: 先进入「检测中」, 后台线程探活 ComfyUI 是否在跑.
@@ -949,44 +972,136 @@ class WebuiPage(BasePage):
 
         self._set_state(STATE_DOWNLOADING)
 
-        def _worker():
+        def runner(on_progress):
+            # clone
             try:
-                res = clone_webui(self.app, webui_path, repo_url=download_url)
+                res = clone_webui(
+                    self.app, webui_path, repo_url=download_url,
+                    on_progress=on_progress,
+                    logger=self.app.logger,
+                )
             except Exception as e:
                 res = {"ok": False, "error": str(e)}
             if not res.get("ok"):
-                QtCore.QMetaObject.invokeMethod(
-                    self, "_after_download",
-                    QtCore.Qt.QueuedConnection,
-                    QtCore.Q_ARG(str, "下载失败: " + (res.get("error") or "未知")),
+                return {"ok": False, "error": res.get("error") or "未知"}
+            # 同一 worker 内继续装依赖, 不走 self._setup_deps(silent=True)
+            # 那个起新 thread 的旧路径 (双 worker 竞态隐患源头).
+            py = info["python_path"]
+            req = info["webui_path"] / "requirements.txt" if info["webui_path"] else None
+            if py and py.exists() and req and req.exists():
+                idx_url = resolve_pypi_index_url(self.app)
+                install_webui_requirements(
+                    py, req, index_url=idx_url,
+                    on_progress=on_progress,
+                    logger_=self.app.logger,
+                    hf_endpoint=self._resolve_hf_endpoint(),
                 )
-                return
-            try:
-                self._setup_deps(silent=True)
-            except Exception:
-                pass
-            QtCore.QMetaObject.invokeMethod(
-                self, "_after_download",
-                QtCore.Qt.QueuedConnection,
-                QtCore.Q_ARG(str, "下载完成"),
-            )
+            return {"ok": True}
 
-        import threading
-        threading.Thread(target=_worker, daemon=True).start()
+        def on_done(result):
+            if not result.get("ok"):
+                self._after_download("下载失败: " + (result.get("error") or "未知"))
+            else:
+                self._after_download("下载完成")
+
+        self._run_with_progress("下载 WebUI 工作台", runner, on_done)
 
     @QtCore.pyqtSlot(str)
     def _after_download(self, msg: str):
         if msg.startswith("下载失败"):
             self._set_state(STATE_NOT_INSTALLED)
             DialogHelper.show_warning(self, "下载失败", msg)
-        self._refresh_state()
+        else:
+            # success: 显式离开 busy 态 (re-detect). _refresh_state 在 busy 时直接 return.
+            self._set_state(self._detect_state())
+
+    def _run_with_progress(self, task_title, runner, on_done_slot, parent=None):
+        """后台任务调度 helper: 弹进度窗 + 注册后台任务 + on_progress 派发.
+
+        流程:
+        - parent 是 QWidget 则建 ProgressDialog (show_cancel=False, show_background=True)
+        - app._bg_task_registry 非空则注册后台任务 (侧边栏"后台任务"可看)
+        - runner 跑后台线程; on_progress(文本, percent) 经 ui_post 投回主线程
+        - runner 返回后调 _do_finish: registry.complete + pd.mark_complete + pd.close
+
+        适配: parent 不是 QWidget (测试 / 纯 CLI) 跳弹窗; 无 _bg_task_registry 跳注册表.
+        """
+        from ui_qt.widgets.progress_dialog import ProgressDialog
+        from PyQt5 import QtWidgets
+
+        parent = parent or self.app
+        registry = getattr(self.app, "_bg_task_registry", None)
+        task_id = registry.register(task_title) if registry else None
+        if isinstance(parent, QtWidgets.QWidget):
+            pd = ProgressDialog(
+                parent,
+                title=task_title,
+                theme_manager=getattr(self, "theme_manager", None),
+                show_cancel=False, show_background=True,
+            )
+            pd.show()
+            QtWidgets.QApplication.processEvents()
+            if registry and task_id:
+                registry.set_dialog(task_id, pd)
+        else:
+            pd = None
+
+        def _apply_progress(text, percent):
+            if pd is None:
+                return
+            try:
+                pd.set_status(text)
+                pd.set_progress(percent if percent is not None else None)
+            except Exception:
+                pass
+
+        def on_progress(text, percent=None):
+            _ui_post = getattr(self.app, "ui_post", None)
+            if _ui_post:
+                _ui_post(lambda: _apply_progress(text, percent))
+
+        def _do_finish(success):
+            if registry and task_id:
+                try:
+                    registry.complete(task_id, error=not success)
+                except Exception:
+                    pass
+            if pd is not None:
+                try:
+                    _label = "完成 ✓" if success else "完成(有失败)"
+                    pd.mark_complete(_label)
+                    pd.close()
+                except Exception:
+                    pass
+
+        def _finish(success, result):
+            _ui_post = getattr(self.app, "ui_post", None)
+            if _ui_post:
+                _ui_post(lambda: _do_finish(success))
+                # on_done_slot 也必须在主线程跳 (会动 _set_state / DialogHelper 等 Qt widgets)
+                _ui_post(lambda: on_done_slot(result))
+            else:
+                _do_finish(success)
+                on_done_slot(result)
+
+        def _worker():
+            result = None
+            try:
+                result = runner(on_progress)
+            except Exception as e:
+                result = {"ok": False, "error": str(e) or e.__class__.__name__}
+            success = bool(result and result.get("ok"))
+            _finish(success, result)
+
+        import threading
+        threading.Thread(target=_worker, daemon=True).start()
+
+
 
     def _setup_deps(self, silent: bool = False):
-        """装依赖 (BackgroundTask 风格).
+        """装依赖.
 
-        注: silent=True 时本方法在 _download_webui 的 worker 线程被调, 早退分支里的
-        _set_state 会跨线程写 _state —— 但那只是回 NO_DEPS, 后续 _after_download 的
-        _refresh_state 会重新探测纠正, 实际无害 (且 silent 早退极罕见: 仅 py/req 缺失).
+        silent=True 时跳过早退分支的 DialogHelper 提示.
         """
         info = self._resolve_paths()
         py = info["python_path"]
@@ -1007,34 +1122,37 @@ class WebuiPage(BasePage):
             self._refresh_state()
             return
 
-        idx_url = resolve_pypi_index_url(self.app)
-
         self._set_state(STATE_INSTALLING_DEPS)
 
-        def _worker():
-            res = install_webui_requirements(py, req, index_url=idx_url)
-            ok = res.get("ok") is True
-            QtCore.QMetaObject.invokeMethod(
-                self, "_after_setup",
-                QtCore.Qt.QueuedConnection,
-                QtCore.Q_ARG(bool, ok),
-                QtCore.Q_ARG(str, res.get("error") or ""),
+        def runner(on_progress):
+            idx_url = resolve_pypi_index_url(self.app)
+            res = install_webui_requirements(
+                py, req, index_url=idx_url,
+                on_progress=on_progress,
+                logger_=self.app.logger,
+                hf_endpoint=self._resolve_hf_endpoint(),
             )
+            return {"ok": res.get("ok") is True, "error": res.get("error") or ""}
 
-        import threading
-        threading.Thread(target=_worker, daemon=True).start()
+        def on_done(result):
+            self._after_setup(result.get("ok"), result.get("error", ""))
+
+        self._run_with_progress("安装依赖", runner, on_done)
 
     @QtCore.pyqtSlot(bool, str)
     def _after_setup(self, ok: bool, err: str):
-        if not ok:
-            DialogHelper.show_warning(
-                self, "依赖安装失败",
-                "pip install 失败: %s\n\n请查看 launcher/webui.log" % (err or "未知"),
-            )
         # 依赖刚装过, 失效探测缓存 (下次 _detect_state 重新探测)
         self._deps_cache_key = None
         self._deps_cache_result = None
-        self._refresh_state()
+        if not ok:
+            DialogHelper.show_warning(
+                self, "依赖安装失败",
+                "pip install 失败: %s\n\n请查看 launcher/launcher.log" % (err or "未知"),
+            )
+            self._set_state(STATE_NOT_INSTALLED)
+        else:
+            # success: 显式离开 busy 态 (re-detect). _refresh_state 在 busy 时直接 return.
+            self._set_state(self._detect_state())
 
     # ---------------- 日志 (实时 tail, 复刻 LogViewerPage) ----------------
     def _resolve_log_path(self) -> Path:
