@@ -1344,9 +1344,10 @@ class TestInstallOrUpdatePackageProgress:
 
         captured = {}
 
-        def fake_streaming(cmd, logger, on_progress):
+        def fake_streaming(cmd, logger, on_progress, env=None):
             captured["called"] = True
             captured["on_progress"] = on_progress
+            captured["env"] = env
             return MagicMock(returncode=0, stdout="", stderr="")
 
         monkeypatch.setattr(pipmod, "_run_pip_streaming", fake_streaming)
@@ -1374,7 +1375,7 @@ class TestInstallOrUpdatePackageProgress:
             called["hidden"] = True
             return MagicMock(returncode=0, stdout="", stderr="")
 
-        def fake_streaming(cmd, logger, on_progress):
+        def fake_streaming(cmd, logger, on_progress, env=None):
             called["stream"] = True
             return MagicMock(returncode=0, stdout="", stderr="")
 

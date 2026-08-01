@@ -98,6 +98,7 @@ def install_or_update_package(
     upgrade: bool = True,
     logger: Optional[logging.Logger] = None,
     on_progress=None,
+    env: Optional[dict] = None,
 ) -> Dict[str, Any]:
     """Install or upgrade a single package, optionally streaming pip progress.
 
@@ -131,9 +132,9 @@ def install_or_update_package(
             cmd.extend(["-i", index_url])
         logger.info(f"执行 pip 操作: {' '.join(cmd)}")
         if on_progress is not None:
-            pip_result = _run_pip_streaming(cmd, logger, on_progress)
+            pip_result = _run_pip_streaming(cmd, logger, on_progress, env=env)
         else:
-            pip_result = run_hidden(cmd, capture_output=True, text=True)
+            pip_result = run_hidden(cmd, capture_output=True, text=True, env=env)
         if pip_result.returncode == 0:
             result["success"] = True
             stdout = getattr(pip_result, "stdout", "") or ""
@@ -188,7 +189,7 @@ def batch_install_packages(
     return results
 
 
-def _run_pip_streaming(cmd, logger, on_progress):
+def _run_pip_streaming(cmd, logger, on_progress, env=None):
     """Run pip with streaming stdout/stderr, reporting progress via on_progress.
 
     pip 的进度和阶段信息会同时写到 stdout 和 stderr：下载阶段基本
@@ -226,6 +227,7 @@ def _run_pip_streaming(cmd, logger, on_progress):
         stderr=subprocess.PIPE,
         startupinfo=si,
         creationflags=cf,
+        env=env,
     )
 
     # 两个线程（主线程读 stdout，后台线程读 stderr）会同时改"当前包"，
@@ -660,6 +662,7 @@ def install_requirements_file(
     logger: Optional[logging.Logger] = None,
     on_progress=None,
     ignore_pkgs: Optional[Iterable[str]] = None,
+    env: Optional[dict] = None,
 ) -> Dict[str, Any]:
     """Install each package in the requirements file individually.
 
@@ -816,6 +819,7 @@ def install_requirements_file(
                     upgrade=upgrade,
                     logger=logger,
                     on_progress=_pkg_progress,
+                    env=env,
                 )
             except Exception as e:
                 logger.error("安装 %s 时异常: %s", spec, e)
