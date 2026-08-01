@@ -1,26 +1,26 @@
-ï»¿@echo off
+@echo off
 REM ==========================================================
-REM ComfyUIå¯åŠ¨å™¨-CLI.cmd - thin wrapper around ComfyUIå¯åŠ¨å™¨.exe
+REM ComfyUIÆô¶¯Æ÷-CLI.cmd - thin wrapper around ComfyUIÆô¶¯Æ÷.exe
 REM ==========================================================
-REM èƒŒæ™¯ï¼šexe æœ¬èº«æ”¯æŒ headless CLI å­å‘½ä»¤ã€‚
-REM å¯åŠ¨å™¨ + é»˜è®¤ GUI å­ç³»ç»Ÿè®© agent / ç›‘æŽ§è„šæœ¬å¿ƒå­˜ç–‘è™‘ã€‚
+REM ±³¾°£ºexe ±¾ÉíÖ§³Ö headless CLI ×ÓÃüÁî¡£
+REM Æô¶¯Æ÷ + Ä¬ÈÏ GUI ×ÓÏµÍ³ÈÃ agent / ¼à¿Ø½Å±¾ÐÄ´æÒÉÂÇ¡£
 REM
-REM è¿™ä¸ª .cmd ç»™ agent ä¸€ä¸ªæ˜Žæ˜¾æ˜¯ CLI çš„å…¥å£ã€‚
-REM åªåšå‚æ•°è½¬å‘ï¼Œä¸ä¼šè°ƒ GUI åˆ†æ”¯ä»£ç ï¼ˆæ— çª—å£ã€æ—  Qt initï¼‰ã€‚
+REM Õâ¸ö .cmd ¸ø agent Ò»¸öÃ÷ÏÔÊÇ CLI µÄÈë¿Ú¡£
+REM Ö»×ö²ÎÊý×ª·¢£¬²»»áµ÷ GUI ·ÖÖ§´úÂë£¨ÎÞ´°¿Ú¡¢ÎÞ Qt init£©¡£
 REM
-REM ç”¨æ³•ï¼ˆä¸Žç›´æŽ¥è°ƒ GUI exe å®Œå…¨ç­‰ä»·ï¼‰ï¼š
-REM     ComfyUIå¯åŠ¨å™¨-CLI.cmd status --json
-REM     ComfyUIå¯åŠ¨å™¨-CLI.cmd start
-REM     ComfyUIå¯åŠ¨å™¨-CLI.cmd stop
-REM     ComfyUIå¯åŠ¨å™¨-CLI.cmd info --json
-REM     ComfyUIå¯åŠ¨å™¨-CLI.cmd help
+REM ÓÃ·¨£¨ÓëÖ±½Óµ÷ GUI exe ÍêÈ«µÈ¼Û£©£º
+REM     ComfyUIÆô¶¯Æ÷-CLI.cmd status --json
+REM     ComfyUIÆô¶¯Æ÷-CLI.cmd start
+REM     ComfyUIÆô¶¯Æ÷-CLI.cmd stop
+REM     ComfyUIÆô¶¯Æ÷-CLI.cmd info --json
+REM     ComfyUIÆô¶¯Æ÷-CLI.cmd help
 REM
-REM é€€å‡ºç ï¼šä¸Ž GUI exe çš„ CLI æ¨¡å¼ä¸¥æ ¼ä¸€è‡´ï¼ˆè§ cli.mdï¼‰ã€‚
-REM æ— å‚æ•°è°ƒç”¨ â†’ è½¬å‘åˆ° helpï¼ˆç»ä¸å¼¹ GUI çª—å£ï¼‰ã€‚
+REM ÍË³öÂë£ºÓë GUI exe µÄ CLI Ä£Ê½ÑÏ¸ñÒ»ÖÂ£¨¼û cli.md£©¡£
+REM ÎÞ²ÎÊýµ÷ÓÃ ¡ú ×ª·¢µ½ help£¨¾ø²»µ¯ GUI ´°¿Ú£©¡£
 REM ==========================================================
 REM
-REM å®‰è£…ï¼šæŠŠæœ¬æ–‡ä»¶æ”¾åˆ° ComfyUIå¯åŠ¨å™¨.exe åŒçº§ç›®å½•å³å¯ã€‚
-REM æˆ–éš release zip ä¸€èµ·åˆ†å‘åˆ°ç”¨æˆ·æœºå™¨çš„å®‰è£…ç›®å½•ã€‚
+REM °²×°£º°Ñ±¾ÎÄ¼þ·Åµ½ ComfyUIÆô¶¯Æ÷.exe Í¬¼¶Ä¿Â¼¼´¿É¡£
+REM »òËæ release zip Ò»Æð·Ö·¢µ½ÓÃ»§»úÆ÷µÄ°²×°Ä¿Â¼¡£
 REM ==========================================================
 
 setlocal
@@ -28,39 +28,39 @@ setlocal
 set "SCRIPT_DIR=%~dp0"
 set "EXE="
 
-REM è‡ªåŠ¨å‘çŽ° exeã€‚ä¼˜å…ˆçº§ï¼šroot onefile > dist/onefile > onedir (Nuitka) > onedir (PyInstaller)
-if exist "%SCRIPT_DIR%ComfyUIå¯åŠ¨å™¨.exe" set "EXE=%SCRIPT_DIR%ComfyUIå¯åŠ¨å™¨.exe"
-if not defined EXE if exist "%SCRIPT_DIR%dist\ComfyUIå¯åŠ¨å™¨.exe" set "EXE=%SCRIPT_DIR%dist\ComfyUIå¯åŠ¨å™¨.exe"
-if not defined EXE if exist "%SCRIPT_DIR%ComfyUIå¯åŠ¨å™¨.dist\ComfyUI_Launcher_Internal.exe" set "EXE=%SCRIPT_DIR%ComfyUIå¯åŠ¨å™¨.dist\ComfyUI_Launcher_Internal.exe"
-if not defined EXE if exist "%SCRIPT_DIR%ComfyUIå¯åŠ¨å™¨.dist\ComfyUIå¯åŠ¨å™¨.exe" set "EXE=%SCRIPT_DIR%ComfyUIå¯åŠ¨å™¨.dist\ComfyUIå¯åŠ¨å™¨.exe"
-if not defined EXE if exist "%SCRIPT_DIR%dist\ComfyUIå¯åŠ¨å™¨.dist\ComfyUIå¯åŠ¨å™¨.exe" set "EXE=%SCRIPT_DIR%dist\ComfyUIå¯åŠ¨å™¨.dist\ComfyUIå¯åŠ¨å™¨.exe"
+REM ×Ô¶¯·¢ÏÖ exe¡£ÓÅÏÈ¼¶£ºroot onefile > dist/onefile > onedir (Nuitka) > onedir (PyInstaller)
+if exist "%SCRIPT_DIR%ComfyUIÆô¶¯Æ÷.exe" set "EXE=%SCRIPT_DIR%ComfyUIÆô¶¯Æ÷.exe"
+if not defined EXE if exist "%SCRIPT_DIR%dist\ComfyUIÆô¶¯Æ÷.exe" set "EXE=%SCRIPT_DIR%dist\ComfyUIÆô¶¯Æ÷.exe"
+if not defined EXE if exist "%SCRIPT_DIR%ComfyUIÆô¶¯Æ÷.dist\ComfyUI_Launcher_Internal.exe" set "EXE=%SCRIPT_DIR%ComfyUIÆô¶¯Æ÷.dist\ComfyUI_Launcher_Internal.exe"
+if not defined EXE if exist "%SCRIPT_DIR%ComfyUIÆô¶¯Æ÷.dist\ComfyUIÆô¶¯Æ÷.exe" set "EXE=%SCRIPT_DIR%ComfyUIÆô¶¯Æ÷.dist\ComfyUIÆô¶¯Æ÷.exe"
+if not defined EXE if exist "%SCRIPT_DIR%dist\ComfyUIÆô¶¯Æ÷.dist\ComfyUIÆô¶¯Æ÷.exe" set "EXE=%SCRIPT_DIR%dist\ComfyUIÆô¶¯Æ÷.dist\ComfyUIÆô¶¯Æ÷.exe"
 
 if not defined EXE (
-    1>&2 echo [ComfyUIå¯åŠ¨å™¨-CLI] ERROR: ComfyUIå¯åŠ¨å™¨.exe not found.
-    1>&2 echo [ComfyUIå¯åŠ¨å™¨-CLI] Searched:
-    1>&2 echo [ComfyUIå¯åŠ¨å™¨-CLI]   %SCRIPT_DIR%ComfyUIå¯åŠ¨å™¨.exe
-    1>&2 echo [ComfyUIå¯åŠ¨å™¨-CLI]   %SCRIPT_DIR%dist\ComfyUIå¯åŠ¨å™¨.exe
-    1>&2 echo [ComfyUIå¯åŠ¨å™¨-CLI]   %SCRIPT_DIR%ComfyUIå¯åŠ¨å™¨.dist\
-    1>&2 echo [ComfyUIå¯åŠ¨å™¨-CLI]   %SCRIPT_DIR%dist\ComfyUIå¯åŠ¨å™¨.dist\
-    1>&2 echo [ComfyUIå¯åŠ¨å™¨-CLI] Reinstall the launcher, or place this .cmd next to ComfyUIå¯åŠ¨å™¨.exe.
+    1>&2 echo [ComfyUIÆô¶¯Æ÷-CLI] ERROR: ComfyUIÆô¶¯Æ÷.exe not found.
+    1>&2 echo [ComfyUIÆô¶¯Æ÷-CLI] Searched:
+    1>&2 echo [ComfyUIÆô¶¯Æ÷-CLI]   %SCRIPT_DIR%ComfyUIÆô¶¯Æ÷.exe
+    1>&2 echo [ComfyUIÆô¶¯Æ÷-CLI]   %SCRIPT_DIR%dist\ComfyUIÆô¶¯Æ÷.exe
+    1>&2 echo [ComfyUIÆô¶¯Æ÷-CLI]   %SCRIPT_DIR%ComfyUIÆô¶¯Æ÷.dist\
+    1>&2 echo [ComfyUIÆô¶¯Æ÷-CLI]   %SCRIPT_DIR%dist\ComfyUIÆô¶¯Æ÷.dist\
+    1>&2 echo [ComfyUIÆô¶¯Æ÷-CLI] Reinstall the launcher, or place this .cmd next to ComfyUIÆô¶¯Æ÷.exe.
     endlocal & exit /b 1
 )
 
-REM æ— å‚æ•° â†’ è½¬å‘åˆ° helpï¼Œé¿å…è¯¯è§¦ GUI
+REM ÎÞ²ÎÊý ¡ú ×ª·¢µ½ help£¬±ÜÃâÎó´¥ GUI
 if "%~1"=="" (
     "%EXE%" help
     endlocal & exit /b %ERRORLEVEL%
 )
 
 
-REM é˜²å‘†ï¼šé¦–å‚å¿…é¡»æ˜¯å·²çŸ¥å­å‘½ä»¤ã€‚exe çš„ _is_cli_invocation() å¯¹æœªçŸ¥é¦–å‚ä¼š fall through å¼¹ GUIï¼Œ
-REM è¿™é‡Œæå‰ fail-fastï¼Œé¿å… automation è„šæœ¬è¯¯è§¦çª—å£ã€‚flags (-v / --json / -h ç­‰) ä¸ç®—é¦–å‚ã€‚
+REM ·À´ô£ºÊ×²Î±ØÐëÊÇÒÑÖª×ÓÃüÁî¡£exe µÄ _is_cli_invocation() ¶ÔÎ´ÖªÊ×²Î»á fall through µ¯ GUI£¬
+REM ÕâÀïÌáÇ° fail-fast£¬±ÜÃâ automation ½Å±¾Îó´¥´°¿Ú¡£flags (-v / --json / -h µÈ) ²»ËãÊ×²Î¡£
 setlocal EnableDelayedExpansion
 set "FIRST_CMD="
-REM -h / --help æ˜¯ CLI invocation è¾¹ç•Œï¼ˆexe çš„ _is_cli_invocation() ç›´æŽ¥ acceptï¼‰ï¼Œå…ˆæ”¾è¡Œ
+REM -h / --help ÊÇ CLI invocation ±ß½ç£¨exe µÄ _is_cli_invocation() Ö±½Ó accept£©£¬ÏÈ·ÅÐÐ
 for %%a in (%*) do if /i "%%~a"=="-h" set "FIRST_CMD=help"
 for %%a in (%*) do if /i "%%~a"=="--help" set "FIRST_CMD=help"
-REM å…¶ä½™æƒ…å†µä¸‹ï¼Œæ‰¾é¦–å‚ï¼šè·³è¿‡ flags
+REM ÆäÓàÇé¿öÏÂ£¬ÕÒÊ×²Î£ºÌø¹ý flags
 if not defined FIRST_CMD (
     for %%a in (%*) do (
         if not defined FIRST_CMD (
@@ -74,16 +74,16 @@ set "VALID="
 for %%c in (start stop status restart info logs update plugins help) do if /i "%FIRST_CMD%"=="%%c" set "VALID=1"
 if not defined VALID (
     if /i "%FIRST_CMD%"=="__NONE__" (
-        1>&2 echo [ComfyUIå¯åŠ¨å™¨-CLI] ERROR: missing subcommand, only flags given.
+        1>&2 echo [ComfyUIÆô¶¯Æ÷-CLI] ERROR: missing subcommand, only flags given.
     ) else (
-        1>&2 echo [ComfyUIå¯åŠ¨å™¨-CLI] ERROR: unknown command: %FIRST_CMD%
+        1>&2 echo [ComfyUIÆô¶¯Æ÷-CLI] ERROR: unknown command: %FIRST_CMD%
     )
-    1>&2 echo [ComfyUIå¯åŠ¨å™¨-CLI] Available: start stop status restart info logs update plugins help
-    1>&2 echo [ComfyUIå¯åŠ¨å™¨-CLI] Run "ComfyUIå¯åŠ¨å™¨-CLI help" for usage.
+    1>&2 echo [ComfyUIÆô¶¯Æ÷-CLI] Available: start stop status restart info logs update plugins help
+    1>&2 echo [ComfyUIÆô¶¯Æ÷-CLI] Run "ComfyUIÆô¶¯Æ÷-CLI help" for usage.
     endlocal & endlocal & exit /b 1
 )
 endlocal
 
-REM é€ä¼ æ‰€æœ‰å‚æ•° + é€€å‡ºç ã€‚æ³¨æ„ç”¨ exit /b ä¸è¦ exitï¼ˆå¦åˆ™ä¼šå…³æŽ‰è°ƒç”¨æ–¹ shellï¼‰ã€‚
+REM Í¸´«ËùÓÐ²ÎÊý + ÍË³öÂë¡£×¢ÒâÓÃ exit /b ²»Òª exit£¨·ñÔò»á¹Øµôµ÷ÓÃ·½ shell£©¡£
 "%EXE%" %*
 endlocal & exit /b %ERRORLEVEL%
