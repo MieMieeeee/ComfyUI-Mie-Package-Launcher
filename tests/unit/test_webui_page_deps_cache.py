@@ -210,7 +210,10 @@ class TestAfterDownloadClearsCache(_Fixture):
             with patch("core.webui_process_manager.WebuiProcessManager.is_running", return_value=False), \
                  patch("ui_qt.pages.webui_page.check_webui_dependencies",
                        return_value={"ok": True, "missing": [], "available": []}) as mock_dep:
-                page._after_download("下载完成")
+                page._after_download(
+                    "下载完成",
+                    repo="https://github.com/MieMieeeee/Comfyui-Workbench-Mie.git",
+                )
                 # 关键: stale cache key 必须不再残留. _detect_state 之后
                 # 新的 cache key 是新的 (py, webui_path) 拼接, 跟手填的
                 # "(stale,pre-install)" 不同; 如果 _after_download 没清,
@@ -243,8 +246,18 @@ class TestAfterDownloadClearsCache(_Fixture):
 
             page._deps_cache_key = "(stale,pre-failure)"
             page._deps_cache_result = {"ok": True, "missing": []}
-            with patch("ui_qt.pages.webui_page.DialogHelper.show_warning"):
-                page._after_download("下载失败: 模拟")
+            # _after_download 失败分支现在走 CustomConfirmDialog (关闭/立即重试),
+            # 同时 mock 原调用的 DialogHelper 以防其他路径被冲到.
+            with patch("ui_qt.pages.webui_page.CustomConfirmDialog", autospec=True) as dlg_cls, \
+                 patch("ui_qt.pages.webui_page.DialogHelper.show_warning"):
+                # 默认 “关闭” (0) 避免进入重试循环
+                inst = dlg_cls.return_value
+                inst.exec_.return_value = True
+                inst.get_result.return_value = 0  # 0 = 关闭
+                page._after_download(
+                    "下载失败: 模拟",
+                    repo="https://github.com/MieMieeeee/Comfyui-Workbench-Mie.git",
+                )
             # 不论成功失败, stale cache 必须被 wipe -- 中断的下载可能改了
             # requirements.txt / 部分 pip install, 旧 cache 结果不再可信.
             self.assertIsNone(page._deps_cache_key)

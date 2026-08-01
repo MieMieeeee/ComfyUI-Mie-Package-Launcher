@@ -31,6 +31,7 @@ from utils import common as COMMON
 from ui import assets_helper as ASSETS
 from utils import pip as PIPUTILS
 from utils.common import run_hidden
+from utils.net import describe_git_proxy
 from ui_qt.theme_manager import ThemeManager
 from ui_qt.widgets.dialog_helper import DialogHelper
 from ui_qt.theme_styles import ThemeStyles, ThemeColors
@@ -3422,11 +3423,29 @@ class PyQtLauncher(QtWidgets.QMainWindow, process_events.ProcessCallback):
 
             # 注册后台任务(让“后台运行”按钮可用,任务面板能看到进度)
             registry = getattr(self, "_bg_task_registry", None)
-            task_id = registry.register("更新 ComfyUI") if registry else None
+            # 任务标题明确说出在更新哪个仓库 (默认 Comfy-Org/ComfyUI) + 走哪条代理. 代理描述
+            # 复用 _after_update 调调后, 现在跨设备 + 代理模式 (将来调 switch retry 按钮
+            # 进一步会复用同一个工具). 同时调用 ensure_proxy_url(
+            # setup_git_proxy_env 让后续 git fetch 能用代理.
+            _upd_proxy_desc = describe_git_proxy(getattr(self, "config", None))
+            try:
+                _upd_origin_url = self.services.version._origin_repo()[0] if hasattr(self.services, "version") else None  # type: ignore
+            except Exception:
+                _upd_origin_url = None
+            _upd_origin_short = "Comfy-Org/ComfyUI"
+            if _upd_origin_url and "github.com" in _upd_origin_url:
+                parts = _upd_origin_url.rstrip("/").rstrip(".git").split("github.com/")
+                if len(parts) > 1:
+                    _upd_origin_short = parts[-1]
+            _upd_task_title = f"更新 ComfyUI 内核 ({_upd_origin_short}, {_upd_proxy_desc})"
+            task_id = registry.register(_upd_task_title) if registry else None
+            if registry and task_id:
+                registry.set_dialog(task_id, pd)
+                registry.update(task_id, status="正在检查 Comfy-Org/ComfyUI 上游更新...")
 
             pd = ProgressDialog(
                 self,
-                title="正在更新",
+                title=_upd_task_title,
                 theme_manager=getattr(self, "theme_manager", None),
                 show_cancel=True,
                 show_background=True,
@@ -3538,7 +3557,7 @@ class PyQtLauncher(QtWidgets.QMainWindow, process_events.ProcessCallback):
                     return
 
                 # 1. 更新内核（带超时）
-                on_progress("正在更新 ComfyUI 内核...")
+                on_progress(f"正在更新 ComfyUI 内核 ({_upd_origin_short}, via {_upd_proxy_desc})...")
 
                 logger = getattr(self, "logger", None)
                 if logger:
@@ -4462,12 +4481,18 @@ class PyQtLauncher(QtWidgets.QMainWindow, process_events.ProcessCallback):
         try:
             from ui_qt.widgets.progress_dialog import ProgressDialog
             registry = getattr(self, "_bg_task_registry", None)
-            task_id = registry.register("检查更新") if registry else None
-            pd = ProgressDialog(self, title="检查更新", theme_manager=getattr(self, "theme_manager", None),
+            # 同上文任务标题的治理: 检查 ComfyUI 内核上游 (默认 Comfy-Org/ComfyUI) + 插件 [代理].
+            # _upd_origin_short / _upd_proxy_desc 在外层 start_update 中已算过,
+            # 它只用 _do_comfyui_update_dialog 里, 这个分支独立重新取: 该处看 ComfyUI main 是运行
+            # 检查插件公众号, proxy_desc 重用 (不需 _upd_origin_short, 仅需类描述公众号 + proxy).
+            _chk_proxy_desc = describe_git_proxy(getattr(self, "config", None))
+            _chk_task_title = f"检查插件 + ComfyUI 上游更新 ({_chk_proxy_desc})"
+            task_id = registry.register(_chk_task_title) if registry else None
+            pd = ProgressDialog(self, title=_chk_task_title, theme_manager=getattr(self, "theme_manager", None),
                                 show_cancel=True, show_background=True)
             if registry and task_id:
                 registry.set_dialog(task_id, pd)  # 持有弹窗引用，供面板找回
-            pd.set_status("正在获取已装插件列表...")
+            pd.set_status(f"正在获取已装插件列表 (Comfy-Org/本地 + 插件 cm-cli) ({_chk_proxy_desc})...")
             pd.set_progress(0, maximum=0)  # 初始脉冲
             pd.show()
             QtWidgets.QApplication.processEvents()

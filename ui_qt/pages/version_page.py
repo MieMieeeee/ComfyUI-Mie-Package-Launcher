@@ -557,7 +557,7 @@ class VersionPage(BasePage):
 
         # 显示进度对话框
         progress = ProgressDialog(parent=self, title="切换提交中", theme_manager=self.theme_manager)
-        progress.set_status("正在切换 ComfyUI 到指定提交...")
+        progress.set_status(f"正在切换 ComfyUI 到指定提交 {commit_hash[:12]}...")
         progress.set_progress(0, maximum=0)
         progress.show()
 
@@ -572,7 +572,7 @@ class VersionPage(BasePage):
             root = (base / "ComfyUI").resolve()
 
             # 执行git checkout
-            progress.set_status("正在执行 git checkout...")
+            progress.set_status(f"正在执行 git checkout {commit_hash[:12]}...")
             result = COMMON.run_hidden(
                 [getattr(self.app, 'git_path', 'git') or "git", "checkout", commit_hash],
                 cwd=str(root)

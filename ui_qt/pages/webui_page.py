@@ -1223,17 +1223,46 @@ class WebuiPage(BasePage):
             else:
                 self._after_download("下载完成")
 
-        self._run_with_progress("下载 WebUI 工作台", runner, on_done)
+        # 任务标题明确说出在拉哪个仓库 (repo short name + full owner/repo)
+        # 和走哪条代理 (与更新工作台一致; 用户在弹窗打开第一秒就知道走了哪条路).
+        dl_repo_url = info.get("download_url") or "https://github.com/MieMieeeee/Comfyui-Workbench-Mie.git"
+        dl_repo_short = (dl_repo_url.rstrip("/").rsplit("/", 1)[-1].removesuffix(".git") or "WebUI")
+        dl_proxy_desc = describe_git_proxy(getattr(self.app, "config", None))
+        dl_task_title = f"下载 {dl_repo_short} ({dl_proxy_desc})"
+        self._run_with_progress(dl_task_title, runner, on_done)
 
-    @QtCore.pyqtSlot(str)
-    def _after_download(self, msg: str):
+    @QtCore.pyqtSlot(str, str)
+    def _after_download(self, msg: str, repo: str = ""):
         # 下载流程可能顺带跑 install_webui_requirements; 不论成功失败都得
         # 失效 deps 探测缓存, 否则下次 _detect_state 会命中装之前的 
         # `ok=False` 缓存, UI 永远停在 STATE_NO_DEPS ("安装依赖").
         self._reset_deps_cache("download")
         if msg.startswith("下载失败"):
             self._set_state(STATE_NOT_INSTALLED)
-            DialogHelper.show_warning(self, "下载失败", msg)
+            err_text = msg.replace("下载失败: ", "", 1) if msg.startswith("下载失败: ") else msg
+            retry_dlg = CustomConfirmDialog(
+                parent=self,
+                title="下载失败",
+                content=(
+                    f"下载 {repo or '代理仓库'} 没有完成.\n\n"
+                    f"原因: {err_text}\n\n"
+                    "可能是 5 分钟 git clone 超时 (代理抽风 / DNS 慢) 或 仓库不可达.\n\n"
+                    "可以关闭 (手动换网络/代理后再来) 或 立即重试."
+                ),
+                buttons=[
+                    {"text": "关闭", "role": "normal"},
+                    {"text": "立即重试", "role": "primary"},
+                ],
+                default_index=1,
+                theme_manager=self.theme_manager,
+            )
+            retry_dlg.exec_()
+            retry = (retry_dlg.get_result() == 1)
+            if retry:
+                try:
+                    self._on_primary_clicked()
+                except Exception:
+                    pass
         else:
             # success: 显式离开 busy 态 (re-detect). _refresh_state 在 busy 时直接 return.
             self._set_state(self._detect_state())
@@ -1360,18 +1389,61 @@ class WebuiPage(BasePage):
         def on_done(result):
             self._after_setup(result.get("ok"), result.get("error", ""))
 
-        self._run_with_progress("安装依赖", runner, on_done)
+        # 任务标题明确说出 PyPI 镜像源 + requirements.txt 路径, 用户能立刻分辨
+        # "装哪个的依赖", "走哪条 PyPI 镜像" (避免点完按钮干等时全靠掌).
+        pypi_idx = (resolve_pypi_index_url(self.app) or "").rstrip("/")
+        pypi_short = pypi_idx.rsplit("/", 1)[-1] if pypi_idx else "默认"
+        req_short_name = req.name if req else "requirements.txt"
+        install_task_title = f"安装依赖 (PyPI: {pypi_short}, 文件: {req_short_name})"
+        self._run_with_progress(install_task_title, runner, on_done)
 
     @QtCore.pyqtSlot(bool, str)
     def _after_setup(self, ok: bool, err: str):
         # 依赖刚装过 (或尝试过), 失效探测缓存 (下次 _detect_state 重新探测)
         self._reset_deps_cache("setup")
         if not ok:
-            DialogHelper.show_warning(
-                self, "依赖安装失败",
-                "pip install 失败: %s\n\n请查看 launcher/launcher.log" % (err or "未知"),
+            # 失败 dialog 与 _after_update / _after_download 一致: [关闭 / 立即重试],
+            # body 明确说是哪个 python / 哪个 requirements / 走哪个 PyPI 镜像,
+            # 不再是" pip install 失败"这么稀里糊涂.
+            # runner 里的 py / req / idx_url 在出事时在局部 scope, 不能跨 on_done 读到;
+            # 采用 _resolve_paths() 重新取, 要么走 fallback.
+            try:
+                info2 = self._resolve_paths()
+                py2 = str(info2.get("python_path") or "python")
+                req_base = info2.get("webui_path")
+                req2 = str((req_base / "requirements.txt")) if req_base else "requirements.txt"
+            except Exception:
+                py2 = "python"; req2 = "requirements.txt"
+            try:
+                pypi_str = (resolve_pypi_index_url(self.app) or "默认").rstrip("/")
+            except Exception:
+                pypi_str = "默认"
+            setup_dlg = CustomConfirmDialog(
+                parent=self,
+                title="依赖安装失败",
+                content=(
+                    "安装 WebUI 工作台依赖失败.\n\n"
+                    f"原因: {err or '未知'}\n\n"
+                    f"Python: {py2}\n"
+                    f"requirements: {req2}\n"
+                    f"PyPI 镜像: {pypi_str}\n\n"
+                    "可以关闭 (手动检查网络 / 镜像) 或 立即重试."
+                ),
+                buttons=[
+                    {"text": "关闭", "role": "normal"},
+                    {"text": "立即重试", "role": "primary"},
+                ],
+                default_index=1,
+                theme_manager=self.theme_manager,
             )
+            setup_dlg.exec_()
+            retry = (setup_dlg.get_result() == 1)
             self._set_state(STATE_NOT_INSTALLED)
+            if retry:
+                try:
+                    self._setup_deps(silent=True)
+                except Exception:
+                    pass
         else:
             # success: 显式离开 busy 态 (re-detect). _refresh_state 在 busy 时直接 return.
             self._set_state(self._detect_state())
