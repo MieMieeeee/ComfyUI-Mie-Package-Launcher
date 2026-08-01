@@ -47,6 +47,7 @@ from core.webui_process_manager import WebuiProcessManager
 from core.webui_dependencies import check_webui_dependencies, install_webui_requirements
 from core.webui_installer import clone_webui, pull_webui
 from utils.net import resolve_pypi_index_url, describe_git_proxy
+from core.webui_installer import resolve_webui_repo_url, WEBUI_DEFAULT_MIRROR, WEBUI_REPOS
 from ui_qt.widgets.dialog_helper import DialogHelper
 from ui_qt.widgets.buttons import DestructiveButton
 from ui_qt.widgets.custom_confirm_dialog import CustomConfirmDialog
@@ -397,6 +398,42 @@ class WebuiPage(BasePage):
         form_layout.addWidget(open_label, 1, 0)
         form_layout.addLayout(row_open, 1, 1)
 
+        # 仓库源 (gitee / github / custom). 已安装未安装都能切; 已安装时
+        # 切换会同时 "git remote set-url origin", 已 clone 的代码不重下,
+        # 下次更新走新源. 国内优先 Gitee (直连快), 海外用 GitHub.
+        mirror_label = QtWidgets.QLabel("仓库源：")
+        mirror_label.setStyleSheet(lbl_style)
+        self._mirror_combo = NoWheelComboBox()
+        self._mirror_combo.setToolTip(
+            "下载/更新 WebUI 工作台时用的 git 仓库源. 国内选 Gitee 直连快. "
+            "已安装的工作台切换会同时改 git remote.origin.url, 不会重下代码."
+        )
+        _mirror_opts = [
+            ("Gitee (国内推荐)", "gitee"),
+            ("GitHub (海外)", "github"),
+            ("自定义 URL", "custom"),
+        ]
+        for _name, _val in _mirror_opts:
+            self._mirror_combo.addItem(_name, _val)
+        # 读 config 拿当前 mirror, 默认 gitee. blockSignals 防初始化时触发 handler.
+        _cur_mirror = (self._webui_options().get("download_mirror") or WEBUI_DEFAULT_MIRROR).strip().lower()
+        if _cur_mirror not in {"gitee", "github", "custom"}:
+            _cur_mirror = WEBUI_DEFAULT_MIRROR
+        self._mirror_combo.blockSignals(True)
+        for _i, (_name, _val) in enumerate(_mirror_opts):
+            if _val == _cur_mirror:
+                self._mirror_combo.setCurrentIndex(_i)
+                break
+        self._mirror_combo.blockSignals(False)
+        self._mirror_combo.currentIndexChanged.connect(self._on_mirror_changed)
+        row_mirror = QtWidgets.QHBoxLayout()
+        row_mirror.setContentsMargins(0, 0, 0, 0)
+        row_mirror.setSpacing(8)
+        row_mirror.addWidget(self._mirror_combo)
+        row_mirror.addStretch(1)
+        form_layout.addWidget(mirror_label, 2, 0)
+        form_layout.addLayout(row_mirror, 2, 1)
+
         # --- 右: 按钮列 (固定宽, 一键启动大按钮 + 打开网页, 上下堆叠) ---
         btn_container = QtWidgets.QWidget()
         btn_container.setFixedWidth(180)
@@ -533,6 +570,137 @@ class WebuiPage(BasePage):
         if path:
             self._save_webui_option("custom_browser_path", path)
 
+    @QtCore.pyqtSlot(int)
+    def _on_mirror_changed(self, idx: int) -> None:
+        """仓库源切换 handler (Gitee / GitHub / Custom).
+
+        流程:
+          1. 解析 idx -> new_mirror (gitee / github / custom).
+          2. 读当前持久化的 old_mirror; 相同则 no-op.
+          3. custom 模式: QInputDialog 弹 URL; 取消或空 -> 回滚 combo 到 old_mirror.
+          4. 持久化 new_mirror (custom 时连 download_url 一起存).
+          5. 已安装 (webui_path/.git 存在): 弹 [仅保存配置 / 立即切换 origin].
+             选立即切换 -> git remote set-url origin <new_url>; 失败弹 DialogHelper.
+        """
+        if not (0 <= idx < self._mirror_combo.count()):
+            return
+        new_mirror = (self._mirror_combo.itemData(idx) or "").strip().lower()
+        if new_mirror not in WEBUI_REPOS and new_mirror != "custom":
+            return
+        old_mirror = (
+            self._webui_options().get("download_mirror") or WEBUI_DEFAULT_MIRROR
+        ).strip().lower()
+        if old_mirror not in WEBUI_REPOS and old_mirror != "custom":
+            old_mirror = WEBUI_DEFAULT_MIRROR
+        if new_mirror == old_mirror:
+            return
+
+        def _rollback():
+            """取消时把 combo 选回 old_mirror, blockSignals 防再次触发."""
+            try:
+                self._mirror_combo.blockSignals(True)
+                for i in range(self._mirror_combo.count()):
+                    if (self._mirror_combo.itemData(i) or "").strip().lower() == old_mirror:
+                        self._mirror_combo.setCurrentIndex(i)
+                        break
+            finally:
+                self._mirror_combo.blockSignals(False)
+
+        # custom 模式先问 URL; 取消或空都回滚.
+        if new_mirror == "custom":
+            existing = (self._webui_options().get("download_url") or "").strip()
+            text, ok = QtWidgets.QInputDialog.getText(
+                self,
+                "自定义仓库 URL",
+                "输入 WebUI 工作台 git 仓库的完整 URL (https://...):",
+                QtWidgets.QLineEdit.Normal,
+                existing,
+            )
+            if not ok:
+                _rollback()
+                return
+            cu = (text or "").strip()
+            if not cu:
+                DialogHelper.show_warning(
+                    self, "URL 不能为空", "已取消切换; 仓库源保持不变.",
+                )
+                _rollback()
+                return
+            self._save_webui_option("download_url", cu)
+
+        # 持久化新 mirror.
+        self._save_webui_option("download_mirror", new_mirror)
+
+        # 已安装 (.git 存在) 才考虑同步 git remote.origin.url.
+        info = self._resolve_paths()
+        webui_path = info.get("webui_path")
+        new_url = info.get("download_url") or ""
+        if not (webui_path and (webui_path / ".git").exists()):
+            return
+
+        dlg = CustomConfirmDialog(
+            parent=self,
+            title="切换仓库源",
+            content=(
+                f"已安装的工作台位于:\n  {webui_path}\n\n",
+                f"git remote.origin.url 将切换为:\n  {new_url}\n\n",
+                "已 clone 的代码不重下; 下次「更新」/「下载」会从新源拉取.\n\n",
+                "现在执行 git remote set-url 吗?\n",
+                "(选「仅保存配置」则只持久化新 mirror, 不动 git remote)",
+            ),
+            buttons=[
+                {"text": "仅保存配置", "role": "normal"},
+                {"text": "立即切换 origin", "role": "primary"},
+            ],
+            default_index=1,
+            theme_manager=self.theme_manager,
+        )
+        dlg.exec_()
+        if dlg.get_result() != 1:
+            return
+        try:
+            kwargs = dict(
+                cwd=str(webui_path),
+                capture_output=True,
+                text=True,
+                encoding="utf-8",
+                errors="ignore",
+                timeout=10,
+            )
+            if sys.platform.startswith("win"):
+                si = subprocess.STARTUPINFO()
+                si.dwFlags |= subprocess.STARTF_USESHOWWINDOW
+                kwargs["startupinfo"] = si
+                kwargs["creationflags"] = (
+                    kwargs.get("creationflags", 0) | subprocess.CREATE_NO_WINDOW
+                )
+            r = subprocess.run(
+                ["git", "remote", "set-url", "origin", new_url], **kwargs
+            )
+        except Exception as e:
+            try:
+                self.app.logger.warning("git remote set-url 异常: %s", e)
+            except Exception:
+                pass
+            DialogHelper.show_error(self, "切换失败", f"git remote set-url 异常: {e}")
+            return
+        if r.returncode != 0:
+            err = (getattr(r, "stderr", "") or getattr(r, "stdout", "") or "").strip()
+            DialogHelper.show_error(
+                self, "切换失败", f"git remote set-url 失败: {err or "未知错误"}",
+            )
+            return
+        try:
+            self.app.logger.info(
+                "webui 仓库源已切换: %s -> %s", old_mirror, new_url,
+            )
+        except Exception:
+            pass
+        DialogHelper.show_info(
+            self,
+            "已切换",
+            f"WebUI 工作台 origin 已切到:\n  {new_url}\n下次更新会从新源拉取.",
+        )
     # ---------------- 主题切换 ----------------
     def _on_theme_changed(self, theme_styles):
         self.update_theme(theme_styles)
@@ -589,7 +757,14 @@ class WebuiPage(BasePage):
             display_host = "0.0.0.0" if webui_options.get("listen_lan") else "127.0.0.1"
         else:
             display_host = webui_options.get("display_host") or "127.0.0.1"
-        download_url = webui_options.get("download_url") or "https://github.com/MieMieeeee/Comfyui-Workbench-Mie.git"
+        # 镜像源: gitee / github / custom.
+        # 未设 (None 或 空) 默认跳 gitee, 国内推荐.
+        download_mirror = (webui_options.get("download_mirror") or WEBUI_DEFAULT_MIRROR).strip().lower()
+        if download_mirror not in WEBUI_REPOS and download_mirror != "custom":
+            download_mirror = WEBUI_DEFAULT_MIRROR
+        download_url = resolve_webui_repo_url(
+            download_mirror, webui_options.get("download_url")
+        )
 
         def _anchor(v):
             p = Path(v)
@@ -611,6 +786,8 @@ class WebuiPage(BasePage):
             "port": port,
             "display_host": display_host,
             "download_url": download_url,
+            "download_mirror": download_mirror,
+            "mirror_options": list(WEBUI_REPOS.keys()) + ["custom"],
         }
 
     def _reset_deps_cache(self, reason: str) -> None:
@@ -1228,7 +1405,8 @@ class WebuiPage(BasePage):
         dl_repo_url = info.get("download_url") or "https://github.com/MieMieeeee/Comfyui-Workbench-Mie.git"
         dl_repo_short = (dl_repo_url.rstrip("/").rsplit("/", 1)[-1].removesuffix(".git") or "WebUI")
         dl_proxy_desc = describe_git_proxy(getattr(self.app, "config", None))
-        dl_task_title = f"下载 {dl_repo_short} ({dl_proxy_desc})"
+        dl_mirror_name = info.get("download_mirror") or WEBUI_DEFAULT_MIRROR
+        dl_task_title = f"下载 {dl_repo_short} (镜像: {dl_mirror_name}, {dl_proxy_desc})"
         self._run_with_progress(dl_task_title, runner, on_done)
 
     @QtCore.pyqtSlot(str, str)
@@ -1394,7 +1572,12 @@ class WebuiPage(BasePage):
         pypi_idx = (resolve_pypi_index_url(self.app) or "").rstrip("/")
         pypi_short = pypi_idx.rsplit("/", 1)[-1] if pypi_idx else "默认"
         req_short_name = req.name if req else "requirements.txt"
-        install_task_title = f"安装依赖 (PyPI: {pypi_short}, 文件: {req_short_name})"
+        # 镜像不直接影响 install, 但写到 title 里和 download 一致, 让用户看到
+        # "安装依赖 (镜像: gitee, PyPI: 阿里云, 文件: requirements.txt)".
+        _in_mirror = info.get("download_mirror") or WEBUI_DEFAULT_MIRROR
+        install_task_title = (
+            f"安装依赖 (镜像: {_in_mirror}, PyPI: {pypi_short}, 文件: {req_short_name})"
+        )
         self._run_with_progress(install_task_title, runner, on_done)
 
     @QtCore.pyqtSlot(bool, str)

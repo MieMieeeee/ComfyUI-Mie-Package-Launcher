@@ -21,7 +21,43 @@ from utils.common import run_hidden
 
 
 # 默认 GitHub 仓库 (跟 AGENTS.md / docs/cli.md 文档同步)
+# 默认 GitHub source. 历史兼容性保留 (其他模块可能 import 它).
 WEBUI_DEFAULT_REPO = "https://github.com/MieMieeeee/Comfyui-Workbench-Mie.git"
+
+# 支持多镜像源. 默认 WebUI Page QComboBox 把这个字典渲成下拉.
+# 国内用户优先 Gitee (直连秒级, GitHub+gh-proxy 抽风率高).
+# 海外用户也能用 Gitee, 慢一点優而已; 反过来 GitHub 也保留着供选择.
+WEBUI_REPO_GITEE = "https://gitee.com/MieMieeeee/Comfyui-Workbench-Mie.git"
+WEBUI_REPO_GITHUB = "https://github.com/MieMieeeee/Comfyui-Workbench-Mie.git"
+WEBUI_REPOS = {
+    "gitee": WEBUI_REPO_GITEE,
+    "github": WEBUI_REPO_GITHUB,
+}
+WEBUI_DEFAULT_MIRROR = "gitee"  # webui_options.download_mirror 默认值
+
+
+def resolve_webui_repo_url(mirror, custom_url):
+    """解析用户选的镜像源 -> 最终仓库 URL.
+
+    mirror 取值:
+      "gitee"  -> WEBUI_REPO_GITEE (国内推荐, 直连)
+      "github" -> WEBUI_REPO_GITHUB
+      "custom" -> custom_url (用户填的; 为空则走默认)
+      其他 / 为空 / 未知 -> WEBUI_DEFAULT_REPO (GitHub), 以保证向后兼容.
+
+    返回 str.
+    """
+    m = (mirror or "").strip().lower()
+    if m == "gitee":
+        return WEBUI_REPO_GITEE
+    if m == "github":
+        return WEBUI_REPO_GITHUB
+    if m == "custom":
+        cu = (custom_url or "").strip()
+        if cu:
+            return cu
+    return WEBUI_DEFAULT_REPO
+
 
 # 安装版本检查的入口文件 (跟 webui 项目 layout 一致)
 WEBUI_ENTRY_FILE = "app/flask_app.py"
