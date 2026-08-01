@@ -191,7 +191,7 @@ class BackgroundTasksPage(QtWidgets.QWidget):
         # in full, and pin a sane minimum width for the tab strip itself
         # (two ~110px tabs + page chrome must fit even on narrow sidebars).
         from PyQt5 import QtCore as _QtCore
-        self._tabs.setExpanding(False)
+        self._tabs.tabBar().setExpanding(False)
         self._tabs.setElideMode(_QtCore.Qt.TextElideMode.ElideNone)
         self._tabs.setMinimumSize(_QtCore.QSize(260, 0))
         self._tabs.setCurrentIndex(0)

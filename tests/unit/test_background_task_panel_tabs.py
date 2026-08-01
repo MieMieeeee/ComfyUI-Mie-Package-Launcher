@@ -11,6 +11,7 @@
 (QTabBar sizeHint 比可分配宽度宽) + 缺 min-width + 没显式 setExpanding(False).
 """
 
+import os
 import sys
 import re
 from pathlib import Path
@@ -61,7 +62,7 @@ class TestTabQssLayout:
 class TestTabQtabwidgetApi:
     def test_program_calls_setExpanding_False(self, panel_source):
         """No-auto-stretch: tab 按 sizeHint 自然大小, 不被 QTabBar 重新分配."""
-        assert "self._tabs.setExpanding(False)" in panel_source, (
+        assert "self._tabs.tabBar().setExpanding(False)" in panel_source, (
             "未显式 setExpanding(False); 容器窄时 Qt 可能按可用宽度平均分给 tab, "
             "一个 tab 不到 50px 时 Chinese 标题被裁."
         )
@@ -91,3 +92,39 @@ class TestTabQtabwidgetApi:
         若未来无意 i18n 化或换文案, 这个 test 会拦住."""
         assert '"进行中"' in panel_source or "'进行中'" in panel_source
         assert '"已完成"' in panel_source or "'已完成'" in panel_source
+
+class TestTabRuntime:
+    """Runtime smoke: actually construct BackgroundTasksPage and verify no crash.
+
+    The static-source tests above would happily pass even if setExpanding()
+    were called on QTabWidget (which does NOT have that method, only
+    QTabBar does). Ceb7a61 shipped exactly that bug and crashed the
+    launcher at startup. This test instantiates the panel and asserts the
+    constructor returns without raising AttributeError.
+    """
+
+    def test_construct_does_not_crash(self):
+        os.environ.setdefault("QT_QPA_PLATFORM", "offscreen")
+        from PyQt5 import QtWidgets
+        from ui_qt.widgets.background_task_panel import BackgroundTasksPage
+        from ui_qt.background_task_registry import BackgroundTaskRegistry
+        from ui_qt.theme_manager import ThemeManager
+        app = QtWidgets.QApplication.instance() or QtWidgets.QApplication([])
+        registry = BackgroundTaskRegistry()
+        tm = ThemeManager()
+        try:
+            panel = BackgroundTasksPage(registry=registry, theme_manager=tm)
+        except AttributeError as e:
+            pytest.fail("BackgroundTasksPage constructor raised AttributeError (regression of ceb7a61): " + str(e))
+
+    def test_tabs_set_expanding_via_tab_bar(self, panel_source):
+        """setExpanding must be called on QTabBar, not QTabWidget.
+
+        QTabWidget has no setExpanding. The fix is self._tabs.tabBar().setExpanding(False).
+        If someone re-introduces the bad call (setExpanding on _tabs directly),
+        the launcher crashes at startup. Pin the exact pattern.
+        """
+        assert "self._tabs.tabBar().setExpanding(False)" in panel_source, (
+            "setExpanding must be called on tabBar(); QTabWidget itself"
+            "has no such method (regression ceb7a61 crashed the launcher)."
+        )
