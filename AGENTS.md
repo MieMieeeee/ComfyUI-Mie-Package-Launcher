@@ -35,8 +35,9 @@ python __main__.py <command> [--json] [-v]
 | 停止 | `stop` | 幂等，未跑也退 `0`；加 `--force` 直接 `taskkill /F` |
 | 重启 | `restart` | stop 旧 + start 新 |
 | 看配置 | `info --json` | `.comfyui_path` `.python_path` `.port` `.launcher_version` `.environments` `.active_env_id` |
-| 看日志 | `logs comfyui -n 100 --no-follow` | `comfyui` / `launcher` 二选一；**务必带 `--no-follow`** |
+| 看日志 | `logs comfyui -n 100 --no-follow` | `comfyui` / `launcher` / `webui` 三选一；**务必带 `--no-follow`** |
 | 更新内核 | `update comfyui --dry-run` 然后 `update comfyui` | 先 dry-run 看会做什么 |
+| webui 工作台（非核心，可选服务） | `webui status` / `webui start` / `webui info` | 与 ComfyUI 平级的服务；退出码多了 `6`(ComfyUI 未跑) / `7`(未安装) / `8`(依赖缺失)；详见 `webui --help` |
 | 查帮助 | `help` / `help <command>` / `<command> --help` | — |
 
 > **agent 默认不传 `--env`**。`start` / `restart` / `info` / `update` / `logs` 接受可选的 `--env ENV_ID` 覆盖本次调用的环境，仅供跨环境自动化脚本用；`status` / `stop` 不接受 `--env`（作用于「当前在跑的那个」）。切环境是 GUI 的事，agent 不要主动切。
@@ -55,6 +56,9 @@ python __main__.py <command> [--json] [-v]
   | 2 | start 拒绝重复（已在跑） | start |
   | 3 | 未在跑 | status |
   | 4 | 已是最新 | update |
+  | 6 | webui start 时 ComfyUI 未跑（用了 `--with-comfyui`） | webui |
+  | 7 | webui 路径未安装（用 `webui install` 拉取） | webui |
+  | 8 | webui 依赖缺失（用 `webui setup` 安装） | webui |
 
 - 推荐用法：**按退出码分支 + 解析 `--json` 字段**，不要正则匹配人类文案。
 

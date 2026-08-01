@@ -26,9 +26,10 @@ commands:
   status       查询 ComfyUI 运行状态
   restart      先停后启 ComfyUI
   info         打印当前生效的配置
-  logs         tail 日志文件（launcher / comfyui 二选一）
+  logs         tail 日志文件（launcher / comfyui / webui 三选一）
   update       更新组件（comfyui 内核 / plugins 全部插件）
   plugins      管理 custom_nodes 插件（list/install/uninstall/disable/enable/check-updates/force-update）
+  webui        管理 Comfyui-Workbench-Mie (webui) 服务，与 ComfyUI 平级（详见 `webui --help`）
   help         打印帮助（无参 = 顶层；带子命令名 = 该子命令的 help）
 ```
 
@@ -184,9 +185,10 @@ tail 日志文件。
 comfyui-launcher logs TARGET [-n N] [-f | --no-follow]
 ```
 
-`TARGET` ∈ `comfyui` / `launcher`，对应：
+`TARGET` ∈ `comfyui` / `launcher` / `webui`，对应：
 - `comfyui` → `<comfyui_root>/user/comfyui.log`
 - `launcher` → `<cwd>/launcher/launcher.log`
+- `webui` → `<cwd>/launcher/webui.log`
 
 | flag | 默认 | 说明 |
 |---|---|---|
@@ -201,7 +203,7 @@ comfyui-launcher logs TARGET [-n N] [-f | --no-follow]
 - `1` log 文件不存在（且无回退路径）
 
 **Output schema:**
-- `target (str)` `"launcher"` / `"comfyui"`
+- `target (str)` `"launcher"` / `"comfyui"` / `"webui"`
 - `log_path (str)` 解析到的日志路径
 - `lines (int)` 实际打印的行数
 - `following (bool)` `-f` 模式是否生效
@@ -336,6 +338,11 @@ $ echo $?
 | 2 | start 拒绝重复 | start |
 | 3 | 未在跑 | status |
 | 4 | 已是最新 | update |
+| 6 | webui start 时 ComfyUI 未运行（用了 `--with-comfyui`） | webui |
+| 7 | webui 路径未安装（用 `webui install` 拉取） | webui |
+| 8 | webui 依赖缺失（用 `webui setup` 安装） | webui |
+
+> webui 的退出码仅 `webui` 子命令返回；ComfyUI 主服务只用到 0–4。
 
 外部脚本（systemd / NSSM / 监控 agent）按这张表判断是否需要重试 / 告警；
 值稳定，请勿随意改。
