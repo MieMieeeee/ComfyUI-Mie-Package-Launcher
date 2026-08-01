@@ -166,7 +166,12 @@ class BackgroundTasksPage(QtWidgets.QWidget):
                 border-bottom: none;
                 border-top-left-radius: 8px;
                 border-top-right-radius: 8px;
-                padding: 8px 20px;
+                /* 14px horizontal padding + 96px min-width keeps Chinese
+                   titles (and count badges) readable even when the page
+                   is narrow; previous 20px padding squeezed tabs past their
+                   text sizeHint and clipped half-width. */
+                padding: 8px 14px;
+                min-width: 96px;
                 margin-right: 4px;
                 font: 10pt 'Microsoft YaHei UI';
             }}
@@ -181,6 +186,14 @@ class BackgroundTasksPage(QtWidgets.QWidget):
         self._done_page = self._make_list_page("还没有已完成的任务")
         self._tab_active = self._tabs.addTab(self._active_page, "进行中")
         self._tab_done = self._tabs.addTab(self._done_page, "已完成")
+        # Lock tab sizing: keep each tab at its own sizeHint (no auto
+        # stretching), disable text eliding so Chinese titles always render
+        # in full, and pin a sane minimum width for the tab strip itself
+        # (two ~110px tabs + page chrome must fit even on narrow sidebars).
+        from PyQt5 import QtCore as _QtCore
+        self._tabs.setExpanding(False)
+        self._tabs.setElideMode(_QtCore.Qt.TextElideMode.ElideNone)
+        self._tabs.setMinimumSize(_QtCore.QSize(260, 0))
         self._tabs.setCurrentIndex(0)
         layout.addWidget(self._tabs, 1)
 
