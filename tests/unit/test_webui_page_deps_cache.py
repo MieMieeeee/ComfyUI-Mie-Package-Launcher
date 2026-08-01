@@ -1,4 +1,4 @@
-"""WebuiPage 依赖探测缓存测试 (#10).
+﻿"""WebuiPage 依赖探测缓存测试 (#10).
 
 锁死两件事:
 1. 命中: 同一 (py, webui_path) 连续 _detect_state 只调一次 check_webui_dependencies.
@@ -182,6 +182,104 @@ class TestDepsProbeCache(_Fixture):
                 self.assertEqual(mock_dep.call_count, calls_after_refresh,
                                  "清缓存后重建的缓存应再次命中, 不重复探测")
 
+class TestAfterDownloadClearsCache(_Fixture):
+    """Regression: download+install flow used to leave the deps probe cache
+    stale (`ok=False` from before the inline `install_webui_requirements`
+    run), so after on_done the UI kept showing `STATE_NO_DEPS` ("安装依赖").
+
+    _after_download must invalidate the cache the same way _after_setup /
+    refresh_after_env_switch / _remove_webui already do.
+    """
+
+    def test_after_download_success_clears_cache(self):
+        """_after_download success path -> next _detect_state() re-probes."""
+        with tempfile.TemporaryDirectory() as d:
+            d = Path(d)
+            webui_path = d / "Comfyui-Workbench-Mie"
+            (webui_path / "app").mkdir(parents=True)
+            (webui_path / "app" / "flask_app.py").write_text("# stub")
+            py_path = d / "python.exe"
+            py_path.touch()
+
+            page = self._make_page(webui_path, py_path)
+            # Pre-seed a stale "deps missing" cache so we can verify it's
+            # wiped -- not just re-read.
+            page._deps_cache_key = "(stale,pre-install)"
+            page._deps_cache_result = {"ok": False, "missing": ["flask"]}
+
+            with patch("core.webui_process_manager.WebuiProcessManager.is_running", return_value=False), \
+                 patch("ui_qt.pages.webui_page.check_webui_dependencies",
+                       return_value={"ok": True, "missing": [], "available": []}) as mock_dep:
+                page._after_download("下载完成")
+                # 关键: stale cache key 必须不再残留. _detect_state 之后
+                # 新的 cache key 是新的 (py, webui_path) 拼接, 跟手填的
+                # "(stale,pre-install)" 不同; 如果 _after_download 没清,
+                # _detect_state 会命中旧 entry -- 下面 mock_dep.call_count
+                # 会是 0.
+                self.assertNotEqual(
+                    page._deps_cache_key, "(stale,pre-install)",
+                    "stale cache key 必须被失效 (不能再命中装之前的 ok=False 结果)",
+                )
+                self.assertGreaterEqual(mock_dep.call_count, 1,
+                    "_after_download 成功后 _detect_state 必须重新探测依赖, 不能复用 stale cache")
+
+    def test_after_download_failure_clears_cache(self):
+        """Even on download failure, deps cache must be invalidated --
+        because an interrupted download may have left partial files /
+        partial install state, so any cached probe result is no longer
+        trustworthy.
+        """
+        with tempfile.TemporaryDirectory() as d:
+            d = Path(d)
+            webui_path = d / "Comfyui-Workbench-Mie"
+            (webui_path / "app").mkdir(parents=True)
+            (webui_path / "app" / "flask_app.py").write_text("# stub")
+            py_path = d / "python.exe"
+            py_path.touch()
+
+            page = self._make_page(webui_path, py_path)
+            page._deps_cache_key = "(stale)"
+            page._deps_cache_result = {"ok": True, "missing": []}
+
+            page._deps_cache_key = "(stale,pre-failure)"
+            page._deps_cache_result = {"ok": True, "missing": []}
+            with patch("ui_qt.pages.webui_page.DialogHelper.show_warning"):
+                page._after_download("下载失败: 模拟")
+            # 不论成功失败, stale cache 必须被 wipe -- 中断的下载可能改了
+            # requirements.txt / 部分 pip install, 旧 cache 结果不再可信.
+            self.assertIsNone(page._deps_cache_key)
+            self.assertIsNone(page._deps_cache_result)
+
+
+class TestAfterUpdateClearsCache(_Fixture):
+    """Symmetry check: update success must also invalidate the deps cache
+    because git pull may have rotated webui files (requirements.txt,
+    app/*, etc.) which would invalidate the previous probe's result.
+    """
+
+    def test_after_update_success_clears_cache(self):
+        with tempfile.TemporaryDirectory() as d:
+            d = Path(d)
+            webui_path = d / "Comfyui-Workbench-Mie"
+            (webui_path / "app").mkdir(parents=True)
+            (webui_path / "app" / "flask_app.py").write_text("# stub")
+            py_path = d / "python.exe"
+            py_path.touch()
+
+            page = self._make_page(webui_path, py_path)
+            page._deps_cache_key = "(stale)"
+            page._deps_cache_result = {"ok": True, "missing": []}
+
+            with patch("core.webui_process_manager.WebuiProcessManager.is_running", return_value=False), \
+                 patch("ui_qt.pages.webui_page.check_webui_dependencies",
+                       return_value={"ok": True, "missing": [], "available": []}), \
+                 patch("ui_qt.pages.webui_page.DialogHelper.show_info"):
+                page._after_update(True, True, "")
+            # _after_update 同样必须清 stale cache (git pull 可能动了 requirements.txt)
+            self.assertNotEqual(
+                page._deps_cache_key, "(stale)",
+                "stale cache key 必须被失效",
+            )
 
 if __name__ == "__main__":
     unittest.main()

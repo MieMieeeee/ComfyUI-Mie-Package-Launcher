@@ -605,6 +605,19 @@ class WebuiPage(BasePage):
             "download_url": download_url,
         }
 
+    def _reset_deps_cache(self, reason: str) -> None:
+        """失效依赖探测缓存. install/download/update 等改动 webui 文件系统后调用."""
+        try:
+            if self._deps_cache_result is not None or self._deps_cache_key is not None:
+                self.app.logger.info(
+                    "依赖探测缓存失效: reason=%s old_key=%s",
+                    reason, self._deps_cache_key,
+                )
+        except Exception:
+            pass
+        self._deps_cache_key = None
+        self._deps_cache_result = None
+
     def _detect_state(self) -> str:
         """综合判定当前状态."""
         info = self._resolve_paths()
@@ -764,6 +777,7 @@ class WebuiPage(BasePage):
             DialogHelper.show_warning(self, "更新失败", "git pull 失败: %s" % (err or "未知"))
             self._set_state(self._detect_state())
         else:
+            self._reset_deps_cache("update")
             self._set_state(self._detect_state())
             if updated:
                 DialogHelper.show_info(self, "更新完成", "WebUI工作台已更新到最新版本。")
@@ -1104,6 +1118,10 @@ class WebuiPage(BasePage):
 
     @QtCore.pyqtSlot(str)
     def _after_download(self, msg: str):
+        # 下载流程可能顺带跑 install_webui_requirements; 不论成功失败都得
+        # 失效 deps 探测缓存, 否则下次 _detect_state 会命中装之前的 
+        # `ok=False` 缓存, UI 永远停在 STATE_NO_DEPS ("安装依赖").
+        self._reset_deps_cache("download")
         if msg.startswith("下载失败"):
             self._set_state(STATE_NOT_INSTALLED)
             DialogHelper.show_warning(self, "下载失败", msg)
@@ -1237,9 +1255,8 @@ class WebuiPage(BasePage):
 
     @QtCore.pyqtSlot(bool, str)
     def _after_setup(self, ok: bool, err: str):
-        # 依赖刚装过, 失效探测缓存 (下次 _detect_state 重新探测)
-        self._deps_cache_key = None
-        self._deps_cache_result = None
+        # 依赖刚装过 (或尝试过), 失效探测缓存 (下次 _detect_state 重新探测)
+        self._reset_deps_cache("setup")
         if not ok:
             DialogHelper.show_warning(
                 self, "依赖安装失败",
