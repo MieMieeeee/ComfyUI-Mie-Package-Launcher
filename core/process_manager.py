@@ -12,6 +12,10 @@ from pathlib import Path
 from core.probe import is_http_reachable, find_pids_by_port_safe, is_comfyui_pid
 from core.kill import kill_pids
 from core.process_events import emit_event, ProcessEvent
+try:
+    from ui_qt.widgets.dialog_helper import DialogHelper
+except Exception:
+    DialogHelper = None
 from utils.common import run_hidden
 
 # 尝试导入 psutil，如果失败则在相关功能中回退
@@ -59,6 +63,9 @@ class ProcessManager:
                     "ComfyUI 正在启动中。\n\n是否取消本次启动?",
                     default=False,
                     event=ProcessEvent.STARTING,
+                    yes_text="取消启动",
+                    no_text="继续启动",
+                    destructive=True,
                 )
                 if cancel:
                     try:
@@ -136,6 +143,8 @@ class ProcessManager:
                 f"检测到端口 {port} 已被占用 (PID: {pid_text}).\n\n是否直接打开网页而不启动新的实例?",
                 default=True,
                 event=ProcessEvent.STARTING,
+                yes_text="打开网页",
+                no_text="不打开",
             )
             if proceed_open:
                 try:
@@ -149,6 +158,9 @@ class ProcessManager:
                     "是否停止现有实例并用当前配置启动新的 ComfyUI?",
                     default=False,
                     event=ProcessEvent.STARTING,
+                    yes_text="停止并重启",
+                    no_text="取消",
+                    destructive=True,
                 )
                 if restart:
                     try:
@@ -465,21 +477,45 @@ class ProcessManager:
         msg: str,
         default: bool = True,
         event: ProcessEvent | None = None,
+        yes_text: str = "是",
+        no_text: str = "否",
+        destructive: bool = False,
     ) -> bool:
-        # Emit event for the action
+        """统一弹窗的 Yes/No 确认 (走 DialogHelper, 与项目其它弹窗风格一致).
+
+        headless (CLI / 自动化) 直接返回 default, 不弹窗.
+        PyQt5 / DialogHelper 不可用时也走 default 兜底.
+        """
         if event:
             emit_event(event)
+        # headless / 无 GUI 路径
         try:
-            from PyQt5 import QtWidgets
-
-            btn = QtWidgets.QMessageBox.question(
-                None,
-                title,
-                msg,
-                QtWidgets.QMessageBox.Yes | QtWidgets.QMessageBox.No,
-                QtWidgets.QMessageBox.Yes if default else QtWidgets.QMessageBox.No,
+            if getattr(self.app, "headless", False):
+                return default
+        except Exception:
+            pass
+        if DialogHelper is None:
+            return default
+        parent = None
+        try:
+            parent = (
+                getattr(self.app, "root", None)
+                or getattr(self.app, "big_btn", None)
+                or getattr(self.app, "main_window", None)
             )
-            return btn == QtWidgets.QMessageBox.Yes
+        except Exception:
+            parent = None
+        try:
+            return bool(
+                DialogHelper.show_confirmation(
+                    parent,
+                    title,
+                    msg,
+                    yes_text=yes_text,
+                    no_text=no_text,
+                    destructive=destructive,
+                )
+            )
         except Exception:
             return default
 
