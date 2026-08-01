@@ -174,8 +174,8 @@ class TestResolvePathsMirror(_Fixture):
         info = page._resolve_paths()
         self.assertEqual(info["download_mirror"], "github")
         self.assertEqual(info["download_url"], WEBUI_REPO_GITHUB)
-        # mirror_options must always include gitee/github/custom.
-        self.assertEqual(set(info["mirror_options"]), {"gitee", "github", "custom"})
+        # mirror_options reflects the UI: gitee / github only. 自定义 URL 选项已移除.
+        self.assertEqual(set(info["mirror_options"]), {"gitee", "github"})
 
     def test_resolve_paths_unknown_mirror_falls_back(self):
         page, app, webui_path, d = self._make_page(
@@ -189,11 +189,18 @@ class TestResolvePathsMirror(_Fixture):
             webui_options={"port": 8199, "download_mirror": "github"},
         )
         combo = page._mirror_combo
-        self.assertEqual(combo.count(), 3)
-        # items: gitee / github / custom
+        # 2 items only: gitee / github. 自定义 URL 选项已移除.
+        self.assertEqual(combo.count(), 2)
         items = [combo.itemData(i) for i in range(combo.count())]
-        self.assertEqual(items, ["gitee", "github", "custom"])
+        self.assertEqual(items, ["gitee", "github"])
         self.assertEqual(combo.currentData(), "github")
+        # Labels use full-width Chinese parens (全角).
+        labels = [combo.itemText(i) for i in range(combo.count())]
+        self.assertEqual(labels[0], "Gitee（国内推荐）")
+        self.assertEqual(labels[1], "GitHub（海外）")
+        # Popup must show all items; the issue was no stylesheet -> native dropdown
+        # truncates the second row. setMaxVisibleItems locks that.
+        self.assertGreaterEqual(combo.maxVisibleItems(), combo.count())
 
     def test_mirror_combo_default_when_missing(self):
         page, app, webui_path, d = self._make_page(
@@ -257,54 +264,13 @@ class TestOnMirrorChanged(_Fixture):
             page._on_mirror_changed(idx)
         self.assertEqual(saved, [])
 
-    def test_custom_opens_input_dialog_and_persists(self):
-        page, app, webui_path, d = self._make_page(
-            webui_options={"port": 8199, "download_mirror": "gitee"},
-        )
-        saved = []
-        fake_input = MagicMock(return_value=("https://my-mirror.example/foo.git", True))
-        with patch.object(page, "_save_webui_option", side_effect=lambda k, v: (saved.append((k, v)), app.config.setdefault("webui_options", {}).__setitem__(k, v))), \
-             patch.object(QtWidgets.QInputDialog, "getText", fake_input):
-            idx = self._combo_index_of(page._mirror_combo, "custom")
-            page._on_mirror_changed(idx)
-        d = dict(saved)
-        self.assertEqual(d["download_mirror"], "custom")
-        self.assertEqual(d["download_url"], "https://my-mirror.example/foo.git")
-
-    def test_custom_cancel_rolls_back(self):
-        page, app, webui_path, d = self._make_page(
-            webui_options={"port": 8199, "download_mirror": "gitee"},
-        )
-        saved = []
-        fake_input = MagicMock(return_value=("", False))
-        with patch.object(page, "_save_webui_option", side_effect=lambda k, v: (saved.append((k, v)), app.config.setdefault("webui_options", {}).__setitem__(k, v))), \
-             patch.object(QtWidgets.QInputDialog, "getText", fake_input):
-            # Move combo to custom first (no signal because of blockSignals).
-            page._mirror_combo.blockSignals(True)
-            page._mirror_combo.setCurrentIndex(self._combo_index_of(page._mirror_combo, "custom"))
-            page._mirror_combo.blockSignals(False)
-            page._on_mirror_changed(self._combo_index_of(page._mirror_combo, "custom"))
-        self.assertEqual(saved, [])
-        # combo must be rolled back to gitee.
-        self.assertEqual(page._mirror_combo.currentData(), "gitee")
-
-    def test_custom_empty_url_rolls_back(self):
-        page, app, webui_path, d = self._make_page(
-            webui_options={"port": 8199, "download_mirror": "gitee"},
-        )
-        saved = []
-        fake_input = MagicMock(return_value=("   ", True))  # user typed only whitespace
-        with patch.object(page, "_save_webui_option", side_effect=lambda k, v: (saved.append((k, v)), app.config.setdefault("webui_options", {}).__setitem__(k, v))), \
-             patch.object(QtWidgets.QInputDialog, "getText", fake_input):
-            page._mirror_combo.blockSignals(True)
-            page._mirror_combo.setCurrentIndex(self._combo_index_of(page._mirror_combo, "custom"))
-            page._mirror_combo.blockSignals(False)
-            page._on_mirror_changed(self._combo_index_of(page._mirror_combo, "custom"))
-        self.assertEqual(saved, [])
-        self.assertEqual(page._mirror_combo.currentData(), "gitee")
+    # 原先的 test_custom_opens_input_dialog_and_persists / test_custom_cancel_rolls_back /
+    # test_custom_empty_url_rolls_back 三个测试已移除: 仓库源下拉
+    # 不再提供「自定义 URL」选项 (mirror combo 只留 gitee / github).
+    # resolve_webui_repo_url() 仍提供「custom」分支处理老 config (例如过去选了
+    # 自定义的用户), 但现在 UI 没有路径走到该分支了.
 
 
-# ---- installed (.git exists) -> CustomConfirmDialog + git remote set-url ----
 class TestInstalledMirrorSwitch(_Fixture):
     def _combo_index_of(self, combo, value):
         for i in range(combo.count()):

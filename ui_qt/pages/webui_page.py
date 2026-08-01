@@ -398,20 +398,20 @@ class WebuiPage(BasePage):
         form_layout.addWidget(open_label, 1, 0)
         form_layout.addLayout(row_open, 1, 1)
 
-        # 仓库源 (gitee / github / custom). 已安装未安装都能切; 已安装时
+        # 仓库源 (gitee / github). 已安装未安装都能切; 已安装时
         # 切换会同时 "git remote set-url origin", 已 clone 的代码不重下,
         # 下次更新走新源. 国内优先 Gitee (直连快), 海外用 GitHub.
         mirror_label = QtWidgets.QLabel("仓库源：")
         mirror_label.setStyleSheet(lbl_style)
         self._mirror_combo = NoWheelComboBox()
+        self._mirror_combo.setMaxVisibleItems(2)
         self._mirror_combo.setToolTip(
             "下载/更新 WebUI 工作台时用的 git 仓库源. 国内选 Gitee 直连快. "
             "已安装的工作台切换会同时改 git remote.origin.url, 不会重下代码."
         )
         _mirror_opts = [
-            ("Gitee (国内推荐)", "gitee"),
-            ("GitHub (海外)", "github"),
-            ("自定义 URL", "custom"),
+            ("Gitee（国内推荐）", "gitee"),
+            ("GitHub（海外）", "github"),
         ]
         for _name, _val in _mirror_opts:
             self._mirror_combo.addItem(_name, _val)
@@ -572,61 +572,27 @@ class WebuiPage(BasePage):
 
     @QtCore.pyqtSlot(int)
     def _on_mirror_changed(self, idx: int) -> None:
-        """仓库源切换 handler (Gitee / GitHub / Custom).
+        """仓库源切换 handler (Gitee / GitHub).
 
         流程:
-          1. 解析 idx -> new_mirror (gitee / github / custom).
+          1. 解析 idx -> new_mirror (gitee / github).
           2. 读当前持久化的 old_mirror; 相同则 no-op.
-          3. custom 模式: QInputDialog 弹 URL; 取消或空 -> 回滚 combo 到 old_mirror.
-          4. 持久化 new_mirror (custom 时连 download_url 一起存).
-          5. 已安装 (webui_path/.git 存在): 弹 [仅保存配置 / 立即切换 origin].
+          3. 持久化 new_mirror.
+          4. 已安装 (webui_path/.git 存在): 弹 [仅保存配置 / 立即切换 origin].
              选立即切换 -> git remote set-url origin <new_url>; 失败弹 DialogHelper.
         """
         if not (0 <= idx < self._mirror_combo.count()):
             return
         new_mirror = (self._mirror_combo.itemData(idx) or "").strip().lower()
-        if new_mirror not in WEBUI_REPOS and new_mirror != "custom":
+        if new_mirror not in WEBUI_REPOS:
             return
         old_mirror = (
             self._webui_options().get("download_mirror") or WEBUI_DEFAULT_MIRROR
         ).strip().lower()
-        if old_mirror not in WEBUI_REPOS and old_mirror != "custom":
+        if old_mirror not in WEBUI_REPOS:
             old_mirror = WEBUI_DEFAULT_MIRROR
         if new_mirror == old_mirror:
             return
-
-        def _rollback():
-            """取消时把 combo 选回 old_mirror, blockSignals 防再次触发."""
-            try:
-                self._mirror_combo.blockSignals(True)
-                for i in range(self._mirror_combo.count()):
-                    if (self._mirror_combo.itemData(i) or "").strip().lower() == old_mirror:
-                        self._mirror_combo.setCurrentIndex(i)
-                        break
-            finally:
-                self._mirror_combo.blockSignals(False)
-
-        # custom 模式先问 URL; 取消或空都回滚.
-        if new_mirror == "custom":
-            existing = (self._webui_options().get("download_url") or "").strip()
-            text, ok = QtWidgets.QInputDialog.getText(
-                self,
-                "自定义仓库 URL",
-                "输入 WebUI 工作台 git 仓库的完整 URL (https://...):",
-                QtWidgets.QLineEdit.Normal,
-                existing,
-            )
-            if not ok:
-                _rollback()
-                return
-            cu = (text or "").strip()
-            if not cu:
-                DialogHelper.show_warning(
-                    self, "URL 不能为空", "已取消切换; 仓库源保持不变.",
-                )
-                _rollback()
-                return
-            self._save_webui_option("download_url", cu)
 
         # 持久化新 mirror.
         self._save_webui_option("download_mirror", new_mirror)
@@ -722,6 +688,7 @@ class WebuiPage(BasePage):
         # 输入控件
         self._port_edit.setStyleSheet(input_ss)
         self._open_combo.setStyleSheet(input_ss)
+        self._mirror_combo.setStyleSheet(input_ss)
         self._cpath_btn.setStyleSheet(input_ss)
         # 文本/日志
         self._log_view.setStyleSheet(self._log_view_style())
@@ -757,7 +724,7 @@ class WebuiPage(BasePage):
             display_host = "0.0.0.0" if webui_options.get("listen_lan") else "127.0.0.1"
         else:
             display_host = webui_options.get("display_host") or "127.0.0.1"
-        # 镜像源: gitee / github / custom.
+        # 镜像源: gitee / github.
         # 未设 (None 或 空) 默认跳 gitee, 国内推荐.
         download_mirror = (webui_options.get("download_mirror") or WEBUI_DEFAULT_MIRROR).strip().lower()
         if download_mirror not in WEBUI_REPOS and download_mirror != "custom":
@@ -787,7 +754,7 @@ class WebuiPage(BasePage):
             "display_host": display_host,
             "download_url": download_url,
             "download_mirror": download_mirror,
-            "mirror_options": list(WEBUI_REPOS.keys()) + ["custom"],
+            "mirror_options": list(WEBUI_REPOS.keys()),
         }
 
     def _reset_deps_cache(self, reason: str) -> None:
