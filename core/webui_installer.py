@@ -158,13 +158,18 @@ def clone_webui(
             "error": "未找到 git 命令 (resolve_git 失败), 请先在系统中安装 git",
         }
 
-    # 2. 解析 URL (走 github proxy)
+    # 2. 解析 URL
     cfg = getattr(app, "config", {}) or {}
     proxy_settings = cfg.get("proxy_settings", {}) if isinstance(cfg, dict) else {}
     raw_url = (repo_url or WEBUI_DEFAULT_REPO).strip()
+    # 只对 github.com URL 加代理; gitee 直连快, 加代理反而会脏.
+    # 和 pull_webui 那里 "if raw and github.com in raw.lower()" 保持一致.
     try:
         from utils.net import apply_git_proxy_to_url
-        clone_url = apply_git_proxy_to_url(raw_url, proxy_settings)
+        if "github.com" in raw_url.lower():
+            clone_url = apply_git_proxy_to_url(raw_url, proxy_settings)
+        else:
+            clone_url = raw_url
     except Exception:
         clone_url = raw_url
     _log("git clone " + clone_url + " -> " + str(target_dir))

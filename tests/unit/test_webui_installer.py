@@ -105,6 +105,36 @@ def test_clone_applies_gh_proxy(monkeypatch, tmp_path):
     assert clone_url.startswith("https://gh-proxy.com/")
     assert "github.com/MieMieeeee/Comfyui-Workbench-Mie" in clone_url
 
+def test_clone_skips_proxy_for_gitee(monkeypatch, tmp_path):
+    """Gitee URL 直连, 不加 gh-proxy / custom 代理 (clone_webui 不该
+    无脑 apply_git_proxy_to_url -- 跟 pull_webui 一致, 只对 github.com 生效).
+    """
+    from core.webui_installer import clone_webui
+
+    popen_calls = []
+
+    class _FakePopen:
+        def __init__(self, cmd, **kw):
+            popen_calls.append(cmd)
+            self.stdout = iter([])
+        def wait(self):
+            (tmp_path / "webui" / "app").mkdir(parents=True, exist_ok=True)
+            (tmp_path / "webui" / "app" / "flask_app.py").write_text("# stub", encoding="utf-8")
+            return 0
+
+    monkeypatch.setattr(subprocess, "Popen", _FakePopen)
+
+    app = _FakeApp()
+    # 用户开了 gh-proxy 但选了 Gitee 镜像; clone URL 不应被加代理前缀.
+    app.config["proxy_settings"]["git_proxy_mode"] = "gh-proxy"
+    gitee_url = "https://gitee.com/MieMieeeee/Comfyui-Workbench-Mie.git"
+    res = clone_webui(app, tmp_path / "webui", repo_url=gitee_url)
+    assert res["ok"] is True
+    cmd = popen_calls[0]
+    clone_url = cmd[4]
+    assert clone_url == gitee_url, f"gitee URL got wrapped by proxy: {clone_url}"
+    assert "gh-proxy.com" not in clone_url
+
 
 def test_clone_fails_when_no_entry_file(monkeypatch, tmp_path):
     """clone 成功但缺 app/flask_app.py 视为失败."""
