@@ -484,3 +484,92 @@ def test_set_loading_state_noop_when_list_already_populated(qt_app):
     page.populate([_plugin("Existing")])  # 已有 1 项
     page.set_loading_state(True)           # 触发加载态
     assert page.list_widget.count() == 1   # 没多插占位，还是 1 项
+
+
+# ---- PluginController.run_update_selected: 带 on_status/on_done 回调 (qt_app 弹窗接线) ----
+
+def test_controller_run_update_selected_calls_svc_and_invokes_on_status(qt_app):
+    """run_update_selected 直接入口: 调 svc.update_selected + svc.outdated_plugins, on_status 派发一次."""
+    from ui_qt.pages.plugins_page import PluginsPage, PluginController
+
+    page = PluginsPage(theme_manager=_stub_theme())
+    svc = MagicMock()
+    svc.update_selected.return_value = {"updated": True, "log": "", "error": None}
+    svc.outdated_plugins.return_value = []
+    run_bg, post_ui = _sync_runner()
+    ctrl = PluginController(page, svc, run_bg, post_ui)
+
+    statuses = []
+    ctrl.run_update_selected(["A", "B"], on_status=lambda s: statuses.append(s))
+
+    svc.update_selected.assert_called_once_with(["A", "B"])
+    svc.outdated_plugins.assert_called_once_with(["A", "B"])
+    assert len(statuses) == 1, f"on_status 应调一次, 实际 {len(statuses)}"
+    assert "更新" in statuses[0] or "A" in statuses[0] or "B" in statuses[0], (
+
+        f"on_status 文案应含「更新」或选中插件名: {statuses[0]}"
+
+    )
+
+
+def test_controller_run_update_selected_success_refreshes_and_calls_on_done(qt_app):
+    """全部成功: _populate_from_service (svc.list_installed) + on_done 派发."""
+    from ui_qt.pages.plugins_page import PluginsPage, PluginController
+
+    page = PluginsPage(theme_manager=_stub_theme())
+    svc = MagicMock()
+    svc.update_selected.return_value = {"updated": True, "log": "", "error": None}
+    svc.outdated_plugins.return_value = []  # 无失败
+    svc.list_installed.return_value = [_plugin("A"), _plugin("B")]
+    run_bg, post_ui = _sync_runner()
+    ctrl = PluginController(page, svc, run_bg, post_ui)
+
+    done_called = []
+    ctrl.run_update_selected(["A", "B"], on_done=lambda: done_called.append(True))
+
+    svc.list_installed.assert_called_once()  # 成功后刷新列表
+    assert done_called == [True], "on_done 应被调一次"
+
+
+def test_controller_run_update_selected_partial_failure_emits_force_update_and_calls_on_done(qt_app):
+    """部分失败: force_update_suggested 发出 + on_done 仍然调 (让 qt_app 收尾弹窗)."""
+    from ui_qt.pages.plugins_page import PluginsPage, PluginController
+
+    page = PluginsPage(theme_manager=_stub_theme())
+    svc = MagicMock()
+    svc.update_selected.return_value = {"updated": True, "log": "", "error": None}
+    svc.outdated_plugins.return_value = ["MieNodes"]  # 仍落后 = 失败
+    svc.list_installed.return_value = [_plugin("MieNodes")]
+    run_bg, post_ui = _sync_runner()
+    ctrl = PluginController(page, svc, run_bg, post_ui)
+
+    suggested = []
+    page.force_update_suggested.connect(lambda names: suggested.append(names))
+    done_called = []
+    ctrl.run_update_selected(["MieNodes"], on_done=lambda: done_called.append(True))
+
+    assert suggested == [["MieNodes"]], "失败列表通过 force_update_suggested 通知页面"
+    svc.list_installed.assert_called_once()  # 失败也刷新 (跟现有 _update_selected_work 行为一致)
+    assert done_called == [True], "on_done 仍应在 finally 调, 让 qt_app 收尾"
+
+
+def test_controller_run_update_selected_swallows_svc_exception_still_calls_on_done(qt_app):
+    """svc.update_selected 抛 -> 兜住, on_done 仍调, 不冒泡 (不阻断退出/后续操作)."""
+    from ui_qt.pages.plugins_page import PluginsPage, PluginController
+
+    page = PluginsPage(theme_manager=_stub_theme())
+    svc = MagicMock()
+    svc.update_selected.side_effect = RuntimeError("cm-cli failed")
+    run_bg, post_ui = _sync_runner()
+    ctrl = PluginController(page, svc, run_bg, post_ui)
+
+    done_called = []
+    # 不应抛
+    ctrl.run_update_selected(["X"], on_done=lambda: done_called.append(True))
+    assert done_called == [True], "on_done 必须在 finally 调, 即便 svc 抛"
+    # 失败时不调 outdated_plugins (svc 已崩, 再问 outdated 没意义)
+    svc.outdated_plugins.assert_not_called()
+
+
+if __name__ == "__main__":
+    pytest.main([__file__, "-v"])

@@ -802,6 +802,30 @@ class PluginController:
         self.svc.update_all()
         self._populate_from_service()
 
+    def run_update_selected(self, names, on_status=None, on_done=None):
+        """qt_app 触发: 带进度回调的「更新选中」。
+
+        on_status(str): 任务起始时回调一次, 派回 UI 线程.
+        on_done(): 任务收尾 (包括异常路径) 都会调, 让 qt_app 收尾弹窗 + 注册表.
+        """
+        def work():
+            try:
+                if on_status:
+                    label = f"正在更新选中插件 ({len(names)} 个)"
+                    self._post_to_ui(lambda: on_status(label))
+                self.svc.update_selected(names)
+                failed = self.svc.outdated_plugins(names)
+                if failed:
+                    self._post_to_ui(lambda: self.page.force_update_suggested.emit(failed))
+            except Exception:
+                pass
+            finally:
+                self._populate_from_service()
+                if on_done:
+                    self._post_to_ui(on_done)
+        self._run_in_background(work)
+
+
     def _on_update_selected(self, names):
         self._run_in_background(lambda: self._update_selected_work(names))
 

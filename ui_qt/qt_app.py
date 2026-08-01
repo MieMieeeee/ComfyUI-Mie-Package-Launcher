@@ -2603,12 +2603,18 @@ class PyQtLauncher(QtWidgets.QMainWindow, process_events.ProcessCallback):
             page_plugins.install_btn.clicked.connect(self._prompt_plugin_install)
             # 检查更新结果回推 → 页面标记 🔄（page 自身消费，但信号是 page 拥有，故在此显式连）
             page_plugins.outdated_reported.connect(page_plugins.mark_outdated)
-            # 检查更新 / 更新全部：断开 page 默认的信号连接，改走带进度弹窗的版本
+            # 检查更新 / 更新全部 / 更新选中: 断开 page / controller 默认的 signal 连接, 改走带进度弹窗的版本.
+            # 更新选中: 断开 controller._on_update_selected (裸跑无状态弹窗也不注册后台任务), 改连 _do_plugin_update_selected.
             try:
                 page_plugins.check_updates_btn.clicked.disconnect()
                 page_plugins.update_all_btn.clicked.disconnect()
                 page_plugins.check_updates_btn.clicked.connect(self._do_plugin_check_updates)
                 page_plugins.update_all_btn.clicked.connect(self._do_plugin_update_all)
+                try:
+                    page_plugins.update_selected_requested.disconnect()
+                except Exception:
+                    pass
+                page_plugins.update_selected_requested.connect(self._do_plugin_update_selected)
             except Exception:
                 pass
             # 启动后兜底扫描已装列表：延迟 15s，让窗口出现 + 版本检测 + 用户点启动等
@@ -4609,6 +4615,84 @@ class PyQtLauncher(QtWidgets.QMainWindow, process_events.ProcessCallback):
             try:
                 if getattr(self, "logger", None):
                     self.logger.warning("插件更新全部弹窗失败", exc_info=True)
+            except Exception:
+                pass
+
+    def _do_plugin_update_selected(self, names):
+        """更新选中: 带进度弹窗 + 取消 + 后台运行 (注册到后台任务注册表, 可找回).
+        与 _do_plugin_update_all 同构, names 是已选中的插件 dir_name 列表.
+        """
+        ctrl = getattr(self, "_plugin_controller", None)
+        if ctrl is None or not names:
+            return
+        try:
+            from ui_qt.widgets.progress_dialog import ProgressDialog
+            registry = getattr(self, "_bg_task_registry", None)
+            task_title = f"更新选中 ({len(names)} 个)"
+            task_id = registry.register(task_title) if registry else None
+            status_init = f"正在更新 {len(names)} 个选中插件（cm-cli update）..."
+            pd = ProgressDialog(self, title="更新选中", theme_manager=getattr(self, "theme_manager", None),
+                                show_cancel=True, show_background=True)
+            if registry and task_id:
+                registry.set_dialog(task_id, pd)
+                registry.update(task_id, status=status_init)
+            pd.set_status(status_init)
+            pd.set_progress(0, maximum=0)  # 脉冲
+            pd.show()
+            QtWidgets.QApplication.processEvents()
+
+            def on_status(text):
+                if registry and task_id:
+                    registry.update(task_id, status=text)
+                if pd.is_cancelled() or pd.is_backgrounded():
+                    return
+                try:
+                    pd.set_status(text)
+                except Exception:
+                    pass
+
+            def on_done():
+                try:
+                    done_msg = f"选中插件更新完成 ({len(names)} 个)"
+                    # 同步弹窗到完成态 (后台模式下 on_status 跳过弹窗 UI, 这里统一更新;
+                    # mark_complete 还会隐藏取消按钮——已完成的任务不该再有取消选项)
+                    try:
+                        pd.mark_complete(done_msg + " ✓（列表已刷新）")
+                    except Exception:
+                        pass
+                    if registry and task_id:
+                        registry.complete(task_id)
+                        registry.update(task_id, status=done_msg)
+                    if pd.is_cancelled():
+                        try:
+                            pd.close()
+                        except Exception:
+                            pass
+                        return
+                    if pd.is_backgrounded():
+                        # 后台: 弹窗已更新到完成态, 状态栏提示. 不自动 remove（保留历史）
+                        self._notify_plugins_result(done_msg)
+                        return
+                    # 前台: 已显示结果, 延迟关闭（保留历史, 不 remove）
+                    def _close():
+                        try:
+                            pd.close()
+                        except Exception:
+                            pass
+                    QtCore.QTimer.singleShot(1500, _close)
+                except Exception:
+                    try:
+                        pd.close()
+                    except Exception:
+                        pass
+                    if registry and task_id:
+                        registry.remove(task_id)
+
+            ctrl.run_update_selected(list(names), on_status=on_status, on_done=on_done)
+        except Exception:
+            try:
+                if getattr(self, "logger", None):
+                    self.logger.warning("插件更新选中弹窗失败", exc_info=True)
             except Exception:
                 pass
 
