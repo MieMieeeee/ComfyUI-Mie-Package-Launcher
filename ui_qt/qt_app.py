@@ -13,6 +13,7 @@ from services.di import ServiceContainer
 from core.version_service import refresh_version_info
 from core.process_manager import ProcessManager
 from core import process_events
+from core.orphan_killer import stop_orphan_webui
 from core.version_workers import (
     PythonVersionWorker,
     TorchVersionWorker,
@@ -4124,6 +4125,12 @@ class PyQtLauncher(QtWidgets.QMainWindow, process_events.ProcessCallback):
 
         # ---- 场景 1a: 从托盘菜单退出（保留 ComfyUI）----
         if getattr(self, "_tray_quit_requested", False):
+            # ComfyUI 如果未跑, WebUI 工作台留着是孤儿进程, 自动关掉.
+            # 保留 ComfyUI 不等于保留 WebUI, 后者依赖前者后台.
+            try:
+                stop_orphan_webui(self)
+            except Exception:
+                pass
             self._perform_shutdown(event)
             return
 
@@ -4177,7 +4184,13 @@ class PyQtLauncher(QtWidgets.QMainWindow, process_events.ProcessCallback):
                 if idx == 2:  # 停止并退出
                     # 停 ComfyUI + WebUI 工作台 (工作台依赖 ComfyUI, 一起停).
                     self._stop_comfyui_and_webui_on_exit()
-                # idx == 1 (仅退出启动器) 不停 ComfyUI
+                if idx == 1:  # 仅退出启动器
+                    # 仅退出不动 ComfyUI; 但如果 ComfyUI 未跑, WebUI 工作台是孤儿,
+                    # 需要自动关掉避免僵尸. 如果 ComfyUI 在跑, 保留 WebUI (用户明确选了保留).
+                    try:
+                        stop_orphan_webui(self)
+                    except Exception:
+                        pass
         except Exception:
             pass
 
