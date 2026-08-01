@@ -450,7 +450,7 @@ class ModelsPage(BasePage):
             return
         if not self._model_path:
             return
-        if not DialogHelper.confirm(self, "确认", "移除所选模型库？此操作不会删除磁盘文件。"):
+        if not DialogHelper.show_confirmation(self, "确认", "移除所选模型库？此操作不会删除磁盘文件。"):
             return
         self._model_path.remove_library(lib_id)
         if self._model_path.apply_libraries():
