@@ -591,9 +591,17 @@ class WebuiPage(BasePage):
             display_host = webui_options.get("display_host") or "127.0.0.1"
         download_url = webui_options.get("download_url") or "https://github.com/MieMieeeee/Comfyui-Workbench-Mie.git"
 
+        def _anchor(v):
+            p = Path(v)
+            if p.is_absolute():
+                return p.resolve()
+            # Relative config value -- anchor to launcher project root, NOT
+            # to Path.cwd(); see stable_project_root docstring.
+            return (stable_project_root() / v).resolve()
+
         pw = resolve_active_paths_for_webui(cfg if isinstance(cfg, dict) else {})
-        webui_path = Path(pw["webui_path"]) if pw.get("webui_path") else None
-        py_path = Path(pw["python_path"]) if pw.get("python_path") else None
+        webui_path = _anchor(pw["webui_path"]) if pw.get("webui_path") else None
+        py_path = _anchor(pw["python_path"]) if pw.get("python_path") else None
         env_id = pw.get("env_id")
 
         return {

@@ -2,18 +2,76 @@ from pathlib import Path
 import sys
 import os
 
+def stable_project_root() -> Path:
+    """Return a stable project root for resolving relative config paths.
+
+    Why this exists: a relative ``comfyui_root`` like "." historically
+    resolved via ``Path(".").resolve()`` which expands against the
+    process CWD. When the launcher.exe is started from a different
+    cwd (cmd shell, Task Scheduler, file manager with shifted cwd),
+    that expansion lands on the wrong directory and the resulting
+    python path is bogus -- e.g. ``F:\\python_embeded\\python.exe``
+    instead of the bundled ``<launcher_dir>\\python_embeded\\python.exe``.
+
+    Strategy (按优先级):
+    1. EXE 目录 (Path(sys.executable).parent) -- PyInstaller 打包后
+    2. 源码根目录 (Path(__file__).parent.parent) -- 源码运行
+    3. CWD -- 最后兜底
+    并优先选第一个含有 ``ComfyUI/main.py`` 的候选 (项目根目录 marker).
+
+    这样即便用户从 cmd shell 启动 (cwd=F:\\), launcher 仍然认 F:\\ComfyUI_Mie_2026_V9.0
+    作为它的项目根, "." 这样的相对配置就能正确解析到该目录里的
+    python_embeded/.
+    """
+    try:
+        exe = Path(sys.executable).resolve().parent
+    except Exception:
+        exe = None
+    try:
+        src = Path(__file__).resolve().parent.parent
+    except Exception:
+        src = None
+    try:
+        cwd = Path.cwd()
+    except Exception:
+        cwd = None
+    candidates = [c for c in (exe, src, cwd) if c is not None]
+    # First pass: prefer a candidate that has ComfyUI/main.py (项目根 marker)
+    for cand in candidates:
+        try:
+            if cand.exists() and (cand / "ComfyUI" / "main.py").exists():
+                return cand
+        except Exception:
+            pass
+    # Fallback: first existing candidate
+    for cand in candidates:
+        try:
+            if cand.exists():
+                return cand
+        except Exception:
+            pass
+    return Path.cwd()
+
+
 
 def get_comfy_root(paths_cfg: dict) -> Path:
     """Resolve the ComfyUI root from a simple paths config dict.
 
-    This helper is used in non-app contexts (e.g. headless tools) where only
-    a plain mapping is available. It preserves the existing behaviour of
-    resolving the base directory first and then appending ``ComfyUI``.
+    Relative ``comfyui_root`` (e.g. ``"."`` or ``"subdir/foo"``) is anchored
+    to ``stable_project_root()`` rather than ``Path.cwd()``: launching the
+    launcher.exe from a different cwd (cmd shell / Task Scheduler / etc)
+    would otherwise make ``"."`` drift to the wrong directory and resolve to
+    a nonexistent ``python_embeded/python.exe``. See ``stable_project_root``.
     """
     try:
-        base = Path((paths_cfg or {}).get("comfyui_root") or ".").resolve()
+        comfy_root_str = (paths_cfg or {}).get("comfyui_root") or "."
+        cr = Path(comfy_root_str)
+        if cr.is_absolute():
+            base = cr.resolve()
+        else:
+            base = (stable_project_root() / comfy_root_str).resolve()
     except Exception:
-        base = Path(".").resolve()
+        base = stable_project_root()
     return (base / "ComfyUI").resolve()
 
 
@@ -55,10 +113,16 @@ def comfy_root_from_config(app_config: dict | None) -> Path:
     except Exception:
         paths = app_config.get("paths", {}) if isinstance(app_config, dict) else {}
     try:
-        base = Path(paths.get("comfyui_root") or ".").resolve()
+        comfy_root_str = paths.get("comfyui_root") or "."
+        cr = Path(comfy_root_str)
+        if cr.is_absolute():
+            base = cr.resolve()
+        else:
+            # Relative comfyui_root: anchor to launcher project root, not CWD.
+            base = (stable_project_root() / comfy_root_str).resolve()
         root = (base / "ComfyUI").resolve()
     except Exception:
-        base = Path(".").resolve()
+        base = stable_project_root()
         root = base / "ComfyUI"
     return root
 
@@ -107,14 +171,31 @@ def resolve_base_root() -> Path:
 
 
 def resolve_python_exec(comfy_root: Path, configured_path: str) -> Path:
+    """返回启动 webui 用的 python.exe 路径.
+
+    优先级 (按顺序, 第一个能用的赢):
+    1. configured_path 是绝对路径 + 存在 -> 直接用它.
+    2. configured_path 相对 -> 优先按 stable_project_root() 解析 (避免 CWD 漂移);
+       若失败再退到 comfy_root.parent (老路径, 跟 v8-migrate 兼容).
+    3. 最终 fallback: stable_project_root() / python_embeded/python.exe (launcher
+       自带的 python; 不再用 comfy_root.parent, 后者在 comfyui_root="."
+       时常因 CWD 错配而崩 -- 例如 fall 到 F:/python_embeded/python.exe 这种不存在的路径,
+       而真正的 python 在 launcher 自己目录的 python_embeded/ 里.)
+    """
     try:
-        # 优先尝试使用配置的路径
         if configured_path:
             p = Path(configured_path)
-            # 如果是绝对路径且存在，直接使用
             if p.is_absolute() and p.exists() and p.is_file():
                 return p.resolve()
-            # 尝试相对于 comfy_root 的父目录解析（因为 configured_path 可能是相对路径）
+            # 相对路径: 优先按 launcher 的项目根解析.
+            try:
+                base = stable_project_root()
+                p_rel = base / configured_path
+                if p_rel.exists() and p_rel.is_file():
+                    return p_rel.resolve()
+            except Exception:
+                pass
+            # 兼容老路径: 也试 comfy_root.parent.
             try:
                 base = comfy_root.resolve().parent
                 p_rel = base / configured_path
@@ -125,9 +206,9 @@ def resolve_python_exec(comfy_root: Path, configured_path: str) -> Path:
     except Exception:
         pass
 
-    # 回退到默认逻辑
+    # 最终回退: launcher 自带的 python_embeded/python.exe (not comfy_root.parent)
     try:
-        base = comfy_root.resolve().parent
+        base = stable_project_root()
     except Exception:
         base = Path(".").resolve()
     py = base / "python_embeded" / ("python.exe" if os.name == "nt" else "python")

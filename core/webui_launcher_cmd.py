@@ -49,8 +49,18 @@ def build_webui_launch_params(
             + " webui_path=" + str(webui_root_str)
         )
 
-    comfyui_root = Path(comfyui_root_str).resolve()
-    webui_root = Path(webui_root_str).resolve()
+    from utils.paths import stable_project_root
+
+    def _anchor(v: str) -> Path:
+        p = Path(v)
+        if p.is_absolute():
+            return p.resolve()
+        # Relative config value (e.g. ".") -- anchor to launcher project root,
+        # NOT to Path.cwd(); see stable_project_root docstring.
+        return (stable_project_root() / v).resolve()
+
+    comfyui_root = _anchor(comfyui_root_str)
+    webui_root = _anchor(webui_root_str)
     # python: 跟 ComfyUI 用同一条解析路径 (resolve_python_exec 接受激活 env 的 python_path)
     py = PATHS.resolve_python_exec(comfyui_root, python_path_str)
 
