@@ -618,6 +618,65 @@ class WebuiPage(BasePage):
         self._deps_cache_key = None
         self._deps_cache_result = None
 
+    def _safe_rmtree(self, path: Path) -> tuple[bool, list]:
+        """Best-effort recursive delete with anti-handle-leak retries.
+
+        Context (user-observed failure): on LAN shares / 装了实时防护的
+        环境下, shutil.rmtree 经常会因 .git/objects/pack/pack-*.idx 这类
+        内部索引文件被防病毒扫描器或 SMB 层短暂持有句柄而报 [WinError 5].
+        而同一目录手动在文件资源管理器里删除很快, 说明是瞬时共享冲突.
+
+        策略 (per attempt):
+        1. chmod-writable 全树 (cp / mv / smb 可能留了 read-only bit)
+        2. shutil.rmtree 走 full tree, onerror 抓单个文件失败:
+           重新 chmod + retry 该文件; 失败累积到 errors list, 不让整棵挂.
+        3. 外层多 retry 几轮 (间隔递增), 处理 SMB 多次确认的现象.
+
+        Returns (ok, remaining_errors). ok=True 即目录已不存在;
+        ok=False 时 remaining_errors 列出仍未删掉的文件.
+        """
+        import stat
+        import time as _time
+        if not path.exists():
+            return True, []
+
+        def _chmod_w(p):
+            try:
+                os.chmod(str(p), stat.S_IWRITE | stat.S_IWGRP | stat.S_IWOTH)
+            except Exception:
+                pass
+
+        def _onerror(func, p, exc_info):
+            try:
+                _chmod_w(p)
+                func(str(p))
+                return
+            except Exception as e2:
+                errors.append((str(p), str(e2)))
+
+        errors = []
+        for attempt in range(4):
+            del errors[:]
+            try:
+                for p in path.rglob("*"):
+                    _chmod_w(p)
+            except Exception:
+                pass
+            _chmod_w(path)
+            try:
+                shutil.rmtree(path, onerror=_onerror)
+            except Exception as e:
+                errors.append((str(path), str(e)))
+            if not path.exists():
+                return True, []
+            if not errors:
+                break
+            _time.sleep(0.3 + 0.3 * attempt)
+        if path.exists():
+            return False, errors
+        return True, []
+
+
     def _detect_state(self) -> str:
         """综合判定当前状态."""
         info = self._resolve_paths()
@@ -1051,19 +1110,30 @@ class WebuiPage(BasePage):
             # 取消 (或弹窗关闭)
             return
 
-        # 确认 -> rmtree
-        try:
-            shutil.rmtree(webui_path)
-        except Exception as e:
-            DialogHelper.show_warning(
-                self, "移除失败",
-                f"删除目录失败: {e}\n\n请检查文件是否被占用, 关闭可能使用该目录的程序后重试.",
+        # 确认 -> rmtree (带 .git handle-leak 重试)
+        ok, remaining = self._safe_rmtree(webui_path)
+        if not ok:
+            try:
+                self.app.logger.warning(
+                    "WebUI 工作台删除残留 %d 项: %s",
+                    len(remaining),
+                    "; ".join(f"{p} -> {e}" for p, e in remaining[:5]),
+                )
+            except Exception:
+                pass
+            sample = "; ".join(f"{p}" for p, _ in remaining[:3])
+            hint = (
+                f"删除目录失败: 共 {len(remaining)} 个文件未被删除。\n\n"
+                f"通常是 .git/objects/pack/ 下索引文件被防病毒或 SMB 短暂持有句柄,\n"
+                f"或个别文件被占用。\n\n未删掉的文件示例:\n  {sample}\n\n"
+                f"可关闭占用进程后重试,或在文件资源管理器中手动删除 (右键 -> 删除)。\n"
+                f"更多细节见 launcher/launcher.log."
             )
+            DialogHelper.show_warning(self, "移除失败", hint)
             return
 
         # 失效 deps 缓存, 重新探测状态
-        self._deps_cache_key = None
-        self._deps_cache_result = None
+        self._reset_deps_cache('remove')
         self._refresh_state(force=True)
 
     @QtCore.pyqtSlot()
