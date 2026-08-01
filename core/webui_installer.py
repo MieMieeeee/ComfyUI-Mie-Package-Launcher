@@ -139,7 +139,7 @@ def clone_webui(
     except Exception:
         pass
 
-    cb = _wrap_progress(on_progress, "[clone]")
+    cb = _wrap_progress(on_progress, "[拉取 Comfyui-Workbench-Mie]")
     try:
         if cb:
             cb("开始克隆…", 0)
@@ -282,11 +282,11 @@ def pull_webui(
                 proxied = apply_git_proxy_to_url(raw, ps)
                 if proxied != raw:
                     proxy_url = proxied
-                    _log("git pull via proxy: " + proxy_url)
+                    _log("通过 " + proxy_url + " 拉取 Comfyui-Workbench-Mie")
     except Exception:
         proxy_url = None
 
-    cb = _wrap_progress(on_progress, "[pull]")
+    cb = _wrap_progress(on_progress, "[拉取 Comfyui-Workbench-Mie 更新]")
     try:
         if cb:
             cb("开始 pull…", 0)
@@ -325,7 +325,8 @@ def pull_webui(
         else:
             fetch_url = "origin"
 
-        cmd = [git_exe, "fetch", fetch_url, "--depth", "1"]
+        # --retry=2 同上: 给单次 flaky proxy 调用 retry 机会.
+        cmd = [git_exe, "fetch", fetch_url, "--depth", "1", "--retry=2"]
         proc = subprocess.Popen(cmd, **pull_kwargs)
         rc = proc.wait()
         if rc == 0:

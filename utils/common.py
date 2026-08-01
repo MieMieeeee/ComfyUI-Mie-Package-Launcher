@@ -97,6 +97,26 @@ def run_hidden(cmd, **kwargs):
     # 成功，rc=0，只是丢了输出）。这里统一注入系统首选编码 + errors=ignore，
     # 与 core/probe.py、core/process_manager.py 已显式指定的写法保持一致。
     # 已显式传 encoding 的调用方不受影响（setdefault 不覆盖）。
+    # Force short HTTP timeout on git fetch/pull/clone. Default git
+    # http.lowSpeedTime=300 means a flaky proxy / dead DNS hangs the
+    # launcher for 5 minutes before failing; users hit this on LAN boxes
+    # where gh-proxy is intermittently unreachable. Bumping limit to 15s
+    # + 1000 bytes/s means dead links fail out in 15s, and the call
+    # surfaces the failure immediately to UI / retry logic.
+    if cmd and isinstance(cmd[0], str) and "git" in cmd[0].lower():
+        # Token membership rather than substring: substring requires
+        # surrounding whitespace which fails when fetch/pull/clone are
+        # adjacent to other tokens in the joined cmd line.
+        subcmds = {str(c).lower() for c in cmd[1:]}
+        if subcmds & {"fetch", "pull", "clone"}:
+            env = kwargs.get("env")
+            if env is None:
+                env = os.environ.copy()
+            env.setdefault("GIT_HTTP_LOW_SPEED_TIME", "15")
+            env.setdefault("GIT_HTTP_LOW_SPEED_LIMIT", "1000")
+            kwargs["env"] = env
+
+
     if kwargs.get("text") and "encoding" not in kwargs:
         try:
             import locale as _locale

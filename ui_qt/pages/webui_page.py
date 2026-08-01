@@ -46,7 +46,7 @@ from core.webui_launcher_cmd import build_webui_launch_params
 from core.webui_process_manager import WebuiProcessManager
 from core.webui_dependencies import check_webui_dependencies, install_webui_requirements
 from core.webui_installer import clone_webui, pull_webui
-from utils.net import resolve_pypi_index_url
+from utils.net import resolve_pypi_index_url, describe_git_proxy
 from ui_qt.widgets.dialog_helper import DialogHelper
 from ui_qt.widgets.buttons import DestructiveButton
 from ui_qt.widgets.custom_confirm_dialog import CustomConfirmDialog
@@ -833,7 +833,11 @@ class WebuiPage(BasePage):
         def on_done(result):
             self._after_update(result.get("ok"), result.get("updated"), result.get("error", ""))
 
-        self._run_with_progress("更新 WebUI 工作台", runner, on_done)
+        # Task title explicitly says which proxy / 直连 + which repo so the
+        # progress dialog makes the fetch path obvious from the first second.
+        proxy_desc = describe_git_proxy(getattr(self.app, "config", None))
+        task_title = f"拉取 Comfyui-Workbench-Mie ({proxy_desc})"
+        self._run_with_progress(task_title, runner, on_done)
 
     @QtCore.pyqtSlot(bool, bool, str)
     def _after_update(self, ok: bool, updated: bool, err: str):
@@ -841,8 +845,35 @@ class WebuiPage(BasePage):
         self._btn_update.setText("🔄 更新")
         # success 路径显式 re-detect: _refresh_state 在 busy 时直接 return, 会卡死状态.
         if not ok:
-            DialogHelper.show_warning(self, "更新失败", "git pull 失败: %s" % (err or "未知"))
+            # User feedback: when the proxy fetch fails the only button used
+            # to be "OK" -- users could not retry from this dialog. Replace
+            # with [close / retry]; user picks retry and we re-trigger
+            # _on_update_clicked so the GUI immediately tries again.
+            err_msg = err or "未知 (可能 5 分钟 git 超时, 见 launcher/launcher.log)"
+            dlg = CustomConfirmDialog(
+                parent=self,
+                title="更新失败",
+                content=(
+                    "拉取 Comfyui-Workbench-Mie 没有成功.\n\n"
+                    f"原因: {err_msg}\n\n"
+                    "可能是 5 分钟 git fetch 超时 (代理抽风 / DNS 慢) 或 仓库不可达.\n\n"
+                    "可以关闭 (手动换网络/代理后再来) 或 立即重试."
+                ),
+                buttons=[
+                    {"text": "关闭", "role": "normal"},
+                    {"text": "立即重试", "role": "primary"},
+                ],
+                default_index=1,
+                theme_manager=self.theme_manager,
+            )
+            dlg.exec_()
+            retry = (dlg.get_result() == 1)
             self._set_state(self._detect_state())
+            if retry:
+                try:
+                    self._on_update_clicked()
+                except Exception:
+                    pass
         else:
             self._reset_deps_cache("update")
             self._set_state(self._detect_state())

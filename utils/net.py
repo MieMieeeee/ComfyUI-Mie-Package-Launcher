@@ -11,6 +11,45 @@ PYPI_HUAWEICLOUD_URL = 'https://repo.huaweicloud.com/repository/pypi/simple/'
 HF_MIRROR_URL_DEFAULT = 'https://hf-mirror.com'
 GITHUB_PROXY_DEFAULT_URL = 'https://gh-proxy.com/'
 
+def describe_git_proxy(app_config) -> str:
+    """For UI display: one-line Chinese label for the git proxy mode that
+    ``pull_webui`` / ``clone_webui`` will actually use given current
+    ``config["proxy_settings"]``. Pull banner uses this so the user knows
+    whether the command goes through gh-proxy.com / 直连 / 自定义代理.
+
+    Format:
+      mode=none         -> "直连 github.com"
+      mode=gh-proxy     -> "通过 <url>" (URL derived from proxy_settings or
+                            GITHUB_PROXY_DEFAULT_URL)
+      mode=custom       -> "通过自定义代理 <url>"
+      mode=other         -> "通过 <mode>" (raw fallback so we never lose info)
+    """
+    try:
+        ps = (app_config or {}).get("proxy_settings", {}) if isinstance(app_config, dict) else {}
+    except Exception:
+        ps = {}
+    try:
+        mode = (ps.get("git_proxy_mode") or "none").strip() if ps else "none"
+    except Exception:
+        mode = "none"
+    if mode == "none":
+        return "直连 github.com"
+    if mode == "gh-proxy":
+        try:
+            url = (ps.get("git_proxy_url") or "").strip() or GITHUB_PROXY_DEFAULT_URL
+        except Exception:
+            url = GITHUB_PROXY_DEFAULT_URL
+        url = url.rstrip("/")
+        return "通过 " + url
+    if mode == "custom":
+        try:
+            url = (ps.get("git_proxy_url") or "").strip()
+        except Exception:
+            url = ""
+        return "通过自定义代理 " + url
+    return "通过 " + mode
+
+
 
 # Mode values used by the launcher UI / config. Keep these in sync with
 # ``ui_qt/pages/launch/environment_section.py`` and the combo box options.
