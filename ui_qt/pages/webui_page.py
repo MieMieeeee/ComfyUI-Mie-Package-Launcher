@@ -40,7 +40,7 @@ from typing import Optional
 from PyQt5 import QtCore, QtGui, QtWidgets
 
 from .base_page import BasePage
-from utils.paths import webui_path_from_config, WEBUI_DIR_NAME
+from utils.paths import webui_path_from_config, WEBUI_DIR_NAME, stable_project_root
 from config.migrations import resolve_active_paths_for_webui
 from core.webui_launcher_cmd import build_webui_launch_params
 from core.webui_process_manager import WebuiProcessManager
