@@ -71,6 +71,18 @@ _NON_SGR_CSI_RE = re.compile(r"\x1b\[[0-9;]*[A-Za-ln-z]")
 # SGR 序列(以 m 结尾)
 _SGR_RE = re.compile(r"\x1b\[([0-9;]*)m")
 
+# Python logging-style level marker ([INFO] / [ERROR] / ...). Multi-\r 行 first
+# segment matching this is treated as a log prefix (node status line / import
+# time line) and preserved. Subsequent \r segments (tqdm progress frames) only
+# update the progress part -- matches ComfyUI frontend console behavior.
+# tqdm progress frames also contain "[elapsed<remaining, rate]" so a naive
+# "in [" heuristic would mis-classify them; matching the actual level names avoids that.
+_LOG_LEVEL_MARKER_RE = re.compile(r"\[(INFO|DEBUG|WARN|WARNING|ERROR|CRITICAL|FATAL)\]")
+
+# ComfyUI node ID line like "#335 [PrimitiveFloat]: 0.00s - vram 0b".
+_NODE_ID_RE = re.compile(r"^#\d+(\.\d+)?(\.\w+)?\s+\[")
+
+
 
 def ansi_to_html(text: str, default_color: str = "") -> str:
     """把带 ANSI SGR 颜色码的文本转成带 <span style=color:...> 的 HTML 片段。
@@ -296,7 +308,27 @@ class LogTailer:
                 if chunk:
                     position = f.tell()
                     self._buffer += chunk
-                    self._emit_complete_carriage_returns(path)
+                    emitted_cr = self._emit_complete_carriage_returns(path)
+                    if emitted_cr:
+                        # _emit_complete_carriage_returns stopped at the LAST \r before \n.
+                        # Remaining buffer (before \n) is either:
+                        #   (a) tqdm-style progress frame (contains "%|") — emit as \r
+                        #       segment so downstream active-progress logic updates the live
+                        #       progress bar;
+                        #   (b) arbitrary text after the last \r (e.g. "done" right after
+                        #       "Loading: 40%\r") — leave for the main \n loop.
+                        idx = self._buffer.find(b"\n")
+                        if idx >= 0:
+                            line_bytes = self._buffer[:idx]
+                            if b"%|" in line_bytes:
+                                if line_bytes.endswith(b"\r"):
+                                    line_bytes = line_bytes[:-1]
+                                if line_bytes:
+                                    line = line_bytes.decode("utf-8", errors="replace") + "\r"
+                                    if _should_log_emit("LogTailer.emit"):
+                                        _diag_logger.info("LogTailer.emit path=%s line=%r", path, line[:200])
+                                    self._on_line(line)
+                                self._buffer = self._buffer[idx + 1:]
                     while True:
                         idx = self._buffer.find(b"\n")
                         if idx < 0:
@@ -341,13 +373,20 @@ class LogTailer:
             except Exception:
                 pass
 
-    def _emit_complete_carriage_returns(self, path) -> None:
-        """立即发出以回车结束的刷新，尾部半行继续等待后续字节。"""
+    def _emit_complete_carriage_returns(self, path) -> bool:
+        """立即发出以回车结束的刷新，尾部半行继续等待后续字节。
+
+        Returns True if any \r 段 was emitted. When True, the remaining buffer before \n
+        is the LAST \r 段 of a multi-\r 行 — caller should emit it as a \r segment
+        rather than letting the main \n loop treat it as a normal line, otherwise the same
+        content shows up twice in the viewer.
+        """
+        emitted_any = False
         while True:
             idx = self._buffer.find(b"\r")
             newline_idx = self._buffer.find(b"\n")
             if idx < 0 or (newline_idx >= 0 and newline_idx <= idx + 1):
-                return
+                return emitted_any
             segment = self._buffer[:idx]
             self._buffer = self._buffer[idx + 1:]
             if not segment:
@@ -356,6 +395,7 @@ class LogTailer:
             if _should_log_emit("LogTailer.emit"):
                 _diag_logger.info("LogTailer.emit path=%s line=%r", path, line[:200])
             self._on_line(line)
+            emitted_any = True
 
     @staticmethod
     def _file_key(path) -> tuple:
@@ -594,6 +634,12 @@ if _HAS_QT:
             self._batch_buffer = []  # type: List[str]
             self._batch_timer = None  # type: QtCore.QTimer | None
             self._active_progress = ""
+            # Multi-\r 行 first segment matching log-prefix pattern is preserved.
+            # Subsequent \r segments (tqdm progress frames) only update the progress
+            # part. Matches ComfyUI frontend console behavior.
+            self._active_progress_prefix = ""
+            # Was the previous line a \r segment? Used to detect "new multi-\r line first segment".
+            self._last_segment_was_cr = False
             self._setup_ui()
 
         # 最近历史日志的行数上限(用户首次切到日志页时回填这么多行)。
@@ -853,11 +899,18 @@ if _HAS_QT:
             if self._paused:
                 return
             if self.collapse_checkbox.isChecked() and "\r" in line:
+                # Virtual terminal: \r overwrites current active line.
+                # First segment of a multi-\r line is preserved as prefix if it looks
+                # like a log line (level marker or ComfyUI node ID).
                 progress = ProgressCollapseFilter._last_segment(line)
                 if progress:
-                    self._set_active_progress(progress)
+                    is_first_cr = not self._last_segment_was_cr
+                    self._set_active_progress(progress, is_first_cr=is_first_cr)
+                self._last_segment_was_cr = True
                 return
-            if self._active_progress:
+            # Normal line: reset state, finalize old active progress, run filter.
+            self._last_segment_was_cr = False
+            if self._active_progress or self._active_progress_prefix:
                 self._finalize_active_progress()
             if self.collapse_checkbox.isChecked():
                 for out in self._filter.feed(line):
@@ -865,8 +918,23 @@ if _HAS_QT:
             else:
                 self._append_line(line)
 
-        def _set_active_progress(self, line: str) -> None:
-            self._active_progress = strip_ansi(line)
+        def _set_active_progress(self, line: str, *, is_first_cr: bool = False) -> None:
+            """Update active progress line.
+
+            is_first_cr=True means this is the first segment of a new multi-\r line.
+            Detect whether it is a log prefix (level marker or ComfyUI node ID) and
+            preserve it, or treat it as a normal progress frame.
+            """
+            clean = strip_ansi(line)
+            if is_first_cr:
+                if _LOG_LEVEL_MARKER_RE.search(clean) or _NODE_ID_RE.match(clean):
+                    self._active_progress_prefix = clean
+                    self._active_progress = ""
+                else:
+                    self._active_progress_prefix = ""
+                    self._active_progress = clean
+            else:
+                self._active_progress = clean
             self._enqueue_batch(None)
 
         def _finalize_active_progress(self) -> None:
@@ -875,6 +943,7 @@ if _HAS_QT:
             cursor.movePosition(QtGui.QTextCursor.End)
             cursor.insertBlock()
             self._active_progress = ""
+            self._active_progress_prefix = ""
 
         def _append_line(self, line: str) -> None:
             """处理一行日志:剥 ANSI、记录未读、入批量缓冲(不直接写 QTextEdit)。
@@ -916,7 +985,7 @@ if _HAS_QT:
             批量化是关键:把 N 次 insertText(每次触发富文本布局重算)合并成 1 次,
             实时跟随(行流)和历史回填(几百行)都只做 O(1) 次 DOM 写入。
             """
-            if not self._batch_buffer and not self._active_progress:
+            if not self._batch_buffer and not self._active_progress and not self._active_progress_prefix:
                 return
             batch_size = len(self._batch_buffer)
             text = "\n".join(self._batch_buffer)
@@ -926,12 +995,15 @@ if _HAS_QT:
             # moveCursor + insertText 一次写整批;document 的 maximumBlockCount 自动裁老的
             cursor = self.text_edit.textCursor()
             cursor.movePosition(QtGui.QTextCursor.End)
-            if self._active_progress:
+            if self._active_progress or self._active_progress_prefix:
                 cursor.select(QtGui.QTextCursor.BlockUnderCursor)
                 cursor.removeSelectedText()
                 if text:
                     cursor.insertText(text + "\n")
-                cursor.insertText(self._active_progress)
+                # Combine prefix (log line) with progress (tqdm frame) so they show
+                # on the same visual line, matching ComfyUI web console behavior.
+                full_active = self._active_progress_prefix + self._active_progress
+                cursor.insertText(full_active)
             elif text:
                 cursor.insertText(text + "\n")
             # 滚到底(整批一次)
@@ -951,10 +1023,11 @@ if _HAS_QT:
             self._filter = ProgressCollapseFilter()
 
         def _on_collapse_toggled(self, checked: bool) -> None:
-            if self._active_progress:
+            if self._active_progress or self._active_progress_prefix:
                 self._finalize_active_progress()
-            # 切换折叠时重置 filter,避免陈旧 \r 计数
+            # Reset filter and prefix state
             self._filter = ProgressCollapseFilter()
+            self._last_segment_was_cr = False
 
         def _on_wrap_toggled(self, checked: bool) -> None:
             if checked:

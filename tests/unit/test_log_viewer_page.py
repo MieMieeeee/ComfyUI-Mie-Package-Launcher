@@ -397,8 +397,164 @@ class TestLogViewerPageWrap(_Fixture):
             QtWidgets.QTextEdit.NoWrap,
         )
 
-if __name__ == "__main__":
-    unittest.main()
+
+
+class TestVirtualTerminalOverwrite(_Fixture):
+    """照搬 ComfyUI 前端 console 的语义:\r 覆盖当前行,\n 才换行。
+
+    用户原话:"为什么我们不照抄一下 ComfyUI 前端的逻辑呢 页面上的 console 里
+    运行的很好啊"。ComfyUI web console 用 VT100 风格的虚拟终端:\r 直接覆盖
+    当前行,只有 \n 才把行 finalize 然后开新行。
+    """
+
+    def test_cr_segments_overwrite_the_same_line(self):
+        """连续 \r 段只保留最后一个(tqdm 多帧刷新场景)。
+
+        文件内容:tqdm 把 3 个百分比帧压成一条物理行 \r 分隔,末尾 \n。
+        期望:视图里只看到最新进度(39%),前面的 0%/12% 被 \r 覆盖。
+        """
+        d = self._tmpdir()
+        log = d / "test.log"
+        log.write_text("", encoding="utf-8")
+        page = LogViewerPage(theme_manager=self.tm)
+        page.set_log_path(log)
+        page.start_tailing(start_from_beginning=True)
+        self.addCleanup(page.stop_tailing)
+        # 单条物理行,3 个 \r 分隔的进度帧 + \n
+        bar = chr(0x2588)
+        raw = (
+            b"  0%|          | 0/8 [00:00<?, ?it/s]"
+            b"\r 12%|" + bar.encode("utf-8") + b"| 1/8 [00:03<00:26, 3.77s/it]"
+            b"\r 39%|" + (bar * 4).encode("utf-8") + b"| 4/8 [00:09<00:15, 2.50s/it]\n",
+        )
+        with open(log, "ab", buffering=0) as f:
+            for chunk in raw:
+                f.write(chunk)
+        deadline = time.monotonic() + 3.0
+        while time.monotonic() < deadline:
+            self.app.processEvents()
+            text = page.text_edit.toPlainText()
+            if "39%" in text:
+                self.assertNotIn("0/8", text)
+                self.assertNotIn("12%", text)
+                return
+            time.sleep(0.02)
+        self.fail("39% never appeared: " + repr(page.text_edit.toPlainText()))
+
+    def test_node_id_line_then_progress_keeps_prefix(self):
+        """ComfyUI 节点状态行("#335 [PrimitiveFloat]: 0.00s - vram 0b")后跟 \r +
+
+        tqdm 进度帧时,prefix 和 progress 同行显示 —— 跟 ComfyUI 前端 console 一致。
+        用户实测场景:launcher 日志页里节点状态行不能被进度帧覆盖掉。
+        """
+        d = self._tmpdir()
+        log = d / "test.log"
+        log.write_text("", encoding="utf-8")
+        page = LogViewerPage(theme_manager=self.tm)
+        page.set_log_path(log)
+        page.start_tailing(start_from_beginning=True)
+        self.addCleanup(page.stop_tailing)
+        # 一条物理行:节点状态行 + \r + tqdm 多帧 + \n
+        with open(log, "ab", buffering=0) as f:
+            f.write(b'#335 [PrimitiveFloat]: 0.00s - vram 0b')
+            f.write(b"\r  0%|          | 0/81 [00:00<?, ?it/s]")
+            f.write(b"\r 37%|" + (chr(0x2588) * 4).encode("utf-8") + b"| 30/81 [00:04<00:07,  6.57it/s]")
+            f.write(b"\n")
+        deadline = time.monotonic() + 3.0
+        while time.monotonic() < deadline:
+            self.app.processEvents()
+            text = page.text_edit.toPlainText()
+            if "37%" in text:
+                # prefix 必须保留
+                self.assertIn("#335 [PrimitiveFloat]: 0.00s - vram 0b", text)
+                # progress 必须可见
+                self.assertIn("37%", text)
+                self.assertIn("8/8" if False else "30/81", text)
+                # 早期帧(初始的 "  0%|          | 0/81") 已被 \r 覆盖,不应该出现。
+                self.assertNotIn("  0%|", text)
+                return
+            time.sleep(0.02)
+        self.fail("never appeared: " + repr(page.text_edit.toPlainText()))
+
+    def test_normal_line_after_progress_finalizes_the_progress_line(self):
+        """\r 覆盖活动行后,下一条普通行到达时把活动行 finalize,然后开新行。""",
+        d = self._tmpdir()
+        log = d / "test.log"
+        log.write_text("", encoding="utf-8")
+        page = LogViewerPage(theme_manager=self.tm)
+        page.set_log_path(log)
+        page.start_tailing(start_from_beginning=True)
+        self.addCleanup(page.stop_tailing)
+        with open(log, "ab", buffering=0) as f:
+            f.write(b"Loading: 40%\r")
+            f.write(b"\n")
+            f.write(b"next normal line\n")
+        deadline = time.monotonic() + 3.0
+        while time.monotonic() < deadline:
+            self.app.processEvents()
+            text = page.text_edit.toPlainText()
+            if "next normal line" in text:
+                # 活动行被 finalize 成独立行
+                self.assertIn("Loading: 40%", text)
+                # finalize 顺序:进度行 → 普通行
+                self.assertLess(text.index("Loading: 40%"), text.index("next normal line"))
+                return
+            time.sleep(0.02)
+        self.fail("next normal line never appeared: " + repr(page.text_edit.toPlainText()))
+
+    def test_last_cr_segment_not_duplicated_as_normal_line(self):
+        """最后一段 \r 不再被主 \n loop 重复 emit(tqdm 整段进度末尾的最终 frame)。
+
+        回归:之前 LogTailer 的最后一段 \r 段会被 \n loop 当普通行再次 emit,
+        导致同样内容在视图里出现两次。这个 fix 让 LogTailer 自己处理。
+        """
+        d = self._tmpdir()
+        log = d / "test.log"
+        log.write_text("", encoding="utf-8")
+        page = LogViewerPage(theme_manager=self.tm)
+        page.set_log_path(log)
+        page.start_tailing(start_from_beginning=True)
+        self.addCleanup(page.stop_tailing)
+        with open(log, "ab", buffering=0) as f:
+            f.write(b" 39%|" + (b"\xe2\x96\x88" * 10) + b"| 8/8 [00:06<00:00, 1.21it/s]\r\n")
+        deadline = time.monotonic() + 3.0
+        while time.monotonic() < deadline:
+            self.app.processEvents()
+            text = page.text_edit.toPlainText()
+            if "39%" in text:
+                # 内容只能出现一次(最终进度作为活动行)
+                self.assertEqual(text.count("8/8"), 1)
+                self.assertEqual(text.count("1.21it/s"), 1)
+                return
+            time.sleep(0.02)
+        self.fail("never appeared: " + repr(page.text_edit.toPlainText()))
+
+    def test_loading_done_after_progress_does_not_overwrite_progress(self):
+        """test_collapse_checkbox_toggles_collapse 里的 Loading: ...\r done\n 场景。
+
+        LogTailer 的 %| 启发式判断最后一段是不是进度 frame:不含 %| 的当作
+        普通行 emit(不覆盖进度)。所以 Loading: 40% 之后跟 done 时,
+        done 不覆盖 Loading: 40%,而是追加在下面。
+        """
+        d = self._tmpdir()
+        log = d / "test.log"
+        log.write_text("", encoding="utf-8")
+        page = LogViewerPage(theme_manager=self.tm)
+        page.set_log_path(log)
+        page.start_tailing(start_from_beginning=True)
+        self.addCleanup(page.stop_tailing)
+        with open(log, "ab", buffering=0) as f:
+            for pct in ("10", "20", "30", "40"):
+                f.write(f"Loading: {pct}%\r".encode())
+            f.write(b"done\n")
+        deadline = time.monotonic() + 3.0
+        while time.monotonic() < deadline:
+            self.app.processEvents()
+            text = page.text_edit.toPlainText()
+            if "done" in text and "Loading: 40%" in text:
+                return
+            time.sleep(0.02)
+        self.fail("missing: " + repr(page.text_edit.toPlainText()))
 
 class TestLogViewerPageLineCap(_Fixture):
     """行数上限:setMaximumBlockCount 把最早的块裁掉,防止几 MB log 把 QTextEdit 撑爆。"""
