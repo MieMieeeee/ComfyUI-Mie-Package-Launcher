@@ -607,14 +607,11 @@ class WebuiPage(BasePage):
         dlg = CustomConfirmDialog(
             parent=self,
             title="切换仓库源",
-            content=(
-                f"已安装的工作台位于:\n  {webui_path}\n\n",
-                f"git remote.origin.url 将切换为:\n  {new_url}\n\n",
-                "已 clone 的代码不重下; 下次「更新」/「下载」会从新源拉取.\n\n",
-                "现在执行 git remote set-url 吗?\n",
-                "(选「仅保存配置」则只持久化新 mirror, 不动 git remote)",
-            ),
-            buttons=[
+            content=(f"已安装的工作台位于:\n  {webui_path}\n\n"
+                    f"git remote.origin.url 将切换为:\n  {new_url}\n\n"
+                    f"已 clone 的代码不重下; 下次「更新」/「下载」会从新源拉取.\n\n"
+                    f"现在执行 git remote set-url 吗?\n"
+                    f"(选「仅保存配置」则只持久化新 mirror, 不动 git remote)"),            buttons=[
                 {"text": "仅保存配置", "role": "normal"},
                 {"text": "立即切换 origin", "role": "primary"},
             ],
