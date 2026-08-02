@@ -1,6 +1,6 @@
 # ComfyUI 启动器
 
-> 版本：v1.0.14
+> 版本：v1.0.15
 
 PyQt5 GUI + 无窗口 CLI。GUI 管 ComfyUI 启停 / 多环境切换 / 镜像代理等配置；CLI 复用同一套路径，适合服务器 / 自动化 / 开机自启。
 
@@ -95,6 +95,14 @@ python __main__.py help [command]         # 完整帮助
 - agent 操作指南：[AGENTS.md](AGENTS.md)
 - 完整 CLI 参考：[cli.md](cli.md)
 
+### v1.0.15 近期更新
+
+- **LogTailer 重构为 VirtualTerminal (VT100)**：与 ComfyUI 前端 xterm.js 行为一致（\r 覆盖当前行、\n 才 finalize）；移除 ProgressCollapseFilter 与"折叠连续进度"checkbox；新增 20 个单测覆盖 VT100 语义（\r\n / tqdm 多帧覆盖 / reset）。
+- **退出时日志句柄显式释放**：aboutToQuit 阶段新增 `_shutdown_log_handles`，主动停 LogViewerPage tailer、调 `logging.shutdown()`、显式 close launcher logger 上的 handler；解决 daemon LogTailer 线程被强杀泄漏 ComfyUI 日志 fd 的问题。
+- **ComfyUI 子进程强制 UTF-8 模式**：启动时注入 `PYTHONUTF8=1 + -X utf8`，避免中文路径/文件名在 ComfyUI 子进程里乱码。
+- **WebUI 工作台（可选服务）**：与 ComfyUI 平级的镜像克隆/启动/依赖安装服务；support gitee / github / custom 镜像切换；退出 launcher 时自动关闭孤儿 WebUI 子进程。
+- **多环境支持**：config.json 可存多组 `environments[]`，GUI 下拉切换；CLI 默认跑 GUI 当前激活环境，`--env` 是一次性 override（agent 默认不传）。同时只能跑一个环境，切换前必须先停掉当前服务。
+
 ### v1.0.14 近期更新
 
 - **实时日志流**：`PYTHONUNBUFFERED=1` + 后台线程 pump 让 tqdm 进度条实时刷新；日志视图原地渲染 `\r` 回车覆盖行；配套 powershell tail 窗口独立显示。
@@ -185,6 +193,11 @@ ComfyUI-Mie-Package-Launcher/
 │   ├── version_service.py      # 底层版本信息刷新
 │   ├── version_manager.py      # 版本管理器（UI 代理）
 │   ├── version_workers.py      # 版本操作工作线程
+│   ├── orphan_killer.py        # 退出 launcher 时关闭孤儿 WebUI/ComfyUI 进程
+│   ├── webui_dependencies.py   # WebUI 工作台依赖管理
+│   ├── webui_installer.py      # WebUI 工作台安装（克隆 + 镜像选择）
+│   ├── webui_launcher_cmd.py   # WebUI 工作台启动参数构建
+│   ├── webui_process_manager.py # WebUI 工作台进程生命周期管理
 │   └── cli_start.py            # CLI 启动逻辑
 ├── services/                   # 业务服务层（依赖注入）
 │   ├── di.py                   # ServiceContainer（统一服务注册）
@@ -199,7 +212,9 @@ ComfyUI-Mie-Package-Launcher/
 │   ├── runtime_service.py      # 启动前运行时准备
 │   ├── startup_service.py      # 预启动流程
 │   ├── announcement_service.py # 公告系统
-│   └── model_path_service.py   # 外置模型库管理
+│   ├── log_package_service.py  # 一键打包收集 launcher.log + comfyui.log + config.json
+│   ├── model_path_service.py   # 外置模型库管理
+│   └── plugin_service.py       # ComfyUI 插件管理（含推荐插件清单 + 判新）
 ├── ui_qt/                      # PyQt5 界面层
 │   ├── qt_app.py               # 主窗口（PyQtLauncher）
 │   ├── theme_manager.py        # 主题管理
@@ -210,12 +225,17 @@ ComfyUI-Mie-Package-Launcher/
 │   │   ├── launch/             # 启动页子模块
 │   │   │   ├── version_section.py
 │   │   │   ├── launch_controls_section.py
-│   │   │   └── environment_section.py
+│   │   │   ├── environment_section.py
+│   │   │   └── environment_selector.py # 多环境下拉选择器（launch/ 子模块）
 │   │   ├── version_page.py     # 版本管理页
 │   │   ├── models_page.py      # 外置模型库页
 │   │   ├── about_comfyui_page.py
 │   │   ├── about_launcher_page.py
-│   │   └── about_me_page.py
+│   │   ├── about_me_page.py
+│   │   ├── environment_manager_section.py # 多环境管理子模块（顶层页面）
+│   │   ├── plugins_page.py        # 插件管理页
+│   │   ├── system_settings_page.py # 系统设置页
+│   │   └── webui_page.py          # WebUI 工作台页
 │   └── widgets/                # 可复用控件
 │       ├── buttons.py / inputs.py / cards.py / tables.py
 │       ├── announcement_dialog.py
