@@ -28,9 +28,10 @@ def build_launch_params(app, env_id=None):
     main = comfy_root / "main.py"
     py_dir = str(Path(py).resolve().parent)
     cmd = [
-        str(py), 
-        str(main), 
-        "--windows-standalone-build", 
+        str(py),
+        "-X", "utf8",
+        str(main),
+        "--windows-standalone-build",
     ]
     try:
         if app.compute_mode.get() == "cpu":
@@ -195,6 +196,13 @@ def build_launch_params(app, env_id=None):
             app.logger.warning("应用用户环境变量失败: %s", e)
         except Exception:
             pass
+    # 钉死 UTF-8 mode + stdio 编码. 放在用户 env 之后, 即使用户在「启动环境变量」
+    # 显式设了 PYTHONUTF8=0 / PYTHONIOENCODING=cp936, 启动器也会覆盖, 防
+    # Windows 默认 mbcs/cp936 在子进程 stdout 上回潮 (ComfyUI / pip / custom node
+    # print 中文/emoji 路径触发 UnicodeDecodeError). cmd 头另加了 -X utf8 做命令行
+    # 级兜底, 任何单点失效都不影响整体.
+    env["PYTHONUTF8"] = "1"
+    env["PYTHONIOENCODING"] = "utf-8"
     try:
         run_cwd = str(comfy_root)
     except Exception:

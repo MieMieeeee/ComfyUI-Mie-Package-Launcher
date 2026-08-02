@@ -196,5 +196,93 @@ class TestBuildLaunchParamsUsesActiveEnvironment(unittest.TestCase):
         self.assertEqual(env_b["python_path"], str(original_python_path))
 
 
+class TestBuildLaunchParamsForcesUtf8(unittest.TestCase):
+    """锁死 UTF-8 mode 注入, 防 launcher 重构时无意还原成 legacy mode.
+
+    ComfyUI / pip / ComfyUI-Manager / custom node 任何在子进程里 print
+    中文路径/emoji 的代码, 一旦 stdout 走 Windows 默认 mbcs/cp936 编码,
+    `_readerthread` 立即 UnicodeDecodeError. 所以:
+      - cmd 头必须有 -X utf8 (PEP 540, 命令行级, 任何 env 失效它都赢)
+      - env 必须有 PYTHONUTF8=1 (PEP 540 mode 触发器)
+      - env 必须有 PYTHONIOENCODING=utf-8 (TextIOWrapper 兜底, 防 mode 退化)
+    """
+
+    def setUp(self):
+        import shutil
+        self.tmp = tempfile.mkdtemp()
+        self.tmp_path = Path(self.tmp)
+        self.comfy_root = self.tmp_path / "ComfyUI_root"
+        self.comfy_root.mkdir(parents=True)
+        self.python_path = self.comfy_root / "python_embeded" / "python.exe"
+        _make_fake_comfy_install(self.comfy_root, self.python_path)
+
+        cfg_dir = self.tmp_path / "launcher"
+        cfg_dir.mkdir(parents=True, exist_ok=True)
+        cfg_file = cfg_dir / "config.json"
+        cfg_file.write_text(
+            json.dumps(
+                {
+                    "launch_options": {
+                        "default_compute_mode": "cpu",
+                        "default_port": "8188",
+                        "extra_args": "",
+                        "env_vars": "",
+                    },
+                    "paths": {
+                        "comfyui_root": str(self.comfy_root),
+                        "python_path": str(self.python_path),
+                    },
+                    "proxy_settings": {},
+                }
+            ),
+            encoding="utf-8",
+        )
+        cwd_launcher = self.tmp_path / "cwd"
+        cwd_launcher.mkdir(parents=True)
+        try:
+            (cwd_launcher / "launcher").symlink_to(cfg_dir, target_is_directory=True)
+        except (OSError, NotImplementedError):
+            shutil.copytree(cfg_dir, cwd_launcher / "launcher")
+        self.app = HeadlessAppContext(str(cwd_launcher))
+
+    def tearDown(self):
+        import shutil
+        shutil.rmtree(self.tmp, ignore_errors=True)
+
+    def test_cmd_has_utf8_x_flag_between_python_and_main(self):
+        """cmd[1..2] 必须是 -X utf8, 钉在 python 和 main 之间, 避免被任何 extra 标志插队."""
+        from core.launcher_cmd import build_launch_params
+        cmd, *_ = build_launch_params(self.app)
+        self.assertEqual(cmd[0], str(Path(self.python_path).resolve()))
+        self.assertEqual(cmd[1], "-X")
+        self.assertEqual(cmd[2], "utf8")
+        self.assertTrue(str(cmd[3]).endswith("main.py"))
+
+    def test_env_forces_pythonutf8(self):
+        from core.launcher_cmd import build_launch_params
+        _, env, *_ = build_launch_params(self.app)
+        self.assertEqual(env.get("PYTHONUTF8"), "1")
+
+    def test_env_forces_python_io_encoding_utf8(self):
+        from core.launcher_cmd import build_launch_params
+        _, env, *_ = build_launch_params(self.app)
+        self.assertEqual(env.get("PYTHONIOENCODING"), "utf-8")
+
+    def test_user_cannot_disable_utf8_via_user_env_vars(self):
+        """用户在「启动环境变量」设 PYTHONUTF8=0 / IO_ENCODING=cp936 也无效,
+        launcher 强制覆盖. 这一条确保没人重构 env 块时把它们挪到 user env
+        loop 之前 (那种改动会让 cp936 漏到子进程)."""
+        self.app.user_env_vars.set(
+            "PYTHONUTF8=0, PYTHONIOENCODING=cp936, MY_OTHER=ok"
+        )
+        from core.launcher_cmd import build_launch_params
+        _, env, *_ = build_launch_params(self.app)
+        self.assertEqual(env.get("PYTHONUTF8"), "1")
+        self.assertEqual(env.get("PYTHONIOENCODING"), "utf-8")
+        # 用户其他 env var 还是透传的, 没被这次改动顺带破坏
+        self.assertEqual(env.get("MY_OTHER"), "ok")
+
+
+
 if __name__ == "__main__":
     unittest.main(verbosity=2)
