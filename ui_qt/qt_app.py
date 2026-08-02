@@ -5249,7 +5249,80 @@ class PyQtLauncher(QtWidgets.QMainWindow, process_events.ProcessCallback):
                     self.close()
                     return
 
+    def _shutdown_log_handles(self):
+        """aboutToQuit 阶段释放所有日志相关资源,避免 daemon 线程被强杀导致 fd 泄漏。
+
+        调用方:_on_app_quit_cleanup(Qt aboutToQuit 信号,所有退出路径都会经过)。
+
+        三件事,任一失败都 swallow(aboutToQuit 阶段任何异常都会被 Qt 吞成 noisy 警告,
+        内部已经按段 try/except 隔离):
+
+        1) 找 QApplication 所有顶层 widget 下的 LogViewerPage 子对象,
+           调它们的 stop_tailing()。LogTailer 是 daemon=True 后台线程,launcher
+           关闭时如果不在这里停,会被 QApplication.quit() 强杀,finally 块里
+           f.close() 不保证执行 -> ComfyUI 日志 fd 泄漏到 OS 兜底。
+
+        2) logging.shutdown() -- Python 标准做法:flush + close + remove 已
+           注册的所有 handler。RotatingFileHandler 没显式 shutdown 时,最后
+           若干行日志会因 buffer 未 flush 丢失。
+
+        3) 双保险:显式 close + remove launcher 名下的 handler。logging.shutdown
+           在被多次调用 / handler 被替换的情况下偶有遗漏;再清一遍确保
+           RotatingFileHandler 一定 close。
+        """
+        try:
+            # 1) 停所有 LogViewerPage 的 tailer,释放 ComfyUI 日志 fd
+            try:
+                from PyQt5 import QtWidgets
+                from ui_qt.log_viewer import LogViewerPage
+                app = QtWidgets.QApplication.instance()
+                if app is not None:
+                    for w in app.topLevelWidgets():
+                        try:
+                            pages = w.findChildren(LogViewerPage)
+                        except Exception:
+                            pages = []
+                        for page in pages:
+                            try:
+                                page.stop_tailing()
+                            except Exception:
+                                pass
+            except Exception:
+                pass
+
+            # 2) logging.shutdown():全局 flush + close + remove 已注册 handler
+            try:
+                import logging as _L
+                _L.shutdown()
+            except Exception:
+                pass
+
+            # 3) 双保险:显式 close + remove launcher logger 上的 handler
+            try:
+                import logging as _L
+                launcher_logger = _L.getLogger("comfyui_launcher")
+                for h in list(launcher_logger.handlers):
+                    try:
+                        h.close()
+                    except Exception:
+                        pass
+                    try:
+                        launcher_logger.removeHandler(h)
+                    except Exception:
+                        pass
+            except Exception:
+                pass
+        except Exception:
+            # 最外层兜底:这一段任何意外都不能影响 launcher 退出
+            pass
+
     def _on_app_quit_cleanup(self):
+        # 日志清理放最前面:先把 launcher.log flush 完,再停可能还在 log 的 worker,
+        # 让 worker 收尾的几条日志也能写盘。
+        try:
+            self._shutdown_log_handles()
+        except Exception:
+            pass
         try:
             w = getattr(self, "_ver_worker", None)
             if w and w.isRunning():
