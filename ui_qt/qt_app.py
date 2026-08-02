@@ -3439,9 +3439,6 @@ class PyQtLauncher(QtWidgets.QMainWindow, process_events.ProcessCallback):
                     _upd_origin_short = parts[-1]
             _upd_task_title = f"更新 ComfyUI 内核 ({_upd_origin_short}, {_upd_proxy_desc})"
             task_id = registry.register(_upd_task_title) if registry else None
-            if registry and task_id:
-                registry.set_dialog(task_id, pd)
-                registry.update(task_id, status="正在检查 Comfy-Org/ComfyUI 上游更新...")
 
             pd = ProgressDialog(
                 self,
