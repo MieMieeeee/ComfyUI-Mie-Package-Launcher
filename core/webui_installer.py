@@ -366,8 +366,11 @@ def pull_webui(
         else:
             fetch_url = "origin"
 
-        # --retry=2 同上: 给单次 flaky proxy 调用 retry 机会.
-        cmd = [git_exe, "fetch", fetch_url, "--depth", "1", "--retry=2"]
+        # 不加 --retry: 那是 git push / ls-remote 的参数,
+        # git fetch 没有, 传上去直接 unknown option.
+        # 只依靠 utils.common.run_hidden 注入的 15s http.lowSpeedTime
+        # 和 1000 bytes/s 的环境变量来兌短.
+        cmd = [git_exe, "fetch", fetch_url, "--depth", "1"]
         proc = subprocess.Popen(cmd, **pull_kwargs)
         rc = proc.wait()
         if rc == 0:

@@ -345,3 +345,48 @@ def test_pull_uses_origin_when_remote_already_proxied(monkeypatch, tmp_path):
     assert fetch_url == "origin", (
         f"origin 已代理时 fetch URL 应为 'origin' (避免双 prefix), 实际 {fetch_url!r}"
     )
+
+
+def test_pull_fetch_cmd_has_no_retry_flag(monkeypatch, tmp_path):
+    """Regression: 2d47e35 added --retry=2 to git fetch, but git fetch
+    does NOT have a --retry option (only git push and git ls-remote do).
+    Result: "git fetch --retry=2" fails with
+    "error: unknown option retry=2" -- exact error the user
+    saw when they switched mirror and clicked update.
+
+    Lock down the cmd list passed to subprocess.Popen -- no --retry flag.
+    """
+    import subprocess as _sp
+    from core.webui_installer import pull_webui
+
+    captured_cmds = []
+
+    class _FakePopen:
+        def __init__(self, cmd, **kw):
+            captured_cmds.append(list(cmd))
+            self.stdout = iter([])
+
+        def wait(self):
+            return 0
+
+    monkeypatch.setattr(_sp, "Popen", _FakePopen)
+    monkeypatch.setattr(_sp, "check_output", lambda cmd, **kw: b"https://gitee.com/MieMieeeee/Comfyui-Workbench-Mie.git\n")
+
+    target = tmp_path / "webui"
+    target.mkdir()
+    (target / ".git").mkdir()
+    pull_webui(_FakeApp(), target)
+
+    fetch_cmds = [cmd for cmd in captured_cmds if "fetch" in cmd]
+    assert fetch_cmds, "应调 git fetch, 实际 cmd=" + repr(captured_cmds)
+    cmd = fetch_cmds[0]
+    # git fetch 没有 --retry (那是 git push / ls-remote 的参数).
+    # 任何 retry 标志都会触发 error: unknown option.
+    for arg in cmd:
+        assert "retry" not in str(arg).lower(), (
+            "git fetch 不支持 --retry; 实际 cmd=" + repr(cmd)
+        )
+    # 正常标志保留.
+    assert "--depth" in cmd and "1" in cmd, (
+        "fetch 应保留 --depth 1, 实际 cmd=" + repr(cmd)
+    )
