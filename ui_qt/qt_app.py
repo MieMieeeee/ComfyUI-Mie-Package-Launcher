@@ -778,47 +778,6 @@ def _confirm_deps_or_warn(parent, auto_update_deps_var) -> bool:
         return True
 
 
-def _confirm_update_start(parent, proxy_desc, origin_url, branch, deps_enabled) -> bool:
-    """After clicking Update ComfyUI core, show confirm: list repo / proxy / branch / scope. Returns True to continue, False to cancel (restore button)."""
-    try:
-        from ui_qt.widgets.custom_confirm_dialog import CustomConfirmDialog
-    except Exception:
-        return True
-    try:
-        if not origin_url:
-            origin_url = "Comfy-Org/ComfyUI (default)"
-        if not branch:
-            branch = "master"
-        if not proxy_desc:
-            proxy_desc = "direct"
-        deps_line = "includes pip deps" if deps_enabled else "core only"
-        content = (
-            f"Will update ComfyUI core (fetch + apply latest).\n\n"
-            f"  - repo: {origin_url}\n"
-            f"  - branch: {branch}\n"
-            f"  - proxy: {proxy_desc}\n"
-            f"  - scope: {deps_line}\n\n"
-            f"Click Update to start git fetch/reset."
-        )
-        dlg = CustomConfirmDialog(
-            parent=parent,
-            title="Confirm ComfyUI core update",
-            content=content,
-            buttons=[
-                {"text": "Cancel", "role": "normal"},
-                {"text": "Update now", "role": "primary"},
-            ],
-            default_index=1,
-            theme_manager=getattr(parent, "theme_manager", None),
-            min_width=520,
-        )
-        dlg.exec_()
-        return dlg.get_result() == 1
-    except Exception:
-        return True
-
-
-
 def _offer_force_update(launcher, core_res, summary, stable_only, on_done) -> bool:
     """内核更新失败且 error_code == LOCAL_MODIFICATIONS 时弹“强制更新”对话框。
 
@@ -3453,46 +3412,6 @@ class PyQtLauncher(QtWidgets.QMainWindow, process_events.ProcessCallback):
             # 检查本身出问题不能拦住用户
             pass
 
-        # Pre-compute proxy / origin / branch so the confirm dialog can show them.
-        try:
-            _upd_proxy_desc = describe_git_proxy(getattr(self, "config", None))
-            try:
-                _upd_origin_url = self.services.version._origin_repo()[0] if hasattr(self.services, "version") else None  # type: ignore
-            except Exception:
-                _upd_origin_url = None
-            _upd_origin_short = "Comfy-Org/ComfyUI"
-            if _upd_origin_url and "github.com" in _upd_origin_url:
-                parts = _upd_origin_url.rstrip("/").rstrip(".git").split("github.com/")
-                if len(parts) > 1:
-                    _upd_origin_short = parts[-1]
-            try:
-                _upd_branch = self.services.version._origin_repo()[1] if hasattr(self.services, "version") else "master"
-            except Exception:
-                _upd_branch = "master"
-            try:
-                deps_enabled_confirm = False
-                _deps_v = getattr(self, "auto_update_deps_var", None)
-                if _deps_v is not None:
-                    deps_enabled_confirm = bool(_deps_v.get())
-            except Exception:
-                pass
-            # User feedback: Update went straight to background task with no confirmation.
-            # Now always show a confirm dialog first.
-            if not _confirm_update_start(self, _upd_proxy_desc, _upd_origin_url, _upd_branch, deps_enabled_confirm):
-                try:
-                    self._update_running = False
-                except Exception:
-                    pass
-                if on_done:
-                    try:
-                        on_done()
-                    except Exception:
-                        pass
-                return
-        except Exception:
-            # 弹窗本身出问题不能拦住用户
-            pass
-
         try:
             import threading
         except Exception:
@@ -3507,7 +3426,17 @@ class PyQtLauncher(QtWidgets.QMainWindow, process_events.ProcessCallback):
             # 任务标题明确说出在更新哪个仓库 (默认 Comfy-Org/ComfyUI) + 走哪条代理. 代理描述
             # 复用 _after_update 调调后, 现在跨设备 + 代理模式 (将来调 switch retry 按钮
             # 进一步会复用同一个工具). 同时调用 ensure_proxy_url(
-
+            # setup_git_proxy_env 让后续 git fetch 能用代理.
+            _upd_proxy_desc = describe_git_proxy(getattr(self, "config", None))
+            try:
+                _upd_origin_url = self.services.version._origin_repo()[0] if hasattr(self.services, "version") else None  # type: ignore
+            except Exception:
+                _upd_origin_url = None
+            _upd_origin_short = "Comfy-Org/ComfyUI"
+            if _upd_origin_url and "github.com" in _upd_origin_url:
+                parts = _upd_origin_url.rstrip("/").rstrip(".git").split("github.com/")
+                if len(parts) > 1:
+                    _upd_origin_short = parts[-1]
             _upd_task_title = f"更新 ComfyUI 内核 ({_upd_origin_short}, {_upd_proxy_desc})"
             task_id = registry.register(_upd_task_title) if registry else None
             if registry and task_id:
