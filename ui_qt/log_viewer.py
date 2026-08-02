@@ -1,4 +1,4 @@
-"""实时日志查看器:日志解析、进度折叠、文件 tail。"""
+"""实时日志查看器:VirtualTerminal (VT100 行模型) + 文件 tail。"""
 import logging
 import os
 import platform
@@ -70,19 +70,6 @@ _ANSI_ESCAPE_RE = re.compile(r"\x1b\[[0-9;]*[A-Za-z]")
 _NON_SGR_CSI_RE = re.compile(r"\x1b\[[0-9;]*[A-Za-ln-z]")
 # SGR 序列(以 m 结尾)
 _SGR_RE = re.compile(r"\x1b\[([0-9;]*)m")
-
-# Python logging-style level marker ([INFO] / [ERROR] / ...). Multi-\r 行 first
-# segment matching this is treated as a log prefix (node status line / import
-# time line) and preserved. Subsequent \r segments (tqdm progress frames) only
-# update the progress part -- matches ComfyUI frontend console behavior.
-# tqdm progress frames also contain "[elapsed<remaining, rate]" so a naive
-# "in [" heuristic would mis-classify them; matching the actual level names avoids that.
-_LOG_LEVEL_MARKER_RE = re.compile(r"\[(INFO|DEBUG|WARN|WARNING|ERROR|CRITICAL|FATAL)\]")
-
-# ComfyUI node ID line like "#335 [PrimitiveFloat]: 0.00s - vram 0b".
-_NODE_ID_RE = re.compile(r"^#\d+(\.\d+)?(\.\w+)?\s+\[")
-
-
 
 def ansi_to_html(text: str, default_color: str = "") -> str:
     """把带 ANSI SGR 颜色码的文本转成带 <span style=color:...> 的 HTML 片段。
@@ -213,7 +200,6 @@ class LogTailer:
         self._stop_event = threading.Event()
         self._thread = None  # type: threading.Thread | None
         self._buffer = b""
-        self._first_line = b""
         _diag_logger.info(
             "LogTailer.__init__ path=%s start_from_beginning=%s",
             self._path, start_from_beginning,
@@ -224,7 +210,6 @@ class LogTailer:
             return
         self._stop_event.clear()
         self._buffer = b""
-        self._first_line = b""
         self._thread = threading.Thread(
             target=self._run,
             name="LogTailer[" + self._path.name + "]",
@@ -308,63 +293,39 @@ class LogTailer:
                 if chunk:
                     position = f.tell()
                     self._buffer += chunk
-                    emitted_cr = self._emit_complete_carriage_returns(path)
-                    if emitted_cr:
-                        # _emit_complete_carriage_returns stopped at the LAST \r before \n.
-                        # Remaining buffer (before \n) is either:
-                        #   (a) tqdm-style progress frame (contains "%|") — emit as \r
-                        #       segment so downstream active-progress logic updates the live
-                        #       progress bar;
-                        #   (b) arbitrary text after the last \r (e.g. "done" right after
-                        #       "Loading: 40%\r") — leave for the main \n loop.
-                        idx = self._buffer.find(b"\n")
-                        if idx >= 0:
-                            line_bytes = self._buffer[:idx]
-                            if b"%|" in line_bytes:
-                                if line_bytes.endswith(b"\r"):
-                                    line_bytes = line_bytes[:-1]
-                                if line_bytes:
-                                    line = line_bytes.decode("utf-8", errors="replace") + "\r"
-                                    if _should_log_emit("LogTailer.emit"):
-                                        _diag_logger.info("LogTailer.emit path=%s line=%r", path, line[:200])
-                                    self._on_line(line)
-                                self._buffer = self._buffer[idx + 1:]
+                    # 按 \r 或 \n 任一边界 emit"段"(保留边界字符)。
+                    # 这是贴近 xterm 的逐块喂法:消费方(VirtualTerminal)按边界字符
+                    # 解释覆盖(\r)/换行(\n)语义。
+                    #
+                    # 为什么不只按 \n 切:tqdm 重定向到文件时,一次采样可能写几十个
+                    # \r 帧但只有最后一个 \n。若只按 \n 切,LogTailer 会把整段进度积压
+                    # 在 buffer 里直到任务结束,用户几分钟看不到任何进度。按 \r 也切,
+                    # 每个 \r 帧到达就 emit,VirtualTerminal 把它覆盖成最新帧作 active_line,
+                    # 用户实时看到进度条在动。
+                    #
+                    # 边界字符保留在段里:VirtualTerminal 需要看到 \r 才知道"回行首覆盖",
+                    # 看到 \n 才知道"finalize 当前行"。
                     while True:
-                        idx = self._buffer.find(b"\n")
-                        if idx < 0:
-                            break
-                        line_bytes = self._buffer[:idx]
-                        if line_bytes.endswith(b"\r"):
-                            line_bytes = line_bytes[:-1]
-                        # tqdm 重定向到文件时，整段进度压在一条物理行里，
-                        # 用 \r 分隔每次刷新，只在迭代末尾写 \n。
-                        # 如果不在这里按 \r 切段，LogTailer 会把整段积压在 buffer 等 \n，
-                        # 而任务可能跑几分钟才出 \n，期间用户看不到任何进度。
-                        # 切段后每段单独 emit（\r 标记保留给 Filter 识别），
-                        # Filter 再按新值/速率限决定是否实时显出。
-                        if b"\r" in line_bytes:
-                            for seg in line_bytes.split(b"\r"):
-                                if not seg:
-                                    # 连续 \r 之间的空段（tqdm 写新值前先 \r 把光标归位），
-                                    # 直接丢弃
-                                    continue
-                                try:
-                                    line = seg.decode("utf-8", errors="replace") + "\r"
-                                except Exception:
-                                    line = "\r"
-                                if _should_log_emit("LogTailer.emit"):
-                                    _diag_logger.info("LogTailer.emit path=%s line=%r", path, line[:200])
-                                self._on_line(line)
+                        cr_idx = self._buffer.find(b"\r")
+                        nl_idx = self._buffer.find(b"\n")
+                        # 取更早出现的边界
+                        if cr_idx < 0 and nl_idx < 0:
+                            break  # buffer 里没有完整段,等下次读
+                        if cr_idx < 0:
+                            boundary, sep = nl_idx, b"\n"
+                        elif nl_idx < 0:
+                            boundary, sep = cr_idx, b"\r"
+                        elif cr_idx <= nl_idx:
+                            boundary, sep = cr_idx, b"\r"
                         else:
-                            try:
-                                line = line_bytes.decode("utf-8", errors="replace")
-                            except Exception:
-                                line = ""
-                            if line:
-                                if _should_log_emit("LogTailer.emit"):
-                                    _diag_logger.info("LogTailer.emit path=%s line=%r", path, line[:200])
-                                self._on_line(line)
-                        self._buffer = self._buffer[idx + 1:]
+                            boundary, sep = nl_idx, b"\n"
+                        # 段 = 边界字符之前的内容 + 边界字符本身
+                        seg_bytes = self._buffer[:boundary] + sep
+                        self._buffer = self._buffer[boundary + 1:]
+                        seg = seg_bytes.decode("utf-8", errors="replace")
+                        if _should_log_emit("LogTailer.emit"):
+                            _diag_logger.info("LogTailer.emit path=%s seg=%r", path, seg[:200])
+                        self._on_line(seg)
                 else:
                     self._stop_event.wait(self._POLL_INTERVAL)
         finally:
@@ -372,30 +333,6 @@ class LogTailer:
                 f.close()
             except Exception:
                 pass
-
-    def _emit_complete_carriage_returns(self, path) -> bool:
-        """立即发出以回车结束的刷新，尾部半行继续等待后续字节。
-
-        Returns True if any \r 段 was emitted. When True, the remaining buffer before \n
-        is the LAST \r 段 of a multi-\r 行 — caller should emit it as a \r segment
-        rather than letting the main \n loop treat it as a normal line, otherwise the same
-        content shows up twice in the viewer.
-        """
-        emitted_any = False
-        while True:
-            idx = self._buffer.find(b"\r")
-            newline_idx = self._buffer.find(b"\n")
-            if idx < 0 or (newline_idx >= 0 and newline_idx <= idx + 1):
-                return emitted_any
-            segment = self._buffer[:idx]
-            self._buffer = self._buffer[idx + 1:]
-            if not segment:
-                continue
-            line = segment.decode("utf-8", errors="replace") + "\r"
-            if _should_log_emit("LogTailer.emit"):
-                _diag_logger.info("LogTailer.emit path=%s line=%r", path, line[:200])
-            self._on_line(line)
-            emitted_any = True
 
     @staticmethod
     def _file_key(path) -> tuple:
@@ -452,128 +389,60 @@ def read_tail_lines(path, n: int) -> List[str]:
     return list(buf)
 
 
-class ProgressCollapseFilter:
-    """折叠 ComfyUI 日志中含 \r 的进度刷新(典型来源:tqdm 进度条)。
+class VirtualTerminal:
+    """极简 VT100 行模型:解释 \\r / \\n 控制字符,模拟终端"当前行"语义。
 
-    tqdm 在 conhost 里用 \r 重写同一行做进度动画;重定向到文件时,这些
-    \r 刷新都被保留下来,有两种物理形态:
+    这是日志页"和 ComfyUI 前端 xterm.js console 表现一致"的核心。tqdm 重定向
+    到文件时,每个进度帧之间用 \\r 分隔(回车 = 光标回行首),只有最后一个帧
+    之后才写 \\n(换行)。xterm.js 直接吃原始字节流,\\r 自然覆盖当前行;
+    我们用同样语义:维护一个"当前行"字符串,\\r 后续字符覆盖写,\\n 才 finalize。
 
-    1. **多行形态**:每个百分比占一行(行尾的 \r 被 LogTailer 剥掉),
-       连续 N 行都是进度刷新。
-    2. **单行多刷新形态**(bug 场景):整段进度被压在了一个物理行里,
-       81 个百分比之间全是 \r,只有最后一个 \n 才换行。一行就有 80 个 \r。
+    只实现 tqdm/ComfyUI 日志用到的子集(\\r 回行首覆盖、\\n 换行),
+    不处理光标上下左右移动、alternate screen、ESC[K 清屏等——日志里没有。
 
-    旧实现把整段折叠、留到下一个普通行才 emit 一个 "... N lines collapsed: <last>"
-    标记行 —— 但任务跑几分钟期间用户看不到任何进度,体验非常糟。
-    新实现改成「实时刷出」:
+    纯覆盖语义(不做行尾 pad):\\r 后直接清空当前行重建。tqdm 进度帧单调变长,
+    实测不会残留旧字符尾部;与 ComfyUI 前端 xterm 行为一致。
 
-    - 每次 feed 看到新值(与上次 live emit 的 segment 不同)且距上次 live emit
-      >= _LIVE_INTERVAL 秒,emit 一条 "[progress] <segment>" —— 让用户看到进度在动
-    - 同值重复 feed(典型场景:tqdm 在两个采样步骤之间重绘同一帧)不重复 emit
-    - 普通行到达时,先吐一条 "... N updates: <last>" 总结(标记这一段进度累计多少帧),
-      再吐本行,并清空状态 —— 下一次进度可以从 0 开始重新累计
-    - flush() 在 tail 结束时收尾:有累积就吐一条总结
-
-    速率限(_LIVE_INTERVAL)存在的意义:tqdm 一次写盘会把整段多帧压在一条物理行里,
-    LogTailer 切 \r 段后可能在毫秒级内连续 emit 几十条 "[progress]",速率限让 burst
-    情况只露第一帧,其余静默累计到 summary(避免 UI 闪屏)。tqdm 真实跨步刷新间隔
-    通常几百毫秒到几秒,远大于速率限,所以正常 sampling 期间每帧新值都能看到。
-
-    API 是流式的,每次 feed 一行(已去掉末尾换行),返回 emit 的行列表。
-    调用方把所有 emit 行原样追加到 UI 控件。
+    线程安全:无状态共享,实例仅供单消费方使用(LogViewerPage / webui_page 各自一个)。
     """
 
-    # live emit 之间的最小时间间隔(秒)。tqdm 默认 mininterval 在非 tty 下
-    # 通常 >= 0.5s,这里取 0.3s 是为了 burst 场景下 millisecond 级连续 feed
-    # 也只 emit 一帧;真实跨步刷新不会受影响。
-    _LIVE_INTERVAL = 0.3
-
     def __init__(self) -> None:
-        self._refresh_count: int = 0          # 累计的进度刷新次数(\r 个数)
-        self._last_refresh: str = ""          # 最后一次刷新的文本(已剥多余 \r)
-        self._last_live_segment: str = ""     # 上次 live emit 的 segment(同值不重复 emit)
-        self._last_live_emit_ts: float = 0.0  # 上次 live emit 的 monotonic 时间
+        self._current: str = ""              # 当前行(已解释覆盖语义后的最终内容)
+        self._carriage_returned: bool = False  # 上一个是 \r,后续字符从行首覆盖写
 
-    @staticmethod
-    def _last_segment(line: str) -> str:
-        """从含 \r 的行里取出最后一段(最后一次刷新的文本)。
+    def feed(self, text: str) -> List[str]:
+        """喂一段字符流,返回这段期间因 \\n 而 finalize 的行列表(不含当前活动行)。
 
-        "a\rb\rc" -> "c"; "a\rb\r" -> "a"(末尾空段忽略,回到上一个非空)。
-        全空段时返回空串。
+        消费方调 active_line 属性拿当前活动行单独渲染(它还没被 \\n 收尾)。
+
+        \\r\\n 序列安全:Windows 风格 \\r\\n 里 \\r 先标记 carriage_returned,
+        \\n 紧跟其后 finalize 当前行 —— \\n 不走"覆盖写"分支,不会误清空内容。
         """
-        # 按 \r 切,从后往前找第一个非空段
-        for seg in reversed(line.split("\r")):
-            if seg:
-                return seg
-        return ""
+        finalized: List[str] = []
+        for ch in text:
+            if ch == "\n":
+                finalized.append(self._current)
+                self._current = ""
+                self._carriage_returned = False
+            elif ch == "\r":
+                self._carriage_returned = True
+            else:
+                if self._carriage_returned:
+                    # 纯覆盖:回行首后新内容替换整行
+                    self._current = ""
+                    self._carriage_returned = False
+                self._current += ch
+        return finalized
 
-    def feed(self, line: str) -> List[str]:
-        """输入一行,返回 emit 的行列表。"""
-        if "\r" not in line:
-            # 普通行:如果之前在折叠进度,先吐一个总结标记行,再吐本行,并清状态
-            if self._refresh_count > 0:
-                count = self._refresh_count
-                last = self._last_refresh
-                self._refresh_count = 0
-                self._last_refresh = ""
-                self._last_live_segment = ""
-                self._last_live_emit_ts = 0.0
-                return [self._summary(count, last), line]
-            return [line]
-        # 含 \r 的进度行:累计刷新次数,只记最后一次刷新文本
-        # 一行里多个 \r 算多次刷新(\r 个数 = 段数 - 1)
-        n_refresh_in_line = line.count("\r")
-        self._refresh_count += n_refresh_in_line
-        last_seg = self._last_segment(line)
-        if last_seg:
-            self._last_refresh = last_seg
-        # 新值(与上次 live emit 的 segment 不同)且距上次 emit 够久 -> 实时 emit
-        # 同值重复 / 距上次 emit 太近(< _LIVE_INTERVAL)则静默累计,不刷屏
-        if last_seg and last_seg != self._last_live_segment:
-            import time as _time
-            now = _time.monotonic()
-            if now - self._last_live_emit_ts >= self._LIVE_INTERVAL:
-                self._last_live_segment = last_seg
-                self._last_live_emit_ts = now
-                return [self._live_marker(self._refresh_count, last_seg)]
-        return []
+    @property
+    def active_line(self) -> str:
+        """当前活动行(还没被 \\n 收尾的部分)。消费方实时渲染它。"""
+        return self._current
 
-    def flush(self) -> List[str]:
-        """文件结束 / 停止 tail 时调用,返回剩余的折叠总结。"""
-        if self._refresh_count > 0:
-            count = self._refresh_count
-            last = self._last_refresh
-            self._refresh_count = 0
-            self._last_refresh = ""
-            self._last_live_segment = ""
-            self._last_live_emit_ts = 0.0
-            return [self._summary(count, last)]
-        return []
-
-    @classmethod
-    def _summary(cls, count: int, last: str) -> str:
-        """生成折叠总结行(在普通行前或 flush 时 emit)。
-
-        措辞从 "lines collapsed" 改成 "updates":现在每帧新值都会 live emit,
-        这里的 N 表示「这一段进度里累计了多少帧」,而不是"被折叠掉的数量"。
-
-        last 是最后一次刷新的原文(如 "tracking: 100%|████| 81/81")。
-        不用 repr()——repr 会把整串(含 unicode 块字符)包成乱码;
-        直接拼原文,UI 能正确渲染,保存为纯文本也干净。
-        """
-        if last:
-            return f"... {count} updates: {last}"
-        return f"... {count} updates"
-
-    @classmethod
-    def _live_marker(cls, count: int, last: str) -> str:
-        """实时进度标记行(每帧新值各 emit 一条,带 [progress] 前缀便于识别)。
-
-        count 是当前累计刷新次数(包含本次),方便用户看出进度跳了多少帧。
-        """
-        if last:
-            return f"[progress #{count}] {last}"
-        return f"[progress #{count}]"
+    def reset(self) -> None:
+        """清空状态(清屏 / 切环境 / 关闭折叠时调)。"""
+        self._current = ""
+        self._carriage_returned = False
 
 
 try:
@@ -618,8 +487,17 @@ if _HAS_QT:
             self._max_lines = int(max_lines) if max_lines else self.DEFAULT_MAX_LINES
             self._tailer = None  # type: LogTailer | None
             self._emitter = _LineEmitter()
-            self._filter = ProgressCollapseFilter()
+            # VirtualTerminal 解释 \r/\n 覆盖语义(替代旧的 prefix/progress 双缓冲
+            # 折中方案)。这是"和 ComfyUI 前端 xterm 一致"的核心:tqdm 进度帧被
+            # \r 覆盖成最终帧,节点状态行不再被错误粘连。
+            self._vt = VirtualTerminal()
             self._paused = False
+            # 暂停期间累积的 tailer 段(不丢弃)。继续后一次性 feed 给 VirtualTerminal,
+            # 让暂停期间的新行补显示到末尾 —— 类似 ComfyUI 前端 xterm 的暂停语义
+            # (画面冻结,但日志不丢)。tailer 线程不受暂停影响,继续读文件 emit。
+            # 有 cap(_PAUSED_PENDING_CAP)防 OOM:用户暂停几小时 + 高频日志时,
+            # 超出 cap 后丢弃最旧的段(保留最近的,符合"看到最新"的预期)。
+            self._pending_while_paused = []  # type: List[str]
             self._log_path = None  # type: Path | None
             # 诊断 logger（同 launcher 同名子 logger，同 handler，写入 launcher.log）
             self.logger = _diag_logger
@@ -633,13 +511,9 @@ if _HAS_QT:
             # 避免逐行 insertText 触发富文本 O(n²) 布局重算。
             self._batch_buffer = []  # type: List[str]
             self._batch_timer = None  # type: QtCore.QTimer | None
-            self._active_progress = ""
-            # Multi-\r 行 first segment matching log-prefix pattern is preserved.
-            # Subsequent \r segments (tqdm progress frames) only update the progress
-            # part. Matches ComfyUI frontend console behavior.
-            self._active_progress_prefix = ""
-            # Was the previous line a \r segment? Used to detect "new multi-\r line first segment".
-            self._last_segment_was_cr = False
+            # 标记当前 QTextEdit 末尾是否有一个"活动行"(VirtualTerminal 的 active_line)。
+            # _flush_batch 据此决定:先删旧活动行,再插新 batch,最后插新活动行。
+            self._has_active_line = False
             self._setup_ui()
 
         # 最近历史日志的行数上限(用户首次切到日志页时回填这么多行)。
@@ -648,6 +522,10 @@ if _HAS_QT:
         # 批量渲染 flush 间隔。tailer 每 50ms 读一次,这里也 50ms 攒一批,
         # 让实时跟随的延迟感 < 100ms 且不逐行卡。
         _BATCH_INTERVAL_MS = 50
+        # 暂停期间累积段的 cap。防 OOM:用户暂停几小时 + 高频 tqdm 日志时,
+        # 一段是一个 \r/\n 边界单元(一个进度帧算一段),50000 段约等于
+        # 几小时重度采样。超出后丢最旧的(保留最近内容,符合"看到最新"预期)。
+        _PAUSED_PENDING_CAP = 50000
 
         def showEvent(self, event):
             """页面切到前台:清未读标记("*") + 首次进入时按需加载最近历史。"""
@@ -671,6 +549,10 @@ if _HAS_QT:
 
             在调用线程(主线程)同步读文件末尾——只读 N 行,毫秒级,不阻塞。
             用批量 append(走 _enqueue_batch → 定时器 flush),一次写完。
+
+            read_tail_lines 已经按 \n 切行、剥掉行尾 \r,所以历史行都是
+            "已固化的完整行",直接进 batch buffer,不走 VirtualTerminal
+            (实时 tailer 那边才需要解释 \r 覆盖语义)。
             """
             if self._log_path is None:
                 return
@@ -679,16 +561,9 @@ if _HAS_QT:
             except Exception:
                 return
             for line in lines:
-                # 历史行也是从原始文件读出来的, 会含 ANSI SGR 代码
-                # (例如 Python logging 输出的 \x1b[1m\x1b[31m[ERROR]\x1b[0m) -> QTextBrowser 里\x1b不可见
-                # 会留下 [1m[31m[0m 这种“残乙”。走 filter 之前先剥 ANSI,与实时行一致。
-                clean = strip_ansi(line)
-                # 走折叠过滤器(与实时行一致),结果入批量缓冲
-                if self.collapse_checkbox.isChecked():
-                    for out in self._filter.feed(clean):
-                        self._enqueue_batch(out)
-                else:
-                    self._enqueue_batch(clean)
+                # 历史行含 ANSI SGR 代码(如 \x1b[32m[INFO]\x1b[0m),QTextBrowser 里
+                # \x1b 不可见会留残渣。剥 ANSI 后入缓冲,与实时行一致。
+                self._enqueue_batch(strip_ansi(line))
             self._flush_batch()  # 历史一次性 flush,不等定时器
 
         def _setup_ui(self):
@@ -706,10 +581,8 @@ if _HAS_QT:
 
             # 控制条
             controls = QtWidgets.QHBoxLayout()
-            self.collapse_checkbox = QtWidgets.QCheckBox("折叠连续进度")
-            self.collapse_checkbox.setChecked(True)
-            self.collapse_checkbox.toggled.connect(self._on_collapse_toggled)
-            controls.addWidget(self.collapse_checkbox)
+            # 注:"折叠连续进度" checkbox 已移除 —— VirtualTerminal 的 \r 覆盖语义
+            # 天然把 tqdm 多帧进度折叠成最终帧,不再需要手动的折叠开关/Filter。
 
             self.wrap_checkbox = QtWidgets.QCheckBox("自动换行")
             self.wrap_checkbox.setChecked(True)  # 默认换行,窄窗口也能看全
@@ -872,14 +745,12 @@ if _HAS_QT:
             # 丢弃旧 emitter:它上面残留的 signal 连接随之失效(下次 start 会建全新的)。
             # 不再调 disconnect——bound method disconnect 在部分环境静默失败(见 start_tailing 注释)。
             self._emitter = None
-            if self._active_progress:
-                self._finalize_active_progress()
-            flushed = self._filter.flush()
-            for line in flushed:
-                self._append_line(line)
+            # 收尾:把 VirtualTerminal 里残留的 active_line(还没被 \n 终结的半行)
+            # flush 成一条完整行,避免进度条卡在末尾不被固化。
+            self._finalize_active_line()
             self.logger.info(
-                "stop_tailing path=%s receivers_before=%d tailer_alive_before=%s flushed_lines=%d",
-                self._log_path, receivers_before, tailer_alive, len(flushed),
+                "stop_tailing path=%s receivers_before=%d tailer_alive_before=%s",
+                self._log_path, receivers_before, tailer_alive,
             )
 
         def _on_line_from_tailer(self, line: str) -> None:
@@ -897,56 +768,37 @@ if _HAS_QT:
             if _should_log_emit("main_recv"):
                 self.logger.info("main_recv line=%r", line[:200])
             if self._paused:
+                # 暂停时不丢弃:tailer 线程还在读文件,把段累积起来,
+                # 继续后一次性补 feed,避免暂停期间日志丢失。
+                self._pending_while_paused.append(line)
+                # 防 OOM cap:超限丢最旧的(保留最近内容)。重度采样下 50000 段
+                # 约几小时,够覆盖正常使用;极端长暂停也不会把内存撑爆。
+                if len(self._pending_while_paused) > self._PAUSED_PENDING_CAP:
+                    del self._pending_while_paused[:len(self._pending_while_paused) - self._PAUSED_PENDING_CAP]
                 return
-            if self.collapse_checkbox.isChecked() and "\r" in line:
-                # Virtual terminal: \r overwrites current active line.
-                # First segment of a multi-\r line is preserved as prefix if it looks
-                # like a log line (level marker or ComfyUI node ID).
-                progress = ProgressCollapseFilter._last_segment(line)
-                if progress:
-                    is_first_cr = not self._last_segment_was_cr
-                    self._set_active_progress(progress, is_first_cr=is_first_cr)
-                self._last_segment_was_cr = True
-                return
-            # Normal line: reset state, finalize old active progress, run filter.
-            self._last_segment_was_cr = False
-            if self._active_progress or self._active_progress_prefix:
-                self._finalize_active_progress()
-            if self.collapse_checkbox.isChecked():
-                for out in self._filter.feed(line):
-                    self._append_line(out)
-            else:
-                self._append_line(line)
-
-        def _set_active_progress(self, line: str, *, is_first_cr: bool = False) -> None:
-            """Update active progress line.
-
-            is_first_cr=True means this is the first segment of a new multi-\r line.
-            Detect whether it is a log prefix (level marker or ComfyUI node ID) and
-            preserve it, or treat it as a normal progress frame.
-            """
-            clean = strip_ansi(line)
-            if is_first_cr:
-                if _LOG_LEVEL_MARKER_RE.search(clean) or _NODE_ID_RE.match(clean):
-                    self._active_progress_prefix = clean
-                    self._active_progress = ""
-                else:
-                    self._active_progress_prefix = ""
-                    self._active_progress = clean
-            else:
-                self._active_progress = clean
+            # 喂给 VirtualTerminal 解释 \r/\n 覆盖语义。
+            # finalized 是因 \n 而"完成"的行(已固化,进 batch buffer);
+            # active_line 是当前还在"活动中"的行(tqdm 进度条),单独渲染。
+            finalized = self._vt.feed(line)
+            for fl in finalized:
+                if fl:  # 跳过真正空字符串(\n\n 产生的空段); 保留含空白的合法行
+                    self._append_line(fl)
+            # 即使没有 finalized 行,active_line 可能变了(进度帧刷新)→ 触发 batch flush 重绘
             self._enqueue_batch(None)
 
-        def _finalize_active_progress(self) -> None:
-            self._flush_batch()
-            cursor = self.text_edit.textCursor()
-            cursor.movePosition(QtGui.QTextCursor.End)
-            cursor.insertBlock()
-            self._active_progress = ""
-            self._active_progress_prefix = ""
+        def _finalize_active_line(self) -> None:
+            """收尾活动行:把 VirtualTerminal 里残留的 active_line flush 成完整行。
+
+            在 stop_tailing / 清屏时调,避免 tqdm 进度条永远卡在末尾不被固化。
+            """
+            active = self._vt.active_line
+            if not active:
+                return
+            self._vt.reset()
+            self._append_line(active)
 
         def _append_line(self, line: str) -> None:
-            """处理一行日志:剥 ANSI、记录未读、入批量缓冲(不直接写 QTextEdit)。
+            """处理一行已固化的日志:剥 ANSI、记录未读、入批量缓冲(不直接写 QTextEdit)。
 
             纯文本模式(移除了颜色标识):剥掉 ANSI 转义码后原文进缓冲,
             由 _flush_batch 定时器批量 append。不再逐行 insertText + charFormat
@@ -969,7 +821,7 @@ if _HAS_QT:
             self._enqueue_batch(clean)
 
         def _enqueue_batch(self, line) -> None:
-            """普通行入缓冲；None 表示只触发活动进度刷新。"""
+            """普通行入缓冲；None 表示只触发活动行刷新(active_line 可能变了)。"""
             if line is not None:
                 self._batch_buffer.append(line)
             if self._batch_timer is None:
@@ -980,32 +832,43 @@ if _HAS_QT:
                 self._batch_timer.start(self._BATCH_INTERVAL_MS)
 
         def _flush_batch(self) -> None:
-            """把缓冲里的行一次性 append 到 QTextEdit(一次 insertText,一次滚动)。
+            """把缓冲里的行 + 当活动行一次性写入 QTextEdit(尽量少的 DOM 写入)。
 
-            批量化是关键:把 N 次 insertText(每次触发富文本布局重算)合并成 1 次,
+            批量化是关键:把 N 次 insertText(每次触发富文本布局重算)合并,
             实时跟随(行流)和历史回填(几百行)都只做 O(1) 次 DOM 写入。
+
+            活动行(active_line = VirtualTerminal 当前的 \r 覆盖结果,如 tqdm 进度条)
+            渲染策略:它必须是 QTextEdit 末尾独立的一块,下次 flush 时先删掉再覆盖写,
+            这样 \r 的"覆盖当前行"语义在 QTextEdit 里成立。
             """
-            if not self._batch_buffer and not self._active_progress and not self._active_progress_prefix:
+            active = strip_ansi(self._vt.active_line)
+            if not self._batch_buffer and not active and not self._has_active_line:
                 return
             batch_size = len(self._batch_buffer)
             text = "\n".join(self._batch_buffer)
             self._batch_buffer.clear()
             if _should_log_emit("flush_batch"):
-                self.logger.info("flush_batch size=%d first_line=%r", batch_size, text.splitlines()[0][:120] if text else "")
-            # moveCursor + insertText 一次写整批;document 的 maximumBlockCount 自动裁老的
+                self.logger.info("flush_batch size=%d first_line=%r active=%r",
+                                 batch_size, text.splitlines()[0][:120] if text else "", active[:80])
             cursor = self.text_edit.textCursor()
             cursor.movePosition(QtGui.QTextCursor.End)
-            if self._active_progress or self._active_progress_prefix:
-                cursor.select(QtGui.QTextCursor.BlockUnderCursor)
+            # 如果末尾有上一轮残留的活动行块,先清空块内文本(\r 覆盖语义:整行重写)。
+            # 关键:用 StartOfBlock + EndOfBlock(KeepAnchor) 选中块内文本(不含块分隔符),
+            # 不能用 BlockUnderCursor —— 后者会连带删掉块分隔符 (\u2029),导致删完后
+            # 光标粘在前一块末尾,后续 insertText 把新内容拼到前一行(换行丢失,
+            # 表现为 "#104 [...]b100%|..." 粘连 bug)。
+            if self._has_active_line:
+                cursor.movePosition(QtGui.QTextCursor.StartOfBlock)
+                cursor.movePosition(QtGui.QTextCursor.EndOfBlock, QtGui.QTextCursor.KeepAnchor)
                 cursor.removeSelectedText()
-                if text:
-                    cursor.insertText(text + "\n")
-                # Combine prefix (log line) with progress (tqdm frame) so they show
-                # on the same visual line, matching ComfyUI web console behavior.
-                full_active = self._active_progress_prefix + self._active_progress
-                cursor.insertText(full_active)
-            elif text:
+                self._has_active_line = False
+            # 插入本批已固化的行(每行末尾带 \n)
+            if text:
                 cursor.insertText(text + "\n")
+            # 插入新的活动行(末尾不带 \n,下次 flush 会先删它再覆盖)
+            if active:
+                cursor.insertText(active)
+                self._has_active_line = True
             # 滚到底(整批一次)
             bar = self.text_edit.verticalScrollBar()
             if bar is not None:
@@ -1015,19 +878,27 @@ if _HAS_QT:
         def _on_pause_toggled(self, checked: bool) -> None:
             self._paused = checked
             self.pause_btn.setText("继续" if checked else "暂停")
+            if not checked and self._pending_while_paused:
+                # 继续时:把暂停期间累积的段一次性补 feed 给 VirtualTerminal,
+                # 让暂停期间的新行正确显示到末尾(\r/\n 覆盖语义保持一致)。
+                pending = self._pending_while_paused
+                self._pending_while_paused = []
+                for line in pending:
+                    finalized = self._vt.feed(line)
+                    for fl in finalized:
+                        if fl:  # 与 _on_line_main 一致,跳过空字符串
+                            self._append_line(fl)
+                # 触发一次 flush 渲染(含最终 active_line)
+                self._enqueue_batch(None)
 
         def _on_clear_clicked(self) -> None:
             self.text_edit.clear()
-            self._active_progress = ""
-            # 重置 filter 状态(避免之前积累的 \r 计数影响下一段)
-            self._filter = ProgressCollapseFilter()
-
-        def _on_collapse_toggled(self, checked: bool) -> None:
-            if self._active_progress or self._active_progress_prefix:
-                self._finalize_active_progress()
-            # Reset filter and prefix state
-            self._filter = ProgressCollapseFilter()
-            self._last_segment_was_cr = False
+            # 重置 VirtualTerminal 状态(清掉残留的活动行/覆盖标志)
+            self._vt.reset()
+            self._has_active_line = False
+            self._batch_buffer.clear()
+            # 清空暂停期间累积的段(用户主动清空,不要在继续时补显示)
+            self._pending_while_paused.clear()
 
         def _on_wrap_toggled(self, checked: bool) -> None:
             if checked:

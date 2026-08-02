@@ -52,7 +52,7 @@ from ui_qt.widgets.dialog_helper import DialogHelper
 from ui_qt.widgets.buttons import DestructiveButton
 from ui_qt.widgets.custom_confirm_dialog import CustomConfirmDialog
 from ui_qt.widgets.custom import NoWheelComboBox
-from ui_qt.log_viewer import LogTailer, read_tail_lines
+from ui_qt.log_viewer import LogTailer, read_tail_lines, VirtualTerminal, strip_ansi
 
 
 STATE_NOT_INSTALLED = "not_installed"
@@ -135,6 +135,11 @@ class WebuiPage(BasePage):
         self._batch_timer: Optional[QtCore.QTimer] = None
         self._log_path: Optional[Path] = None
         self._history_loaded = False
+        # VirtualTerminal 解释 \r/\n 覆盖语义 (tqdm 进度条), 与 LogViewerPage 一致。
+        # LogTailer 现在按 \r/\n 边界 emit 含边界字符的段, webui 日志也走 VT 解释,
+        # 否则 \r 会原样显示成乱码。
+        self._vt = VirtualTerminal()
+        self._has_active_line = False
         self._setup_ui()
         self._refresh_state()
         self._start_log_tail()
@@ -1371,8 +1376,9 @@ class WebuiPage(BasePage):
         # 和走哪条代理 (与更新工作台一致; 用户在弹窗打开第一秒就知道走了哪条路).
         dl_repo_url = info.get("download_url") or "https://github.com/MieMieeeee/Comfyui-Workbench-Mie.git"
         dl_repo_short = (dl_repo_url.rstrip("/").rsplit("/", 1)[-1].removesuffix(".git") or "WebUI")
-        dl_proxy_desc = describe_webui_proxy_for_mirror(dl_mirror_name, getattr(self.app, "config", None))
+        # 镜像名必须在 describe_webui_proxy_for_mirror 之前赋值, 否则触发 UnboundLocalError.
         dl_mirror_name = info.get("download_mirror") or WEBUI_DEFAULT_MIRROR
+        dl_proxy_desc = describe_webui_proxy_for_mirror(dl_mirror_name, getattr(self.app, "config", None))
         dl_task_title = f"下载 {dl_repo_short} (镜像: {dl_mirror_name}, {dl_proxy_desc})"
         self._run_with_progress(dl_task_title, runner, on_done)
 
@@ -1617,7 +1623,10 @@ class WebuiPage(BasePage):
                 pass
 
     def _load_recent_history(self):
-        """读日志文件最后 N 行批量填进视图 (复刻 LogViewerPage)."""
+        """读日志文件最后 N 行批量填进视图 (复刻 LogViewerPage).
+
+        read_tail_lines 已按 \\n 切行、剥掉行尾 \\r, 历史行都是已固化的完整行,
+        直接进 batch buffer (剥 ANSI 后), 不走 VirtualTerminal."""
         path = self._log_path
         if path is None:
             return
@@ -1626,7 +1635,7 @@ class WebuiPage(BasePage):
         except Exception:
             return
         for line in lines:
-            self._enqueue_batch(line)
+            self._enqueue_batch(strip_ansi(line))
 
     def _start_log_tail(self) -> None:
         """启动 tailer (从 EOF 跟新行). 复刻 LogViewerPage.start_tailing."""
@@ -1665,6 +1674,11 @@ class WebuiPage(BasePage):
                 pass
             self._tailer = None
         self._emitter = None
+        # 收尾: 把 VirtualTerminal 残留的 active_line flush 成完整行, 避免进度条卡末尾.
+        active = self._vt.active_line
+        if active:
+            self._vt.reset()
+            self._enqueue_batch(strip_ansi(active))
 
     def _on_line_from_tailer(self, line: str) -> None:
         """tailer 线程回调: 通过 signal 投到 UI 线程. stop 后丢弃尾包."""
@@ -1674,11 +1688,17 @@ class WebuiPage(BasePage):
         emitter.line_received.emit(line)
 
     def _on_line_main(self, line: str) -> None:
-        """UI 线程: 入批量缓冲 (50ms 定时器统一 flush)."""
-        self._enqueue_batch(line)
+        """UI 线程: 喂给 VirtualTerminal 解释 \\r/\\n, 已固化行入缓冲, 活动行单独渲染."""
+        finalized = self._vt.feed(line)
+        for fl in finalized:
+            if fl:  # 跳过真正空字符串; 保留含空白的行 (合法日志分隔)
+                self._enqueue_batch(strip_ansi(fl))
+        # active_line 可能变了 (tqdm 进度帧刷新), 触发 flush 重绘活动行
+        self._enqueue_batch(None)
 
     def _enqueue_batch(self, line) -> None:
-        """行入缓冲, 启动 50ms 定时器统一 flush (复刻 LogViewerPage)."""
+        """行入缓冲, 启动 50ms 定时器统一 flush (复刻 LogViewerPage).
+        None 表示只触发活动行刷新 (active_line 可能变了)."""
         if line is not None:
             self._batch_buffer.append(line)
         if self._batch_timer is None:
@@ -1689,14 +1709,31 @@ class WebuiPage(BasePage):
             self._batch_timer.start(_BATCH_INTERVAL_MS)
 
     def _flush_batch(self) -> None:
-        """把缓冲行一次性 insertText + 滚到底 (一次 DOM 写入, 复刻 LogViewerPage)."""
-        if not self._batch_buffer:
+        """把缓冲行 + 活动行一次性写入 + 滚到底 (复刻 LogViewerPage).
+
+        活动行 (VirtualTerminal 的 active_line, 如 tqdm 进度条) 是 QTextEdit 末尾独立块,
+        下次 flush 先删再覆盖写, 模拟 \\r 覆盖当前行语义.
+        """
+        active = strip_ansi(self._vt.active_line)
+        if not self._batch_buffer and not active and not self._has_active_line:
             return
         text = "\n".join(self._batch_buffer)
         self._batch_buffer.clear()
         cursor = self._log_view.textCursor()
         cursor.movePosition(QtGui.QTextCursor.End)
-        cursor.insertText(text + "\n")
+        # 清空上一轮残留的活动行块内文本 (\\r 覆盖语义: 整行重写)。
+        # 关键: 用 StartOfBlock + EndOfBlock(KeepAnchor) 选中块内文本 (不含块分隔符),
+        # 不能用 BlockUnderCursor —— 后者连带删块分隔符,导致后续 insertText 粘到前一行。
+        if self._has_active_line:
+            cursor.movePosition(QtGui.QTextCursor.StartOfBlock)
+            cursor.movePosition(QtGui.QTextCursor.EndOfBlock, QtGui.QTextCursor.KeepAnchor)
+            cursor.removeSelectedText()
+            self._has_active_line = False
+        if text:
+            cursor.insertText(text + "\n")
+        if active:
+            cursor.insertText(active)
+            self._has_active_line = True
         bar = self._log_view.verticalScrollBar()
         if bar is not None:
             bar.setValue(bar.maximum())
@@ -1704,6 +1741,9 @@ class WebuiPage(BasePage):
     def _on_clear_log(self):
         """清空日志视图."""
         self._log_view.clear()
+        self._vt.reset()
+        self._has_active_line = False
+        self._batch_buffer.clear()
 
     def _open_log_file(self):
         log_path = self._resolve_log_path()

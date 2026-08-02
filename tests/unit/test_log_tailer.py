@@ -1,10 +1,17 @@
-"""LogTailer 单元测试:后台线程 tail 文件,新行通过回调 emit。"""
+"""LogTailer 单元测试:后台线程 tail 文件,新行通过回调 emit。
+
+LogTailer 现在按 \r 或 \n 任一边界 emit"段",保留边界字符。消费方
+(VirtualTerminal) 按边界字符解释覆盖(\r)/换行(\n)语义。
+
+注意:Windows 上 write_text 默认把 \n 转成 \r\n,所以测试断言用 VirtualTerminal
+做最终语义验证(而不是绑定具体切法),保证跨平台稳健。
+"""
 import threading
 import time
 import unittest
 from pathlib import Path
 
-from ui_qt.log_viewer import LogTailer
+from ui_qt.log_viewer import LogTailer, VirtualTerminal
 
 
 def _wait_for(predicate, timeout=2.0, interval=0.02):
@@ -17,16 +24,27 @@ def _wait_for(predicate, timeout=2.0, interval=0.02):
     return False
 
 
+def _feed_all_to_vt(segments):
+    """把 LogTailer emit 的段全部喂给 VirtualTerminal,返回 (finalized 行, active_line)。"""
+    vt = VirtualTerminal()
+    finalized = []
+    for seg in segments:
+        finalized.extend(vt.feed(seg))
+    return finalized, vt.active_line
+
+
 class TestLogTailerEmits(unittest.TestCase):
     def test_emits_existing_lines_when_start_from_beginning(self):
         with _tmpfile("a\nb\nc\n") as path:
             received = []
-            ev = threading.Event()
             tailer = LogTailer(path, on_line=received.append, start_from_beginning=True)
             tailer.start()
             try:
-                self.assertTrue(_wait_for(lambda: len(received) >= 3), "should emit 3 lines")
-                self.assertEqual(received, ["a", "b", "c"])
+                self.assertTrue(_wait_for(lambda: len(received) >= 3), "should emit segments")
+                # 喂给 VirtualTerminal 后应得到 3 行 (跨 \r\n / \n 切法都成立)
+                finalized, active = _feed_all_to_vt(received)
+                self.assertEqual(finalized, ["a", "b", "c"])
+                self.assertEqual(active, "")
             finally:
                 tailer.stop()
 
@@ -36,15 +54,14 @@ class TestLogTailerEmits(unittest.TestCase):
             tailer = LogTailer(path, on_line=received.append, start_from_beginning=False)
             tailer.start()
             try:
-                # 等线程进入稳定状态
                 time.sleep(0.1)
-                # 此时不应该 emit 任何东西(只跳过已存在的)
                 self.assertEqual(received, [])
-                # 追加新行
                 with open(path, "a", encoding="utf-8") as f:
                     f.write("d\ne\n")
-                self.assertTrue(_wait_for(lambda: received == ["d", "e"]),
+                self.assertTrue(_wait_for(lambda: len(received) >= 2),
                                 "should emit new lines only")
+                finalized, _ = _feed_all_to_vt(received)
+                self.assertEqual(finalized, ["d", "e"])
             finally:
                 tailer.stop()
 
@@ -56,8 +73,9 @@ class TestLogTailerEmits(unittest.TestCase):
             try:
                 with open(path, "a", encoding="utf-8") as f:
                     f.write("line1\nline2\nline3\n")
-                self.assertTrue(_wait_for(lambda: received == ["line1", "line2", "line3"]),
-                                "should emit all three lines in order")
+                self.assertTrue(_wait_for(lambda: len(received) >= 3))
+                finalized, _ = _feed_all_to_vt(received)
+                self.assertEqual(finalized, ["line1", "line2", "line3"])
             finally:
                 tailer.stop()
 
@@ -69,14 +87,13 @@ class TestLogTailerEmits(unittest.TestCase):
             try:
                 with open(path, "a", encoding="utf-8") as f:
                     f.write("partial")
-                # 等一会,确认 partial 不被 emit
                 time.sleep(0.15)
                 self.assertEqual(received, [])
-                # 完成这一行
                 with open(path, "a", encoding="utf-8") as f:
                     f.write("-rest\n")
-                self.assertTrue(_wait_for(lambda: received == ["partial-rest"]),
-                                "partial line should be buffered until newline")
+                self.assertTrue(_wait_for(lambda: received))
+                finalized, _ = _feed_all_to_vt(received)
+                self.assertEqual(finalized, ["partial-rest"])
             finally:
                 tailer.stop()
 
@@ -88,9 +105,9 @@ class TestLogTailerEmits(unittest.TestCase):
             try:
                 with open(path, "a", encoding="utf-8") as f:
                     f.write("[INFO] 中文日志\n[INFO] emoji 🎉\n")
-                self.assertTrue(_wait_for(lambda: len(received) == 2))
-                self.assertEqual(received[0], "[INFO] 中文日志")
-                self.assertEqual(received[1], "[INFO] emoji 🎉")
+                self.assertTrue(_wait_for(lambda: len(received) >= 2))
+                finalized, _ = _feed_all_to_vt(received)
+                self.assertEqual(finalized, ["[INFO] 中文日志", "[INFO] emoji 🎉"])
             finally:
                 tailer.stop()
 
@@ -146,13 +163,14 @@ class TestLogTailerResilience(unittest.TestCase):
         tailer = LogTailer(path, on_line=received.append, start_from_beginning=True)
         tailer.start()
         try:
-            # 文件尚未创建,稍等后创建
             time.sleep(0.1)
             self.assertEqual(received, [])
             with open(path, "a", encoding="utf-8") as f:
                 f.write("created\n")
-            self.assertTrue(_wait_for(lambda: received == ["created"], timeout=3.0),
-                            "should emit line after file appears")
+            self.assertTrue(_wait_for(lambda: received, timeout=3.0),
+                            "should emit segment after file appears")
+            finalized, _ = _feed_all_to_vt(received)
+            self.assertEqual(finalized, ["created"])
         finally:
             tailer.stop()
 
@@ -163,12 +181,17 @@ class TestLogTailerResilience(unittest.TestCase):
             tailer = LogTailer(path, on_line=received.append, start_from_beginning=True)
             tailer.start()
             try:
-                self.assertTrue(_wait_for(lambda: received == ["first line here"]))
-                # 模拟日志被 truncate 后重写更短的内容
+                self.assertTrue(_wait_for(lambda: received))
+                # snapshot 当前的 received,避免后续 truncate 内容混入这次断言
+                finalized_before, _ = _feed_all_to_vt(list(received))
+                self.assertEqual(finalized_before, ["first line here"])
                 with open(path, "w", encoding="utf-8") as f:
                     f.write("rotated\n")
-                self.assertTrue(_wait_for(lambda: received == ["first line here", "rotated"], timeout=3.0),
+                # 等 received 增长(truncate 后重读新内容)
+                self.assertTrue(_wait_for(lambda: len(_feed_all_to_vt(received)[0]) >= 2, timeout=3.0),
                                 "should detect truncation and re-read")
+                finalized, _ = _feed_all_to_vt(received)
+                self.assertEqual(finalized, ["first line here", "rotated"])
             finally:
                 tailer.stop()
 
@@ -187,15 +210,17 @@ class TestLogTailerResilience(unittest.TestCase):
         tailer = LogTailer(path, on_line=received.append, start_from_beginning=True)
         tailer.start()
         try:
-            self.assertTrue(_wait_for(lambda: received == ["old"]))
-            # 模拟 ComfyUI-Manager 轮转: rename 旧文件 + 新建同名文件
-            # tailer 仍持有旧 fd,但用共享模式打开,所以 rename 能成功
+            self.assertTrue(_wait_for(lambda: received))
+            finalized_before, _ = _feed_all_to_vt(list(received))
+            self.assertEqual(finalized_before, ["old"])
             prev = tmpdir / "test.prev.log"
             _os.rename(path, prev)
             with open(path, "w", encoding="utf-8") as f:
                 f.write("new after rotate\n")
-            self.assertTrue(_wait_for(lambda: received == ["old", "new after rotate"], timeout=3.0),
+            self.assertTrue(_wait_for(lambda: len(_feed_all_to_vt(received)[0]) >= 2, timeout=3.0),
                             "should detect rename+recreate and re-read new file")
+            finalized, _ = _feed_all_to_vt(received)
+            self.assertEqual(finalized, ["old", "new after rotate"])
         finally:
             tailer.stop()
 
@@ -225,15 +250,24 @@ def _tmpfile(content):
     return _ctx()
 
 
-class TestLogTailerCarriageReturnSplitting(unittest.TestCase):
-    """LogTailer \r 分段:tqdm 重定向到文件时整段进度压在一条物理行里,
-    必须按 \r 切段成多行才能让 ProgressCollapseFilter 实时刷出。
+class TestLogTailerBoundarySplitting(unittest.TestCase):
+    """LogTailer 按 \\r 或 \\n 任一边界 emit"段"(保留边界字符)。
+
+    这是给 VirtualTerminal 用的:消费方按边界字符解释覆盖(\\r)/换行(\\n)语义。
+    tqdm 重定向到文件时,进度帧之间用 \\r 分隔,只有最后一个帧之后才 \\n;
+    LogTailer 现在按 \\r 也切(不只按 \\n),所以 tqdm 跑几分钟时每个 \\r 帧
+    到达就 emit,VirtualTerminal 把它覆盖成最新帧作 active_line,用户实时看到进度。
+
+    断言用 VirtualTerminal 做最终语义验证(跨平台、跨具体切法都成立)。
     """
 
-    def test_single_line_with_multiple_cr_emits_each_segment(self):
-        """一条物理行里有 3 段 \r 分隔的内容 -> emit 3 条带 \r 的行。"""
-        # 用 str 写盘,_tmpfile 接受 str;转义后的 \r 物理写入就是真 \r
-        raw = "\r  0%|          | 0/8 [00:00<?, ?it/s]\r 12%|█| 1/8 [00:03<00:26, 3.77s/it]\r100%|" + "█" * 10 + "| 8/8 [00:06<00:00, 1.21it/s]\r\n"
+    def test_tqdm_multi_frame_progress_emits_incrementally(self):
+        """tqdm 多帧进度(\\r 分隔,末尾 \\n)实时 emit;最终只留最后一帧。"""
+        raw = (
+            "\r  0%|          | 0/8 [00:00<?, ?it/s]"
+            "\r 12%|█| 1/8 [00:03<00:26, 3.77s/it]"
+            "\r100%|" + "█" * 10 + "| 8/8 [00:06<00:00, 1.21it/s]\r\n"
+        )
         with _tmpfile("") as path:
             received = []
             tailer = LogTailer(path, on_line=received.append, start_from_beginning=True)
@@ -241,22 +275,18 @@ class TestLogTailerCarriageReturnSplitting(unittest.TestCase):
             try:
                 with open(path, "a", encoding="utf-8") as f:
                     f.write(raw)
-                self.assertTrue(_wait_for(lambda: len(received) == 3, timeout=3.0),
-                                f"should emit 3 \r-separated segments, got {received!r}")
-                # 每段都保留 \r 标记,给 Filter 识别
-                for line in received:
-                    self.assertTrue(line.endswith("\r"),
-                                    f"segment missing \r marker: {line!r}")
-                # 内容分别对应 0%、12%、100%
-                self.assertIn("0%", received[0])
-                self.assertIn("12%", received[1])
-                self.assertIn("100%", received[2])
-                self.assertIn("8/8", received[2])
+                # 至少 emit 多个段(每个 \r / \n 边界都 emit),证明实时性
+                self.assertTrue(_wait_for(lambda: len(received) >= 3, timeout=3.0),
+                                f"should emit multiple segments for tqdm frames, got {received!r}")
+                # 喂给 VT:最终 finalized 应只含 100% 帧(中间 0%/12% 被 \r 覆盖)
+                finalized, active = _feed_all_to_vt(received)
+                self.assertEqual(finalized, ["100%|" + "█" * 10 + "| 8/8 [00:06<00:00, 1.21it/s]"])
+                self.assertEqual(active, "")
             finally:
                 tailer.stop()
 
     def test_cr_terminated_progress_emits_before_newline(self):
-        """tqdm 只写回车刷新时也应实时 emit，不能等任务结束后的换行。"""
+        """tqdm 只写回车刷新(没换行)时也实时 emit,VirtualTerminal 据此更新 active_line。"""
         with _tmpfile("") as path:
             received = []
             tailer = LogTailer(path, on_line=received.append, start_from_beginning=True)
@@ -265,34 +295,39 @@ class TestLogTailerCarriageReturnSplitting(unittest.TestCase):
                 with open(path, "ab", buffering=0) as f:
                     f.write(b" 15%|###| 3/20 [00:07<00:37, 2.20s/it]\r")
                 self.assertTrue(
-                    _wait_for(lambda: len(received) == 1, timeout=1.0),
-                    f"progress should emit before newline, got {received!r}",
+                    _wait_for(lambda: received, timeout=1.0),
+                    f"progress segment should emit before newline, got {received!r}",
                 )
-                self.assertTrue(received[0].endswith("\r"))
-                self.assertIn("3/20", received[0])
+                # 喂给 VT:没有 \n,所以不 finalize,active_line 是该进度帧
+                finalized, active = _feed_all_to_vt(received)
+                self.assertEqual(finalized, [])
+                self.assertIn("3/20", active)
             finally:
                 tailer.stop()
 
-    def test_empty_segments_between_cr_are_skipped(self):
-        """连续 \r 之间的空段(tqdm 写新值前先 \r 把光标归位)直接丢弃。"""
-        raw = "\r\r\r  only_one  \r\r\n"
+    def test_consecutive_cr_emits_incrementally(self):
+        """连续 \\r(tqdm 写新值前先 \\r 归位)每个都 emit;VT 覆盖后只留最终内容。
+
+        不再像旧实现那样"丢弃空段"——边界字符都 emit,VT 自己处理覆盖语义
+        (纯 \\r 段覆盖成空 active_line,不产生噪音)。
+        """
         with _tmpfile("") as path:
             received = []
             tailer = LogTailer(path, on_line=received.append, start_from_beginning=True)
             tailer.start()
             try:
                 with open(path, "a", encoding="utf-8") as f:
-                    f.write(raw)
-                self.assertTrue(_wait_for(lambda: len(received) >= 1, timeout=2.0))
-                # 只有 1 段非空内容,不应有 7 段(3 leading + 中间 1 + 3 trailing)
-                non_empty = [r for r in received if r.strip(" \r")]
-                self.assertEqual(len(non_empty), 1, f"got segments: {received!r}")
-                self.assertIn("only_one", non_empty[0])
+                    f.write("\r\r\ronly_one\r\r\n")
+                self.assertTrue(_wait_for(lambda: received, timeout=2.0))
+                # 喂给 VT:最终只 finalize 一行 "only_one",active 为空
+                finalized, active = _feed_all_to_vt(received)
+                self.assertEqual(finalized, ["only_one"])
+                self.assertEqual(active, "")
             finally:
                 tailer.stop()
 
-    def test_normal_line_without_cr_passes_through_unchanged(self):
-        """不含 \r 的普通行透传,不加 \r 后缀(Filter 不当进度处理)。"""
+    def test_normal_line_passes_through(self):
+        """不含 \\r 的普通行经 VT 解释后正常 finalize 成一行。"""
         with _tmpfile("") as path:
             received = []
             tailer = LogTailer(path, on_line=received.append, start_from_beginning=True)
@@ -300,9 +335,9 @@ class TestLogTailerCarriageReturnSplitting(unittest.TestCase):
             try:
                 with open(path, "a", encoding="utf-8") as f:
                     f.write("[INFO] normal line\n")
-                self.assertTrue(_wait_for(lambda: received == ["[INFO] normal line"], timeout=2.0))
-                self.assertEqual(received[0], "[INFO] normal line")
-                self.assertFalse(received[0].endswith("\r"))
+                self.assertTrue(_wait_for(lambda: received, timeout=2.0))
+                finalized, _ = _feed_all_to_vt(received)
+                self.assertEqual(finalized, ["[INFO] normal line"])
             finally:
                 tailer.stop()
 

@@ -47,8 +47,10 @@ class TestLogViewerPageCreation(_Fixture):
         self.assertTrue(hasattr(page, "text_edit"))
         self.assertIsInstance(page.text_edit, QtWidgets.QTextEdit)
         self.assertTrue(page.text_edit.isReadOnly())
-        self.assertTrue(hasattr(page, "collapse_checkbox"))
-        self.assertIsInstance(page.collapse_checkbox, QtWidgets.QCheckBox)
+        # "折叠连续进度" checkbox 已移除 (VirtualTerminal 的 \r 覆盖语义天然折叠进度)
+        self.assertFalse(hasattr(page, "collapse_checkbox"))
+        self.assertTrue(hasattr(page, "wrap_checkbox"))
+        self.assertIsInstance(page.wrap_checkbox, QtWidgets.QCheckBox)
         self.assertTrue(hasattr(page, "pause_btn"))
         self.assertTrue(hasattr(page, "clear_btn"))
         self.assertTrue(hasattr(page, "save_btn"))
@@ -179,7 +181,13 @@ class TestLogViewerPageTailing(_Fixture):
             "切换环境后日志行重复了: " + repr(page.text_edit.toPlainText()),
         )
 
-    def test_pause_stops_appending(self):
+    def test_pause_freezes_view_then_resume_shows_backlog(self):
+        """暂停时画面冻结(新行不立即显示),但后台累积;继续后补显示暂停期间的所有新行。
+
+        新语义(类似 ComfyUI 前端 xterm 的暂停):画面冻结但日志不丢。
+        tailer 线程不受暂停影响,继续读文件;UI 把暂停期间的段累积到 _pending,
+        继续时一次性 feed 给 VirtualTerminal,补显示到末尾。
+        """
         d = self._tmpdir()
         log = d / "test.log"
         log.write_text("first\n", encoding="utf-8")
@@ -191,18 +199,106 @@ class TestLogViewerPageTailing(_Fixture):
         # 暂停
         page.pause_btn.click()
         self.app.processEvents()
-        # 暂停时新增的行不应被 append
+        # 暂停期间写新行 —— 画面应冻结(不立即显示)
         with open(log, "a", encoding="utf-8") as f:
-            f.write("ignored_line\n")
+            f.write("paused_line\n")
         _process_events_for(0.5)
-        self.assertNotIn("ignored_line", page.text_edit.toPlainText())
-        # 恢复
+        self.assertNotIn("paused_line", page.text_edit.toPlainText(),
+                         "暂停期间画面应冻结,新行不立即显示")
+        # 继续 —— 暂停期间的 paused_line 应补显示
         page.pause_btn.click()
-        self.app.processEvents()
+        _process_events_for(0.5)
+        self.assertIn("paused_line", page.text_edit.toPlainText(),
+                      "继续后应补显示暂停期间的行")
+        # 继续后再写新行,正常显示
         with open(log, "a", encoding="utf-8") as f:
             f.write("after_resume\n")
         _process_events_for(1.0)
         self.assertIn("after_resume", page.text_edit.toPlainText())
+
+    def test_pause_accumulates_and_resume_feeds_to_vt(self):
+        """回归(单元级):暂停期间多行累积,继续后按顺序补显示,\\r/\\n 语义保持。
+
+        直接调 _on_line_main + _on_pause_toggled,不依赖真实文件 tail 时序。
+        """
+        page = LogViewerPage(theme_manager=self.tm)
+        page._on_line_main("line1\n")
+        page._flush_batch()
+        # 暂停
+        page._on_pause_toggled(True)
+        # 暂停期间来行(含进度条场景:\r 覆盖)
+        page._on_line_main("progress: 50%\r")
+        page._on_line_main("progress: 100%\n")
+        page._on_line_main("line_after\n")
+        page._flush_batch()
+        # 画面冻结在 line1
+        self.assertEqual(page.text_edit.toPlainText(), "line1\n")
+        # 继续
+        page._on_pause_toggled(False)
+        page._flush_batch()
+        # 暂停期间的行补显示;进度条 \r 覆盖语义保持(只留 100%)
+        text = page.text_edit.toPlainText()
+        self.assertIn("line1", text)
+        self.assertIn("progress: 100%", text)
+        self.assertNotIn("progress: 50%", text)  # 被 \r 覆盖
+        self.assertIn("line_after", text)
+        # 顺序正确
+        self.assertLess(text.index("line1"), text.index("progress: 100%"))
+        self.assertLess(text.index("progress: 100%"), text.index("line_after"))
+        # pending 清空
+        self.assertEqual(page._pending_while_paused, [])
+
+    def test_clear_drops_pending_while_paused(self):
+        """暂停期间点清空,累积的 pending 也清掉(继续后不补显示已清空的内容)。"""
+        page = LogViewerPage(theme_manager=self.tm)
+        page._on_line_main("before\n")
+        page._flush_batch()
+        page._on_pause_toggled(True)
+        page._on_line_main("paused\n")
+        page._flush_batch()
+        self.assertEqual(len(page._pending_while_paused), 1)
+        # 清空(暂停状态下)
+        page._on_clear_clicked()
+        self.assertEqual(page._pending_while_paused, [])
+        self.assertEqual(page.text_edit.toPlainText(), "")
+        # 继续 —— paused 不补显示(已被清空)
+        page._on_pause_toggled(False)
+        page._flush_batch()
+        self.assertNotIn("paused", page.text_edit.toPlainText())
+
+    def test_pause_pending_has_cap_drops_oldest(self):
+        """暂停累积有 cap:超限后丢最旧的,保留最近(_pending_while_paused 不无限增长)。
+
+        防 OOM:用户暂停几小时 + 高频 tqdm 日志时,pending 列表不能无限增长。
+        超出 _PAUSED_PENDING_CAP 后丢最旧的,继续后只补显示最近的 cap 条。
+        """
+        page = LogViewerPage(theme_manager=self.tm)
+        # 用小 cap 方便测试(临时改类属性)
+        original_cap = page._PAUSED_PENDING_CAP
+        page._PAUSED_PENDING_CAP = 10
+        try:
+            page._on_pause_toggled(True)
+            # 喂 20 个段,超出 cap=10
+            for i in range(20):
+                page._on_line_main(f"line{i}\n")
+            # pending 应被 cap 到 10,且保留最近的(line10..line19)
+            self.assertEqual(len(page._pending_while_paused), 10,
+                             f"pending 应被 cap 到 10, 实际 {len(page._pending_while_paused)}")
+            self.assertIn("line10", page._pending_while_paused[0])
+            self.assertIn("line19", page._pending_while_paused[-1])
+            # 最旧的 line0..line9 应被丢弃
+            self.assertNotIn("line0\n", page._pending_while_paused)
+            self.assertNotIn("line9\n", page._pending_while_paused)
+            # 继续后补显示最近的 cap 条
+            page._on_pause_toggled(False)
+            page._flush_batch()
+            text = page.text_edit.toPlainText()
+            self.assertIn("line19", text)
+            self.assertIn("line10", text)
+            self.assertNotIn("line0", text)
+            self.assertNotIn("line9", text)
+        finally:
+            page._PAUSED_PENDING_CAP = original_cap
 
     def test_clear_button_empties_view(self):
         d = self._tmpdir()
@@ -218,7 +314,14 @@ class TestLogViewerPageTailing(_Fixture):
         self.app.processEvents()
         self.assertEqual(page.text_edit.toPlainText(), "")
 
-    def test_collapse_checkbox_toggles_collapse(self):
+    def test_progress_frames_collapse_to_latest(self):
+        """VT100 行模型天然折叠 tqdm 多帧进度:只留最终帧,不需 checkbox。
+
+        替代旧的 test_collapse_checkbox_toggles_collapse(checkbox 已移除)。
+        VirtualTerminal 的 \\r 覆盖语义自动把多帧进度覆盖成最后一帧。
+        注意纯覆盖语义:最后的 done (不带 \\r) 会覆盖 Loading: 40%。
+        所以这里用纯 tqdm 序列(末尾是进度帧 + \\n)验证折叠。
+        """
         d = self._tmpdir()
         log = d / "test.log"
         log.write_text("", encoding="utf-8")
@@ -226,30 +329,16 @@ class TestLogViewerPageTailing(_Fixture):
         page.set_log_path(log)
         page.start_tailing(start_from_beginning=True)
         self.addCleanup(page.stop_tailing)
-        # 默认折叠开启
-        self.assertTrue(page.collapse_checkbox.isChecked())
-        with open(log, "a", encoding="utf-8") as f:
-            for pct in ("10", "20", "30", "40"):
-                f.write(f"Loading: {pct}%\r")
-            f.write("done\n")
+        with open(log, "ab", buffering=0) as f:
+            for pct in (10, 20, 30, 40):
+                f.write(f"Loading: {pct}%\r".encode())
+            f.write(b"Loading: 100%\n")  # 末尾进度帧以 \n 终结
         _process_events_for(0.8)
-        text_collapsed = page.text_edit.toPlainText()
-        self.assertIn("done", text_collapsed)
-        self.assertIn("Loading: 40%", text_collapsed)
-        self.assertNotIn("Loading: 10%", text_collapsed)
-        # 关掉折叠,清空再写
-        page.clear_btn.click()
-        self.app.processEvents()
-        page.collapse_checkbox.setChecked(False)
-        self.app.processEvents()
-        with open(log, "a", encoding="utf-8") as f:
-            for pct in ("50", "60", "70"):
-                f.write(f"Loading: {pct}%\r\n")
-            f.write("finished\n")
-        _process_events_for(0.8)
-        text_raw = page.text_edit.toPlainText()
-        self.assertIn("finished", text_raw)
-        self.assertNotIn("updates", text_raw)
+        text = page.text_edit.toPlainText()
+        # 只留最终帧 100%,早期 10%/20%/30%/40% 被 \r 覆盖
+        self.assertIn("Loading: 100%", text)
+        self.assertNotIn("Loading: 10%", text)
+        self.assertNotIn("Loading: 40%", text)
 
 
 class TestLogViewerPageNewLogSignal(_Fixture):
@@ -400,18 +489,23 @@ class TestLogViewerPageWrap(_Fixture):
 
 
 class TestVirtualTerminalOverwrite(_Fixture):
-    """照搬 ComfyUI 前端 console 的语义:\r 覆盖当前行,\n 才换行。
+    """照搬 ComfyUI 前端 console 的语义:\\r 覆盖当前行,\\n 才换行。
 
     用户原话:"为什么我们不照抄一下 ComfyUI 前端的逻辑呢 页面上的 console 里
-    运行的很好啊"。ComfyUI web console 用 VT100 风格的虚拟终端:\r 直接覆盖
-    当前行,只有 \n 才把行 finalize 然后开新行。
+    运行的很好啊"。ComfyUI web console 用 xterm.js(VT100 终端):\\r 直接覆盖
+    当前行,只有 \\n 才把行 finalize 然后开新行。我们用 VirtualTerminal 复刻这套语义。
+
+    关键差异(对比旧 prefix/progress 双缓冲实现):
+    - 旧实现试图"保留节点状态行 prefix",导致 #163 [...] 被错误粘连进度条(bug 根因)。
+    - 新实现纯覆盖:进度帧覆盖当前行,节点状态行如果同处一行会被覆盖 —— 这正是
+      xterm 的真实行为,也是用户期望的"和前端一致"。
     """
 
     def test_cr_segments_overwrite_the_same_line(self):
-        """连续 \r 段只保留最后一个(tqdm 多帧刷新场景)。
+        """连续 \\r 段只保留最后一个(tqdm 多帧刷新场景)。
 
-        文件内容:tqdm 把 3 个百分比帧压成一条物理行 \r 分隔,末尾 \n。
-        期望:视图里只看到最新进度(39%),前面的 0%/12% 被 \r 覆盖。
+        文件内容:tqdm 把 3 个百分比帧压成一条物理行 \\r 分隔,末尾 \\n。
+        期望:视图里只看到最新进度(39%),前面的 0%/12% 被 \\r 覆盖。
         """
         d = self._tmpdir()
         log = d / "test.log"
@@ -420,16 +514,14 @@ class TestVirtualTerminalOverwrite(_Fixture):
         page.set_log_path(log)
         page.start_tailing(start_from_beginning=True)
         self.addCleanup(page.stop_tailing)
-        # 单条物理行,3 个 \r 分隔的进度帧 + \n
         bar = chr(0x2588)
         raw = (
             b"  0%|          | 0/8 [00:00<?, ?it/s]"
             b"\r 12%|" + bar.encode("utf-8") + b"| 1/8 [00:03<00:26, 3.77s/it]"
-            b"\r 39%|" + (bar * 4).encode("utf-8") + b"| 4/8 [00:09<00:15, 2.50s/it]\n",
+            b"\r 39%|" + (bar * 4).encode("utf-8") + b"| 4/8 [00:09<00:15, 2.50s/it]\n"
         )
         with open(log, "ab", buffering=0) as f:
-            for chunk in raw:
-                f.write(chunk)
+            f.write(raw)
         deadline = time.monotonic() + 3.0
         while time.monotonic() < deadline:
             self.app.processEvents()
@@ -441,11 +533,12 @@ class TestVirtualTerminalOverwrite(_Fixture):
             time.sleep(0.02)
         self.fail("39% never appeared: " + repr(page.text_edit.toPlainText()))
 
-    def test_node_id_line_then_progress_keeps_prefix(self):
-        """ComfyUI 节点状态行("#335 [PrimitiveFloat]: 0.00s - vram 0b")后跟 \r +
+    def test_node_id_line_then_progress_overwrites_node_line(self):
+        """节点状态行("#335 [...]")后跟 \\r + tqdm 进度帧时,进度帧覆盖节点状态行。
 
-        tqdm 进度帧时,prefix 和 progress 同行显示 —— 跟 ComfyUI 前端 console 一致。
-        用户实测场景:launcher 日志页里节点状态行不能被进度帧覆盖掉。
+        这是纯覆盖语义(VT100/xterm 行为):\\r 回行首,后续字符整行重写。
+        旧实现试图保留节点行作为 prefix,反而引入了 #163 粘连进度条的 bug。
+        新实现贴前端:进度覆盖节点行,只显示最终进度帧。
         """
         d = self._tmpdir()
         log = d / "test.log"
@@ -454,10 +547,9 @@ class TestVirtualTerminalOverwrite(_Fixture):
         page.set_log_path(log)
         page.start_tailing(start_from_beginning=True)
         self.addCleanup(page.stop_tailing)
-        # 一条物理行:节点状态行 + \r + tqdm 多帧 + \n
+        # 一条物理行:节点状态行 + \r + tqdm 帧 + \n
         with open(log, "ab", buffering=0) as f:
             f.write(b'#335 [PrimitiveFloat]: 0.00s - vram 0b')
-            f.write(b"\r  0%|          | 0/81 [00:00<?, ?it/s]")
             f.write(b"\r 37%|" + (chr(0x2588) * 4).encode("utf-8") + b"| 30/81 [00:04<00:07,  6.57it/s]")
             f.write(b"\n")
         deadline = time.monotonic() + 3.0
@@ -465,19 +557,61 @@ class TestVirtualTerminalOverwrite(_Fixture):
             self.app.processEvents()
             text = page.text_edit.toPlainText()
             if "37%" in text:
-                # prefix 必须保留
-                self.assertIn("#335 [PrimitiveFloat]: 0.00s - vram 0b", text)
-                # progress 必须可见
+                # 进度帧覆盖了节点状态行(纯覆盖,贴前端 xterm 行为)
                 self.assertIn("37%", text)
-                self.assertIn("8/8" if False else "30/81", text)
-                # 早期帧(初始的 "  0%|          | 0/81") 已被 \r 覆盖,不应该出现。
-                self.assertNotIn("  0%|", text)
+                self.assertIn("30/81", text)
+                # 节点状态行被覆盖,不应残留
+                self.assertNotIn("#335 [PrimitiveFloat]", text)
+                return
+            time.sleep(0.02)
+        self.fail("never appeared: " + repr(page.text_edit.toPlainText()))
+
+    def test_node_status_on_own_line_not_overwritten(self):
+        """节点状态行如果自己一行(末尾 \\n),不被后续进度条覆盖 —— 这才是真实场景。
+
+        用户报告的 bug 根因:节点行 `#163 [...]` 是被 \\n 正常 finalize 的(独立行),
+        旧实现的 prefix 启发式却错误地把它当成下一段进度的 prefix,导致粘连。
+        新 VT100 模型下,\\n 终结的行不会被后续覆盖。
+        """
+        d = self._tmpdir()
+        log = d / "test.log"
+        log.write_text("", encoding="utf-8")
+        page = LogViewerPage(theme_manager=self.tm)
+        page.set_log_path(log)
+        page.start_tailing(start_from_beginning=True)
+        self.addCleanup(page.stop_tailing)
+        with open(log, "ab", buffering=0) as f:
+            f.write(b'#163 [UnetLoaderGGUF]: 0.05s - vram 0b\n')   # 独立行,正常 finalize
+            f.write(b"[INFO] loaded completely\n")                   # 独立行
+            f.write(b"\r  0%|          | 0/6\r")                     # tqdm 开始(覆盖 active_line)
+            f.write(b"100%|" + (chr(0x2588) * 10).encode("utf-8") + b"| 6/6 [00:10<00:00, 1.83s/it]\n")
+            f.write(b"#146 [KSampler]: 17.46s - vram 9169015770b\n")
+        deadline = time.monotonic() + 3.0
+        while time.monotonic() < deadline:
+            self.app.processEvents()
+            text = page.text_edit.toPlainText()
+            if "#146 [KSampler]" in text:
+                # 节点状态行独立保留(不被进度条粘连) —— 这是 bug 修复的核心断言
+                self.assertIn("#163 [UnetLoaderGGUF]: 0.05s - vram 0b", text)
+                self.assertIn("[INFO] loaded completely", text)
+                # 进度条只留最终帧,在独立行
+                self.assertIn("100%|", text)
+                self.assertNotIn("0/6", text)
+                # KSampler 行独立
+                self.assertIn("#146 [KSampler]", text)
+                # 关键:节点行和进度条不在同一行(用换行分隔)
+                idx_node = text.index("#163 [UnetLoaderGGUF]")
+                idx_progress = text.index("100%|")
+                # 节点行完整一行(后面紧跟换行,不是直接接进度条)
+                node_line_end = text.index("\n", idx_node)
+                self.assertLess(idx_node, node_line_end)
+                self.assertLess(node_line_end, idx_progress)
                 return
             time.sleep(0.02)
         self.fail("never appeared: " + repr(page.text_edit.toPlainText()))
 
     def test_normal_line_after_progress_finalizes_the_progress_line(self):
-        """\r 覆盖活动行后,下一条普通行到达时把活动行 finalize,然后开新行。""",
+        """\\r 覆盖活动行后,下一条普通行(\\n 终结)把活动行固化,然后开新行。"""
         d = self._tmpdir()
         log = d / "test.log"
         log.write_text("", encoding="utf-8")
@@ -494,19 +628,17 @@ class TestVirtualTerminalOverwrite(_Fixture):
             self.app.processEvents()
             text = page.text_edit.toPlainText()
             if "next normal line" in text:
-                # 活动行被 finalize 成独立行
                 self.assertIn("Loading: 40%", text)
-                # finalize 顺序:进度行 → 普通行
                 self.assertLess(text.index("Loading: 40%"), text.index("next normal line"))
                 return
             time.sleep(0.02)
         self.fail("next normal line never appeared: " + repr(page.text_edit.toPlainText()))
 
-    def test_last_cr_segment_not_duplicated_as_normal_line(self):
-        """最后一段 \r 不再被主 \n loop 重复 emit(tqdm 整段进度末尾的最终 frame)。
+    def test_last_cr_segment_not_duplicated(self):
+        """tqdm 整段进度末尾的最终 frame 只出现一次(不被重复 emit)。
 
-        回归:之前 LogTailer 的最后一段 \r 段会被 \n loop 当普通行再次 emit,
-        导致同样内容在视图里出现两次。这个 fix 让 LogTailer 自己处理。
+        回归:旧 LogTailer 把最后一段 \\r 段当普通行再次 emit,导致重复。
+        新实现按 \\r/\\n 边界 emit,VT 解释覆盖,内容只出现一次。
         """
         d = self._tmpdir()
         log = d / "test.log"
@@ -522,19 +654,17 @@ class TestVirtualTerminalOverwrite(_Fixture):
             self.app.processEvents()
             text = page.text_edit.toPlainText()
             if "39%" in text:
-                # 内容只能出现一次(最终进度作为活动行)
                 self.assertEqual(text.count("8/8"), 1)
                 self.assertEqual(text.count("1.21it/s"), 1)
                 return
             time.sleep(0.02)
         self.fail("never appeared: " + repr(page.text_edit.toPlainText()))
 
-    def test_loading_done_after_progress_does_not_overwrite_progress(self):
-        """test_collapse_checkbox_toggles_collapse 里的 Loading: ...\r done\n 场景。
+    def test_loading_then_done_overwrites_to_done(self):
+        """Loading: 40%\\r done\\n 场景:done 覆盖 Loading: 40%(纯覆盖,贴前端)。
 
-        LogTailer 的 %| 启发式判断最后一段是不是进度 frame:不含 %| 的当作
-        普通行 emit(不覆盖进度)。所以 Loading: 40% 之后跟 done 时,
-        done 不覆盖 Loading: 40%,而是追加在下面。
+        旧实现的 %| 启发式试图"不覆盖进度",新实现纯覆盖:done 整行重写。
+        这与 ComfyUI 前端 xterm 行为一致。
         """
         d = self._tmpdir()
         log = d / "test.log"
@@ -551,7 +681,11 @@ class TestVirtualTerminalOverwrite(_Fixture):
         while time.monotonic() < deadline:
             self.app.processEvents()
             text = page.text_edit.toPlainText()
-            if "done" in text and "Loading: 40%" in text:
+            if "done" in text:
+                # done 覆盖了所有 Loading 帧(纯覆盖)
+                self.assertIn("done", text)
+                self.assertNotIn("Loading: 40%", text)
+                self.assertNotIn("Loading: 10%", text)
                 return
             time.sleep(0.02)
         self.fail("missing: " + repr(page.text_edit.toPlainText()))
@@ -757,8 +891,9 @@ class TestBatchRendering(_Fixture):
         self.assertEqual(page.text_edit.toPlainText(), "")
 
     def test_live_progress_replaces_active_line(self):
+        """进度帧(\\r 边界)实时覆盖 active_line:只留最新帧。"""
         page = LogViewerPage(theme_manager=self.tm)
-        page._on_line_main("  5%|#| 1/20 [00:02<00:38]\r")
+        page._on_line_main("  5%|#| 1/20 [00:02<00:38]\r")  # \r 边界,active_line
         page._flush_batch()
         page._on_line_main(" 15%|###| 3/20 [00:07<00:37]\r")
         page._flush_batch()
@@ -768,6 +903,7 @@ class TestBatchRendering(_Fixture):
         self.assertEqual(text.count("3/20"), 1)
 
     def test_progress_burst_renders_only_latest_value(self):
+        """连续多帧进度 burst:VT 覆盖后只留最终帧。"""
         page = LogViewerPage(theme_manager=self.tm)
         for step in range(1, 6):
             page._on_line_main(f" {step * 5}%|#| {step}/20\r")
@@ -778,15 +914,57 @@ class TestBatchRendering(_Fixture):
         self.assertEqual(text.count("/20"), 1)
 
     def test_normal_line_finalizes_active_progress(self):
+        """进度帧 \\n 终结后固化成独立行,后续普通行另起一行。
+
+        真实字节流:进度帧以 \\n 结束(如 100%|...|\\n),下一条普通行
+        (Prompt executed\\n)是全新一行,不覆盖进度。
+        """
         page = LogViewerPage(theme_manager=self.tm)
-        page._on_line_main(" 15%|###| 3/20 [00:07<00:37]\r")
+        page._on_line_main(" 15%|###| 3/20 [00:07<00:37]\r")  # active_line
+        page._on_line_main("100%|#####| 3/20 [00:07<00:37]\n")  # \n 终结,固化进度
         page._flush_batch()
-        page._on_line_main("Prompt executed")
+        page._on_line_main("Prompt executed\n")  # 全新一行
         page._flush_batch()
         text = page.text_edit.toPlainText()
         self.assertIn("3/20", text)
         self.assertIn("Prompt executed", text)
         self.assertLess(text.index("3/20"), text.index("Prompt executed"))
+
+    def test_finalize_during_active_progress_no_glue(self):
+        """回归:进度条 active 时,普通行 finalize,再继续进度,最后 \\n 结束 ——
+        普通行不能和进度条粘连(用户报告的 #104 [...]b100%|... bug)。
+
+        根因:_flush_batch 删活动行块时用了 BlockUnderCursor,连带删了块分隔符,
+        导致后续 insertText 把新内容拼到前一行末尾(换行丢失)。
+        修法:用 StartOfBlock + EndOfBlock(KeepAnchor) 只删块内文本,保留分隔符。
+        """
+        page = LogViewerPage(theme_manager=self.tm)
+        # 进度条先 active
+        page._on_line_main(" 50%|#####     | 3/6\r")
+        page._flush_batch()
+        # #104 行 finalize(进度条还在 active)
+        page._on_line_main("#104 [VAEDecode]: 0.29s - vram 2302995876b\n")
+        page._flush_batch()
+        # 进度条继续刷新
+        page._on_line_main("100%|##########| 6/6\r")
+        page._flush_batch()
+        # 进度条结束
+        page._on_line_main("\n")
+        page._flush_batch()
+        text = page.text_edit.toPlainText()
+        # #104 行必须独立成行,不能直接接进度条
+        self.assertNotIn("#104 [VAEDecode]: 0.29s - vram 2302995876b100%|", text,
+                         "#104 行和进度条粘连: " + repr(text))
+        self.assertNotIn("2302995876b100%", text,
+                         "进度条粘在 #104 行末尾: " + repr(text))
+        # 进度条最终帧在独立行
+        self.assertIn("100%|##########| 6/6", text)
+        # 整体结构:#104\n + 100%...\n
+        self.assertEqual(
+            text,
+            "#104 [VAEDecode]: 0.29s - vram 2302995876b\n100%|##########| 6/6\n",
+            "结构不符: " + repr(text),
+        )
 
 
 if __name__ == "__main__":
