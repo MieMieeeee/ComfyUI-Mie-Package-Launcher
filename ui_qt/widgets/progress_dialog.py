@@ -76,6 +76,8 @@ class ProgressDialog(FramelessDraggableDialog):
         self.lbl_title = QtWidgets.QLabel(title)
         self.lbl_title.setStyleSheet("font: bold 12pt 'Microsoft YaHei UI';")
         self.lbl_title.setAlignment(QtCore.Qt.AlignCenter)
+        self.lbl_title.setWordWrap(True)
+        self.lbl_title.setMinimumWidth(380)
         inner_layout.addWidget(self.lbl_title)
 
         # 状态文本

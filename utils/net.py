@@ -49,6 +49,31 @@ def describe_git_proxy(app_config) -> str:
         return "通过自定义代理 " + url
     return "通过 " + mode
 
+def describe_webui_proxy_for_mirror(mirror, app_config) -> str:
+    """Mirror-aware one-line label for the webui pull/clone task title.
+
+    pull_webui / clone_webui only apply gh-proxy when the URL contains
+    "github.com" (per 9b6f4d2). For Gitee, the configured proxy
+    mode is irrelevant -- Gitee is direct. So we must NOT say
+    "通过 gh-proxy" when the user picked Gitee, even if they have
+    a gh-proxy config in place.
+
+    Format:
+      mirror=gitee  -> Gitee（直连）
+      mirror=github + mode=none -> GitHub（直连）
+      mirror=github + mode=gh-proxy -> GitHub（通过 <url>）
+      mirror=github + mode=custom -> GitHub（通过自定义代理 <url>）
+    """
+    m = (mirror or "").strip().lower()
+    if m != "github":
+        # Gitee / 自定义 走直连, proxy 配置被忽略.
+        # Empty mirror 默认 Gitee (跟 WEBUI_DEFAULT_MIRROR 一致).
+        label = "Gitee" if m in ("", "gitee") else m
+        return label + "（直连）"
+    # github -- proxy 真的生效, 复用 describe_git_proxy 描述.
+    proxy = describe_git_proxy(app_config)
+    return "GitHub（" + proxy + "）"
+
 
 
 # Mode values used by the launcher UI / config. Keep these in sync with

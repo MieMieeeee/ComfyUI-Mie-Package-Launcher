@@ -46,7 +46,7 @@ from core.webui_launcher_cmd import build_webui_launch_params
 from core.webui_process_manager import WebuiProcessManager
 from core.webui_dependencies import check_webui_dependencies, install_webui_requirements
 from core.webui_installer import clone_webui, pull_webui
-from utils.net import resolve_pypi_index_url, describe_git_proxy
+from utils.net import resolve_pypi_index_url, describe_git_proxy, describe_webui_proxy_for_mirror
 from core.webui_installer import resolve_webui_repo_url, WEBUI_DEFAULT_MIRROR, WEBUI_REPOS
 from ui_qt.widgets.dialog_helper import DialogHelper
 from ui_qt.widgets.buttons import DestructiveButton
@@ -979,8 +979,11 @@ class WebuiPage(BasePage):
 
         # Task title explicitly says which proxy / 直连 + which repo so the
         # progress dialog makes the fetch path obvious from the first second.
-        proxy_desc = describe_git_proxy(getattr(self.app, "config", None))
-        task_title = f"拉取 Comfyui-Workbench-Mie ({proxy_desc})"
+        # Mirror-aware: Gitee 永远直连 (gh-proxy 不适用), GitHub 才走用户配置的代理.
+        # 之前只用 describe_git_proxy, 即使用户切到 Gitee 仍显示 通过 gh-proxy ", 误导.
+        _mirror_name = info.get("download_mirror") or WEBUI_DEFAULT_MIRROR
+        proxy_desc = describe_webui_proxy_for_mirror(_mirror_name, getattr(self.app, "config", None))
+        task_title = f"拉取 Comfyui-Workbench-Mie ({_mirror_name}, {proxy_desc})"
         self._run_with_progress(task_title, runner, on_done)
 
     @QtCore.pyqtSlot(bool, bool, str)
@@ -1371,7 +1374,7 @@ class WebuiPage(BasePage):
         # 和走哪条代理 (与更新工作台一致; 用户在弹窗打开第一秒就知道走了哪条路).
         dl_repo_url = info.get("download_url") or "https://github.com/MieMieeeee/Comfyui-Workbench-Mie.git"
         dl_repo_short = (dl_repo_url.rstrip("/").rsplit("/", 1)[-1].removesuffix(".git") or "WebUI")
-        dl_proxy_desc = describe_git_proxy(getattr(self.app, "config", None))
+        dl_proxy_desc = describe_webui_proxy_for_mirror(dl_mirror_name, getattr(self.app, "config", None))
         dl_mirror_name = info.get("download_mirror") or WEBUI_DEFAULT_MIRROR
         dl_task_title = f"下载 {dl_repo_short} (镜像: {dl_mirror_name}, {dl_proxy_desc})"
         self._run_with_progress(dl_task_title, runner, on_done)

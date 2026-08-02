@@ -142,3 +142,49 @@ class TestAuditProgressText(unittest.TestCase):
         self.assertNotIn('registry.register("\u68c0\u67e5\u66f4\u65b0")',
                           src,
                           "qt_app.py: 旧的 'registry.register(\"检查更新\")' 已被替代")
+
+
+class TestDescribeWebuiProxyForMirror(unittest.TestCase):
+    """Mirror-aware proxy label for webui pull/clone task title.
+
+    Regression: 用户切到 Gitee 但 task title 仍写 通过 gh-proxy,
+
+    因为 describe_git_proxy 不感知 mirror, 而 gh-proxy 只对 github.com 生效.
+    """
+    def test_gitee_ignores_proxy_config(self):
+        from utils.net import describe_webui_proxy_for_mirror
+        cfg = {"proxy_settings": {"git_proxy_mode": "gh-proxy", "git_proxy_url": "https://gh-proxy.com/"}}
+        s = describe_webui_proxy_for_mirror("gitee", cfg)
+        self.assertIn("Gitee", s)
+        self.assertIn("（直连）", s)
+        self.assertNotIn("gh-proxy", s.lower())
+
+    def test_github_none_returns_direct(self):
+        from utils.net import describe_webui_proxy_for_mirror
+        cfg = {"proxy_settings": {"git_proxy_mode": "none"}}
+        s = describe_webui_proxy_for_mirror("github", cfg)
+        self.assertIn("GitHub", s)
+        # github + mode=none: describe_git_proxy returns zhilian github.com (raw direct substring).
+        self.assertIn("直连", s)  # zhilian substring
+
+    def test_github_ghproxy_mentions_url(self):
+        from utils.net import describe_webui_proxy_for_mirror
+        cfg = {"proxy_settings": {"git_proxy_mode": "gh-proxy", "git_proxy_url": "https://gh-proxy.com/"}}
+        s = describe_webui_proxy_for_mirror("github", cfg)
+        self.assertIn("GitHub", s)
+        self.assertIn("gh-proxy.com", s)
+        self.assertNotIn("gitee", s.lower())
+
+    def test_github_custom_proxy(self):
+        from utils.net import describe_webui_proxy_for_mirror
+        cfg = {"proxy_settings": {"git_proxy_mode": "custom", "git_proxy_url": "https://my-proxy.example/"}}
+        s = describe_webui_proxy_for_mirror("github", cfg)
+        self.assertIn("GitHub", s)
+        self.assertIn("my-proxy.example", s)
+
+    def test_empty_mirror_defaults_to_gitee_direct(self):
+        from utils.net import describe_webui_proxy_for_mirror
+        cfg = {"proxy_settings": {"git_proxy_mode": "gh-proxy"}}
+        s = describe_webui_proxy_for_mirror("", cfg)
+        self.assertIn("Gitee", s)
+        self.assertIn("（直连）", s)
