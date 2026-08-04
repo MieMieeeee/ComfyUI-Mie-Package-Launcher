@@ -1246,10 +1246,13 @@ class PyQtLauncher(QtWidgets.QMainWindow, process_events.ProcessCallback):
         # DPI 缩放：在构建任何控件之前就算好 scale，并提供 _setup_ui 内可用的
         # _sp/_st helper（与稍后创建的 ThemeManager 共享同一个 self._scale）。
         # 这样 _setup_ui 里的 setFixedHeight/setMinimumHeight 等也能走 token。
+        # 同时定义局部 _sp/_st 别名，供本方法体内（含内联 f-string）裸调用。
         self._scale = self._compute_current_scale()
         _scale = self._scale  # 闭包捕获，避免每个内联 helper 都查 self
         self._sp = lambda base: max(1, int(round(base * _scale)))  # scaled px
         self._st = lambda base: max(6, int(round(base * _scale)))  # scaled pt
+        _sp = self._sp  # 局部别名（_setup_ui 体内裸调用用）
+        _st = self._st
 
         # Theme setup
         theme_value = (
@@ -1525,6 +1528,8 @@ class PyQtLauncher(QtWidgets.QMainWindow, process_events.ProcessCallback):
 
             # Update nav button style
             if hasattr(self, "_nav_buttons"):
+                # nav_style 是 .format() 模板（非 f-string），缩放字号需预算后作为 kwarg 传入。
+                nav_font_pt = _pt(11)
                 # 选中态：半透明紫底 + 紫字 + 左侧 4px 紫色指示条（替代原白底黑字，呼应品牌紫）。
                 # border-left 在 1px border 之后再设，覆盖左边为 4px 粗指示条。
                 nav_style = """QPushButton {{
@@ -1534,7 +1539,7 @@ class PyQtLauncher(QtWidgets.QMainWindow, process_events.ProcessCallback):
                         border-radius: 12px;
                         padding: 0px 15px;
                         text-align: left;
-                        font: {_pt(11)}pt "Microsoft YaHei UI";
+                        font: {nav_font_pt}pt "Microsoft YaHei UI";
                         margin: 0px 0px;
                     }}
                     QPushButton:hover {{
@@ -1559,6 +1564,7 @@ class PyQtLauncher(QtWidgets.QMainWindow, process_events.ProcessCallback):
                             checked_text=c.get("btn_primary_hover"),
                             checked_border="rgba(127, 86, 217, 0.3)",
                             checked_accent=c.get("btn_primary_bg"),
+                            nav_font_pt=nav_font_pt,
                         )
                     else:
                         qss = nav_style.format(
@@ -1569,6 +1575,7 @@ class PyQtLauncher(QtWidgets.QMainWindow, process_events.ProcessCallback):
                             checked_text=c.get("btn_primary_pressed"),
                             checked_border="rgba(127, 86, 217, 0.3)",
                             checked_accent=c.get("btn_primary_bg"),
+                            nav_font_pt=nav_font_pt,
                         )
                 else:
                     if dark:
@@ -1580,6 +1587,7 @@ class PyQtLauncher(QtWidgets.QMainWindow, process_events.ProcessCallback):
                             checked_text="#9E77ED",
                             checked_border="rgba(127, 86, 217, 0.3)",
                             checked_accent="#7F56D9",
+                            nav_font_pt=nav_font_pt,
                         )
                     else:
                         qss = nav_style.format(
@@ -1590,6 +1598,7 @@ class PyQtLauncher(QtWidgets.QMainWindow, process_events.ProcessCallback):
                             checked_text="#53389E",
                             checked_border="rgba(127, 86, 217, 0.3)",
                             checked_accent="#7F56D9",
+                            nav_font_pt=nav_font_pt,
                         )
                 for b in self._nav_buttons:
                     b.setStyleSheet(qss)
@@ -2000,9 +2009,9 @@ class PyQtLauncher(QtWidgets.QMainWindow, process_events.ProcessCallback):
             background: qlineargradient(x1:0, y1:0, x2:1, y2:1, stop:0 {primary_bg}, stop:1 {primary_hover});
             color: #FFFFFF;
             border: none;
-            border-radius: 12px;
-            font: bold {_pt(10)}pt "Microsoft YaHei UI";
-            padding: 8px 16px;
+            border-radius: {self._sp(12)}px;
+            font: bold {self._st(10)}pt "Microsoft YaHei UI";
+            padding: {self._sp(8)}px {self._sp(16)}px;
         }}
         QPushButton:hover {{
             background: qlineargradient(x1:0, y1:0, x2:1, y2:1, stop:0 #6941C6, stop:1 {primary_bg});

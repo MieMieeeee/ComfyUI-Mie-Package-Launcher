@@ -282,3 +282,109 @@ def test_dpi_scaling_subprocess_smoke(dpi):
         f"Smoke script did not print SMOKE_OK:\n{result.stdout}\n{result.stderr}"
     )
 
+
+# === Full PyQtLauncher construction E2E ===
+# This is the test that catches the class of bug that broke the GUI launch
+# (NameError from a _pt/_px token referenced outside its defining scope, or a
+# .format() template accidentally containing a {_pt(N)} placeholder). It builds
+# the REAL main window + exercises theme switching + scale changes, which walks
+# every setStyleSheet / .format() call site in qt_app._setup_ui and _apply_theme.
+#
+# Runs in a subprocess so a crash doesn't take down the pytest process. Uses the
+# same Python that runs pytest (sys.executable) — in the dev .venv this is the
+# interpreter that can actually build PyQtLauncher.
+
+_LAUNCHER_BUILD_SCRIPT = """
+import os, sys, json
+os.environ.setdefault('QT_QPA_PLATFORM', 'offscreen')
+# Seed an isolated config so the launcher doesn't depend on a real install.
+cfg_dir = os.path.join(os.environ['E2E_CWD'], 'launcher')
+os.makedirs(cfg_dir, exist_ok=True)
+config = {
+    'launch_options': {'default_compute_mode': 'cpu', 'default_port': '8188'},
+    'ui_settings': {'theme': 'dark', 'ui_scale': None},
+    'environments': [{
+        'id': 'env_default', 'name': 'default',
+        'comfyui_root': os.environ['E2E_CWD'], 'python_path': sys.executable,
+    }],
+    'active_env_id': 'env_default',
+}
+with open(os.path.join(cfg_dir, 'config.json'), 'w', encoding='utf-8') as f:
+    json.dump(config, f)
+os.chdir(os.environ['E2E_CWD'])
+
+from PyQt5 import QtWidgets, QtCore
+# Mirror launch_gui()'s HiDPI attribute setup (must precede QApplication).
+for attr in ('AA_EnableHighDpiScaling', 'AA_UseHighDpiPixmaps'):
+    a = getattr(QtCore.Qt, attr, None)
+    if a is not None:
+        QtWidgets.QApplication.setAttribute(a, True)
+app = QtWidgets.QApplication.instance() or QtWidgets.QApplication(sys.argv)
+
+# Bypass SingletonLock so the subprocess doesn't need a real lock file.
+from utils.common import SingletonLock
+SingletonLock.acquire = lambda self: True
+
+import comfyui_launcher_pyqt as m
+window = m.PyQtLauncher()  # exercises _setup_ui end-to-end
+print('BUILD_OK', flush=True)
+
+# Exercise _apply_theme for both themes — this walks every .format() template
+# and f-string setStyleSheet in the _apply_theme closure. A {_pt(N)} left in a
+# .format() template would raise KeyError here; a bare _pt outside its scope
+# would raise NameError here.
+for tv in ('dark', 'light', 'dark'):
+    window._apply_theme(tv)
+print('THEME_OK', flush=True)
+
+# Exercise set_scale round-trip — rebuilds ThemeStyles and re-notifies all
+# BasePage listeners (pages re-apply their own _pt/_px stylesheets).
+window.theme_manager.set_scale(1.25)
+assert abs(window.theme_manager.styles._scale - 1.25) < 1e-9
+window.theme_manager.set_scale(1.0)
+assert abs(window.theme_manager.styles._scale - 1.0) < 1e-9
+print('SCALE_OK', flush=True)
+print('ALL_LAUNCHER_CHECKS_PASSED', flush=True)
+"""
+
+
+@pytest.mark.e2e
+def test_pyqtlauncher_build_and_theme_scale(tmp_path):
+    """Build the real PyQtLauncher + switch themes + change scale, in a subprocess.
+
+    This is the regression guard for the GUI launch path. It catches:
+      - NameError from a _pt/_px/_st/_sp token referenced outside its defining
+        scope (the exact bug that broke launch — a _pt() in _setup_ui's body
+        where only _st/_sp were defined).
+      - KeyError from a {_pt(N)} placeholder left inside a .format() template
+        (the nav_style bug — .format() interprets {_pt(11)} as a lookup key).
+      - Any widget/page that crashes during _setup_ui construction under scaling.
+
+    Uses sys.executable (the pytest Python). In the dev .venv this can build
+    PyQtLauncher; if the env can't (pre-existing ABI crash), the test reports
+    the real failure rather than skipping — because a launch-path regression
+    MUST surface.
+    """
+    env = os.environ.copy()
+    env["QT_QPA_PLATFORM"] = "offscreen"
+    env["E2E_CWD"] = str(tmp_path)
+    env["PYTHONUNBUFFERED"] = "1"
+    pp = env.get("PYTHONPATH", "")
+    if str(REPO_ROOT) not in pp.split(os.pathsep):
+        env["PYTHONPATH"] = (
+            str(REPO_ROOT) + os.pathsep + pp if pp else str(REPO_ROOT)
+        )
+    result = subprocess.run(
+        [PYTHON, "-c", _LAUNCHER_BUILD_SCRIPT],
+        capture_output=True,
+        text=True,
+        env=env,
+        timeout=60,
+        cwd=str(REPO_ROOT),
+    )
+    assert result.returncode == 0 and "ALL_LAUNCHER_CHECKS_PASSED" in result.stdout, (
+        f"PyQtLauncher build/theme/scale failed (exit {result.returncode}):\n"
+        f"--- stdout ---\n{result.stdout}\n--- stderr ---\n{result.stderr}"
+    )
+
+
