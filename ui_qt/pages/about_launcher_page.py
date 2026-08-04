@@ -13,6 +13,9 @@ class AboutLauncherPage(BasePage):
 
     def __init__(self, app, theme_manager, parent=None):
         super().__init__(theme_manager, parent)
+        _styles = theme_manager.styles if theme_manager else None
+        self._px = _styles._px if _styles else (lambda b: b)
+        self._pt = _styles._pt if _styles else (lambda b: b)
         self.app = app
         self._checking_update = False
         self._setup_ui()
@@ -30,7 +33,7 @@ class AboutLauncherPage(BasePage):
         container = QtWidgets.QFrame()
         container.setObjectName("ContentWrapper")
         container.setStyleSheet("background: transparent; border: none;")
-        container.setMaximumWidth(800)
+        container.setMaximumWidth(self._px(800))
 
         # 内容区域
         inner_layout = QtWidgets.QVBoxLayout(container)
@@ -103,7 +106,7 @@ class AboutLauncherPage(BasePage):
         layout.setSpacing(20)
         layout.setAlignment(QtCore.Qt.AlignTop | QtCore.Qt.AlignHCenter)
         # minimumHeight 留足余量 (标题 + 兔子 180 + 描述 + 间距), 不靠刚好塞下.
-        card.setMinimumHeight(420)
+        card.setMinimumHeight(self._px(420))
 
         # Logo (Rabbit Image)
         logo_label = QtWidgets.QLabel()
@@ -116,16 +119,16 @@ class AboutLauncherPage(BasePage):
         if rabbit_path and rabbit_path.exists():
             pix = QtGui.QPixmap(str(rabbit_path))
             if not pix.isNull():
-                scaled = pix.scaled(180, 180, QtCore.Qt.KeepAspectRatio, QtCore.Qt.SmoothTransformation)
+                scaled = pix.scaled(self._px(180), self._px(180), QtCore.Qt.KeepAspectRatio, QtCore.Qt.SmoothTransformation)
                 logo_label.setPixmap(scaled)
                 logo_label.setFixedSize(scaled.size())
             else:
                 logo_label.setText("ComfyUI")
-                logo_label.setStyleSheet(f"font: bold 40px 'Microsoft YaHei UI'; color: {self.theme_manager.colors.get('text')}; background: transparent;")
+                logo_label.setStyleSheet(f"font: bold {self._pt(30)}pt 'Microsoft YaHei UI'; color: {self.theme_manager.colors.get('text')}; background: transparent;")
         else:
             logo_label.setStyleSheet(f"""
                 QLabel {{
-                    font: bold 40px "Microsoft YaHei UI";
+                    font: bold {self._pt(30)}pt "Microsoft YaHei UI";
                     color: {self.theme_manager.colors.get('text')};
                     background: transparent;
                 }}
@@ -139,7 +142,7 @@ class AboutLauncherPage(BasePage):
 
         desc = QtWidgets.QLabel(
             "<div style='text-align: center;'>"
-            f"<p style='font-size: 14px; color: {muted_color}; line-height: 160%;'>"
+            f"<p style='font-size: {self._pt(10)}pt; color: {muted_color}; line-height: 160%;'>"
             "专为 ComfyUI 设计的轻巧、友好的桌面管理工具。<br>"
             "让环境配置、版本管理与日常使用变得简单而优雅。"
             "</p>"
@@ -204,7 +207,7 @@ class AboutLauncherPage(BasePage):
         version_label = QtWidgets.QLabel(f"当前版本: {version_str}")
         version_label.setStyleSheet(f"""
             color: {self.theme_manager.colors.get('text', '#E5E7EB')};
-            font: 10pt "Microsoft YaHei UI";
+            font: {self._pt(10)}pt "Microsoft YaHei UI";
             background: transparent;
         """)
         layout.addWidget(version_label)
@@ -223,7 +226,7 @@ class AboutLauncherPage(BasePage):
                 border: none;
                 border-radius: 6px;
                 padding: 8px 16px;
-                font: bold 10pt "Microsoft YaHei UI";
+                font: bold {self._pt(10)}pt "Microsoft YaHei UI";
             }}
             QPushButton:hover {{
                 background-color: {btn_hover};

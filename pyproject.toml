@@ -32,4 +32,6 @@ markers = [
     "integration: marks tests as integration tests",
     "slow: marks tests as slow (deselect with '-m \"not slow\"')",
     "serial: marks tests that must run serially",
+    "dpi: marks tests that exercise DPI / UI scaling",
+    "e2e: marks end-to-end tests that launch the real app via subprocess",
 ]

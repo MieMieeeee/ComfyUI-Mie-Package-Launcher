@@ -65,7 +65,7 @@ class LinkButton(QtWidgets.QPushButton):
         super().__init__(text, parent)
         self.theme_styles = theme_styles
         self.setObjectName("LinkButton")
-        self.setMinimumHeight(40)
+        self.setMinimumHeight(theme_styles._px(40))
         self.setCursor(QtCore.Qt.PointingHandCursor)
         try:
             self.setFlat(False)
@@ -149,8 +149,8 @@ class ThemeButton(QtWidgets.QPushButton):
         self.theme_value = theme_value
         self.setObjectName("ThemeBtn")
         self.setCheckable(True)
-        self.setFixedWidth(70)
-        self.setMinimumHeight(60)
+        self.setFixedWidth(theme_styles._px(70))
+        self.setMinimumHeight(theme_styles._px(60))
         self.setCursor(QtCore.Qt.PointingHandCursor)
         self.setProperty("theme_value", theme_value)
         self._apply_style()
@@ -170,18 +170,21 @@ class IconButton(QtWidgets.QPushButton):
     def __init__(self, text: str, theme_styles: ThemeStyles, size: int = 24, parent=None):
         super().__init__(text, parent)
         self.theme_styles = theme_styles
-        self.setFixedSize(size, size)
+        self._size = size  # 保留原始 base size，_apply_style 里按 scale 重算
+        self.setFixedSize(theme_styles._px(size), theme_styles._px(size))
         self.setCursor(QtCore.Qt.PointingHandCursor)
         self._apply_style()
 
     def _apply_style(self):
+        _px = self.theme_styles._px
+        _pt = self.theme_styles._pt
         self.setStyleSheet(f"""
             QPushButton {{
                 background: rgba(255, 255, 255, 0.1);
                 border: 1px solid rgba(255, 255, 255, 0.2);
                 color: {self.theme_styles.c.get('sidebar_text')};
-                border-radius: 8px;
-                font-size: {size // 2}px;
+                border-radius: {_px(8)}px;
+                font-size: {_pt(self._size // 2)}pt;
             }}
             QPushButton:hover {{
                 background: rgba(255, 255, 255, 0.2);

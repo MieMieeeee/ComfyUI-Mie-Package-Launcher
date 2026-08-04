@@ -20,8 +20,12 @@ class LaunchControlsSection(QtWidgets.QWidget):
         super().__init__(parent)
         self.app = app_context
         self.theme_manager = theme_manager
+        # DPI 缩放 helper（theme_manager 缺失时退化为 1.0）
+        _styles = theme_manager.styles if theme_manager else None
+        self._px = _styles._px if _styles else (lambda b: b)
+        self._pt = _styles._pt if _styles else (lambda b: b)
         self._setup_ui()
-        
+
         # 注册主题监听
         if self.theme_manager:
             self.theme_manager.register_listener(self._on_theme_changed)
@@ -82,7 +86,7 @@ class LaunchControlsSection(QtWidgets.QWidget):
         port_label = QtWidgets.QLabel("端口号：")
         port_label.setStyleSheet(lbl_style)
         port_edit = QtWidgets.QLineEdit()
-        port_edit.setFixedWidth(60)
+        port_edit.setFixedWidth(self._px(60))
         if hasattr(self.app, 'custom_port'):
             port_edit.setText(self.app.custom_port.get())
             port_edit.textChanged.connect(lambda v: (self.app.custom_port.set(v), self._save_config()))
@@ -110,7 +114,6 @@ class LaunchControlsSection(QtWidgets.QWidget):
         opt_widget.addItems([
             "由 ComfyUI 决定（推荐）",
             "显存充足 (High)",
-            "中等显存 (Normal)",
             "低显存 (Low)",
             "极低显存 (No)",
         ])
@@ -118,7 +121,9 @@ class LaunchControlsSection(QtWidgets.QWidget):
 
         if hasattr(self.app, 'vram_mode'):
             # 第 0 项为空字符串，表示不加任何 --*vram 参数，让 ComfyUI 自己选择
-            vram_map_vals = ["", "--highvram", "--normalvram", "--lowvram", "--novram"]
+            # 注：ComfyUI 自 #13922 (2026-05-15) 起已移除 --normalvram，故此处不再提供该选项；
+            # 存量 config 中残留的 --normalvram 在 qt_app/headless_app 加载时已归一化为 ""。
+            vram_map_vals = ["", "--highvram", "--lowvram", "--novram"]
             cur_vram = (self.app.vram_mode.get() or "").strip()
             if cur_vram in vram_map_vals:
                 opt_widget.setCurrentIndex(vram_map_vals.index(cur_vram))
@@ -170,7 +175,7 @@ class LaunchControlsSection(QtWidgets.QWidget):
         gpu_label.setStyleSheet(lbl_style)
 
         gpu_combo = NoWheelComboBox()
-        gpu_combo.setMinimumWidth(220)
+        gpu_combo.setMinimumWidth(self._px(220))
         gpu_combo.setSizePolicy(QtWidgets.QSizePolicy.Expanding, QtWidgets.QSizePolicy.Fixed)
         # 让 popup 按最长项自适应宽度，避免下拉里 GPU 名称被裁
         gpu_combo.setSizeAdjustPolicy(QtWidgets.QComboBox.AdjustToContents)
@@ -361,7 +366,7 @@ class LaunchControlsSection(QtWidgets.QWidget):
 
         cpath_btn = QtWidgets.QPushButton()
         cpath_btn.setCursor(Qt.PointingHandCursor)
-        cpath_btn.setFixedWidth(32)
+        cpath_btn.setFixedWidth(self._px(32))
         cpath_btn.setStyleSheet(self._get_input_style())
         # 用一个紧凑的目录图标代替原来的"选择浏览器…"长文本按钮
         try:

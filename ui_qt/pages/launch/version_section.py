@@ -19,15 +19,20 @@ class VersionSection(QtWidgets.QWidget):
         super().__init__(parent)
         self.app = app_context
         self.theme_manager = theme_manager
+        # DPI 缩放 helper（theme_manager 缺失时退化为 1.0）
+        _styles = theme_manager.styles if theme_manager else None
+        self._px = _styles._px if _styles else (lambda b: b)
+        self._pt = _styles._pt if _styles else (lambda b: b)
         self._setup_ui()
-        
+
         # 注册主题监听
         if self.theme_manager:
             self.theme_manager.register_listener(self._on_theme_changed)
 
     def _setup_ui(self):
         """设置 UI"""
-        lbl_style = f"color: {self._get_label_color()}; font: 10pt 'Microsoft YaHei UI';"
+        _pt = self._pt
+        lbl_style = f"color: {self._get_label_color()}; font: {_pt(10)}pt 'Microsoft YaHei UI';"
 
         # 主布局
         main_layout = QtWidgets.QVBoxLayout(self)
@@ -132,7 +137,7 @@ class VersionSection(QtWidgets.QWidget):
 
         self.timeout_combo = NoWheelComboBox()
         self.timeout_combo.addItems(["60秒", "120秒", "180秒", "300秒", "600秒"])
-        self.timeout_combo.setFixedWidth(85)
+        self.timeout_combo.setFixedWidth(self._px(85))
         self.timeout_combo.setStyleSheet(self._get_input_style())
 
         try:
@@ -191,7 +196,7 @@ class VersionSection(QtWidgets.QWidget):
         hb.addWidget(icon_lbl)
 
         t = QtWidgets.QLabel(f"{title} :")
-        t.setStyleSheet(f"color: {self._get_label_color()}; font: bold 9pt \"Microsoft YaHei UI\"; background: transparent;")
+        t.setStyleSheet(f"color: {self._get_label_color()}; font: bold {self._pt(9)}pt \"Microsoft YaHei UI\"; background: transparent;")
         hb.addWidget(t)
         try:
             self._version_title_refs.append(t)
@@ -207,7 +212,7 @@ class VersionSection(QtWidgets.QWidget):
         else:
             text_color = self._get_text_color()
 
-        v.setStyleSheet(f"font: bold 10pt \"Segoe UI\", \"Microsoft YaHei UI\"; color: {text_color}; background: transparent;")
+        v.setStyleSheet(f"font: bold {self._pt(10)}pt \"Segoe UI\", \"Microsoft YaHei UI\"; color: {text_color}; background: transparent;")
         hb.addWidget(v)
 
         if hasattr(value_source, "bind"):
@@ -215,9 +220,9 @@ class VersionSection(QtWidgets.QWidget):
                 vv.setText(str(val))
                 # 更新时也检查颜色
                 if tt == "显卡驱动" and "仅支持CPU模式" in str(val):
-                    vv.setStyleSheet(f"font: bold 10pt \"Segoe UI\", \"Microsoft YaHei UI\"; color: {tm.colors.get('error')}; background: transparent;")
+                    vv.setStyleSheet(f"font: bold {self._pt(10)}pt \"Segoe UI\", \"Microsoft YaHei UI\"; color: {tm.colors.get('error')}; background: transparent;")
                 else:
-                    vv.setStyleSheet(f"font: bold 10pt \"Segoe UI\", \"Microsoft YaHei UI\"; color: {tm.colors.get('text')}; background: transparent;")
+                    vv.setStyleSheet(f"font: bold {self._pt(10)}pt \"Segoe UI\", \"Microsoft YaHei UI\"; color: {tm.colors.get('text')}; background: transparent;")
             value_source.bind(_update_v)
         try:
             self._version_value_refs.append(v)
@@ -362,9 +367,9 @@ class VersionSection(QtWidgets.QWidget):
         
         try:
             for ref in getattr(self, "_version_title_refs", []):
-                ref.setStyleSheet(f"color: {label_muted}; font: bold 9pt \"Microsoft YaHei UI\"; background: transparent;")
+                ref.setStyleSheet(f"color: {label_muted}; font: bold {self._pt(9)}pt \"Microsoft YaHei UI\"; background: transparent;")
             for ref in getattr(self, "_version_value_refs", []):
-                ref.setStyleSheet(f"font: bold 10pt \"Segoe UI\", \"Microsoft YaHei UI\"; color: {text_color}; background: transparent;")
+                ref.setStyleSheet(f"font: bold {self._pt(10)}pt \"Segoe UI\", \"Microsoft YaHei UI\"; color: {text_color}; background: transparent;")
         except Exception:
             pass
 

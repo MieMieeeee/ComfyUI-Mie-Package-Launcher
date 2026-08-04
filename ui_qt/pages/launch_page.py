@@ -90,7 +90,7 @@ class LaunchPage(BasePage):
 
         # 右侧按钮容器
         right_container = QtWidgets.QWidget()
-        right_container.setFixedWidth(200)
+        right_container.setFixedWidth(self.theme_manager.styles._px(200))
         right_layout = QtWidgets.QVBoxLayout(right_container)
         right_layout.setContentsMargins(0, 0, 0, 0)
         right_layout.setSpacing(8)
@@ -112,13 +112,13 @@ class LaunchPage(BasePage):
         self._btn_status_label = QtWidgets.QLabel("🚀 一键启动")
         self._btn_status_label.setAlignment(Qt.AlignCenter)
         self._btn_status_label.setStyleSheet(
-            'font: bold 12pt "Microsoft YaHei UI"; color: #FFFFFF; background: transparent;'
+            f'font: bold {self.theme_manager.styles._pt(12)}pt "Microsoft YaHei UI"; color: #FFFFFF; background: transparent;'
         )
 
         self._btn_action_label = QtWidgets.QLabel()
         self._btn_action_label.setAlignment(Qt.AlignCenter)
         self._btn_action_label.setStyleSheet(
-            'font: 8pt "Microsoft YaHei UI"; color: rgba(255,255,255,170); background: transparent;'
+            f'font: {self.theme_manager.styles._pt(8)}pt "Microsoft YaHei UI"; color: rgba(255,255,255,170); background: transparent;'
         )
         self._btn_action_label.hide()
 
@@ -242,7 +242,7 @@ class LaunchPage(BasePage):
         for text, callback in buttons:
             b = QtWidgets.QPushButton(text)
             b.setCursor(Qt.PointingHandCursor)
-            b.setMinimumHeight(32)
+            b.setMinimumHeight(self.theme_manager.styles._px(32))
             b.setStyleSheet(self.theme_manager.styles.secondary_button_style())
             b.clicked.connect(callback)
             layout.addWidget(b)

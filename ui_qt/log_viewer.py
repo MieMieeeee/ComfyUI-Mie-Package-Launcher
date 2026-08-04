@@ -484,6 +484,10 @@ if _HAS_QT:
         def __init__(self, theme_manager=None, parent=None, max_lines=5000):
             super().__init__(parent)
             self.theme_manager = theme_manager
+            # DPI 缩放 helper
+            _styles = theme_manager.styles if theme_manager else None
+            self._pt = _styles._pt if _styles else (lambda b: b)
+            self._px = _styles._px if _styles else (lambda b: b)
             self._max_lines = int(max_lines) if max_lines else self.DEFAULT_MAX_LINES
             self._tailer = None  # type: LogTailer | None
             self._emitter = _LineEmitter()
@@ -575,7 +579,7 @@ if _HAS_QT:
             title = QtWidgets.QLabel("ComfyUI 实时日志")
             title_font = title.font()
             title_font.setBold(True)
-            title_font.setPointSize(13)
+            title_font.setPointSize(self._pt(13))
             title.setFont(title_font)
             layout.addWidget(title)
 
@@ -646,7 +650,7 @@ if _HAS_QT:
             else:
                 # 系统默认字体(不加任何 hint)→避免枚举无法处理的旧字体。
                 font = _QtGui.QFont()
-            font.setPointSize(10)
+            font.setPointSize(self._pt(10))
             self.text_edit.setFont(font)
             self.text_edit.setLineWrapMode(QtWidgets.QTextEdit.WidgetWidth)
             # 行数上限:Qt 在 block 数超过阈值时自动裁掉最早的 block,

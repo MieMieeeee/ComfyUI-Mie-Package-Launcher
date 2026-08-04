@@ -37,13 +37,18 @@ class AnnouncementDialog(CustomConfirmDialog):
         bg = "#111827"
         text = "#E5E7EB"
         border = "#374151"
-        
+
         if self.theme_manager:
             c = self.theme_manager.colors
             bg = c.get('input_bg', bg)
             text = c.get('text', text)
             border = c.get('input_border', border)
-            
+
+        # DPI 缩放 helper
+        _styles = self.theme_manager.styles if self.theme_manager else None
+        _px = _styles._px if _styles else (lambda b: b)
+        _pt = _styles._pt if _styles else (lambda b: b)
+
         self.text_edit = QtWidgets.QTextEdit()
         self.text_edit.setReadOnly(True)
         self.text_edit.setPlainText(content)
@@ -52,19 +57,19 @@ class AnnouncementDialog(CustomConfirmDialog):
                 background-color: {bg};
                 color: {text};
                 border: 1px solid {border};
-                border-radius: 8px;
-                padding: 10px;
-                font: 10pt "Microsoft YaHei UI";
+                border-radius: {_px(8)}px;
+                padding: {_px(10)}px;
+                font: {_pt(10)}pt "Microsoft YaHei UI";
                 line-height: 1.5;
             }}
         """)
-        
+
         # 插入到布局中 (Title 是 0, 我们插在 1)
         inner_layout.insertWidget(1, self.text_edit, 1) # stretch=1 让它占据剩余空间
-        
-        # 调整尺寸，公告通常内容较多
-        self.setFixedWidth(560)
-        self.setFixedHeight(450)
+
+        # 调整尺寸，公告通常内容较多（按 DPI 缩放）
+        self.setFixedWidth(_px(560))
+        self.setFixedHeight(_px(450))
         
     def get_action(self):
         # 0: Mute (Destructive), 1: Acknowledge (Primary)

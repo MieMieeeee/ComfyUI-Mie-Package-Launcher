@@ -26,6 +26,7 @@ from core.version_workers import (
     BaseVersionWorker,
 )
 from core.app_state import AppState
+from core.ui_scaling import resolve_ui_scale
 from services.git_service import GitService
 from utils import common as COMMON
 from ui import assets_helper as ASSETS
@@ -960,7 +961,12 @@ class PyQtLauncher(QtWidgets.QMainWindow, process_events.ProcessCallback):
             if cm == "directml":
                 cm = "gpu"
             self.compute_mode.set(cm)
-            self.vram_mode.set(launch_cfg.get("vram_mode", self.vram_mode.get()))
+            _vram = launch_cfg.get("vram_mode", self.vram_mode.get())
+            # ComfyUI #13922 (2026-05-15) 移除了 --normalvram：存量值归一化为 ""（由 ComfyUI 决定），
+            # 否则老用户升级后启动会触发 argparse unrecognized argument 错误。
+            if _vram == "--normalvram":
+                _vram = ""
+            self.vram_mode.set(_vram)
             self.custom_port.set(launch_cfg.get("default_port", self.custom_port.get()))
             self.disable_all_custom_nodes.set(
                 bool(
@@ -1237,6 +1243,14 @@ class PyQtLauncher(QtWidgets.QMainWindow, process_events.ProcessCallback):
     def _setup_ui(self):
         self.setWindowTitle("ComfyUI 启动器")
 
+        # DPI 缩放：在构建任何控件之前就算好 scale，并提供 _setup_ui 内可用的
+        # _sp/_st helper（与稍后创建的 ThemeManager 共享同一个 self._scale）。
+        # 这样 _setup_ui 里的 setFixedHeight/setMinimumHeight 等也能走 token。
+        self._scale = self._compute_current_scale()
+        _scale = self._scale  # 闭包捕获，避免每个内联 helper 都查 self
+        self._sp = lambda base: max(1, int(round(base * _scale)))  # scaled px
+        self._st = lambda base: max(6, int(round(base * _scale)))  # scaled pt
+
         # Theme setup
         theme_value = (
             self.config.get("ui_settings", {}).get("theme") or "dark"
@@ -1261,6 +1275,11 @@ class PyQtLauncher(QtWidgets.QMainWindow, process_events.ProcessCallback):
                 except Exception:
                     pass
                 c = self.theme_manager.colors
+            # DPI 缩放感知的字号/像素 helper（theme_manager 未就绪时退化为 1.0 缩放）。
+            _styles = getattr(self, "theme_manager", None)
+            _styles = _styles.styles if _styles else None
+            _pt = _styles._pt if _styles else (lambda base: base)
+            _px = _styles._px if _styles else (lambda base: base)
             if c is not None:
                 palette = {
                     "root_bg": c.get("root_bg"),
@@ -1346,7 +1365,7 @@ class PyQtLauncher(QtWidgets.QMainWindow, process_events.ProcessCallback):
                         QLabel {{
                             color: {palette["label"]};
                             background: transparent;
-                            font: 10pt "Microsoft YaHei UI";
+                            font: {_pt(10)}pt "Microsoft YaHei UI";
                         }}
                         QGroupBox {{
                             background-color: {palette["group_bg"]};
@@ -1354,7 +1373,7 @@ class PyQtLauncher(QtWidgets.QMainWindow, process_events.ProcessCallback):
                             border-radius: 10px;
                             margin-top: 10px;
                             padding: 10px;
-                            font: bold 10pt "Microsoft YaHei UI";
+                            font: bold {_pt(10)}pt "Microsoft YaHei UI";
                         }}
                         QGroupBox::title {{
                             subcontrol-origin: margin;
@@ -1362,7 +1381,7 @@ class PyQtLauncher(QtWidgets.QMainWindow, process_events.ProcessCallback):
                             padding: 0 4px;
                             color: {palette["label"]};
                             background: transparent;
-                            font: bold 10pt "Microsoft YaHei UI";
+                            font: bold {_pt(10)}pt "Microsoft YaHei UI";
                         }}
                         QPushButton {{
                             background: {palette["button_bg"]};
@@ -1370,7 +1389,7 @@ class PyQtLauncher(QtWidgets.QMainWindow, process_events.ProcessCallback):
                             border: 1px solid {palette["input_border"]};
                             border-radius: 8px;
                             padding: 5px 10px;
-                            font: 10pt "Microsoft YaHei UI";
+                            font: {_pt(10)}pt "Microsoft YaHei UI";
                         }}
                         QPushButton:hover {{
                             background: {palette["button_hover"]};
@@ -1382,7 +1401,7 @@ class PyQtLauncher(QtWidgets.QMainWindow, process_events.ProcessCallback):
                             border: 1px solid {palette["input_border"]};
                             border-radius: 6px;
                             padding: 5px 10px;
-                            font: 10pt "Microsoft YaHei UI";
+                            font: {_pt(10)}pt "Microsoft YaHei UI";
                             selection-background-color: {c.get("accent", "#6366F1") if c else "#6366F1"};
                         }}
                         QLineEdit:hover, QComboBox:hover {{
@@ -1400,19 +1419,19 @@ class PyQtLauncher(QtWidgets.QMainWindow, process_events.ProcessCallback):
                             border: 1px solid {palette["input_border"]};
                             border-radius: 6px;
                             padding: 5px 10px;
-                            font: 10pt "Microsoft YaHei UI";
+                            font: {_pt(10)}pt "Microsoft YaHei UI";
                         }}
                         QComboBox QAbstractItemView {{
                             background-color: {palette["content_bg"]};
                             selection-background-color: {c.get("accent", "#6366F1") if c else "#6366F1"};
                             selection-color: #FFFFFF;
-                            font: 10pt "Microsoft YaHei UI";
+                            font: {_pt(10)}pt "Microsoft YaHei UI";
                             border: 1px solid {palette["group_border"]};
                             outline: none;
                         }}
                         QRadioButton, QCheckBox {{
                             color: {palette["label"]};
-                            font: 10pt "Microsoft YaHei UI";
+                            font: {_pt(10)}pt "Microsoft YaHei UI";
                             spacing: 6px;
                         }}
                         QCheckBox::indicator, QRadioButton::indicator {{
@@ -1438,7 +1457,7 @@ class PyQtLauncher(QtWidgets.QMainWindow, process_events.ProcessCallback):
                         QLabel {{
                             color: {palette["label"]};
                             background: transparent;
-                            font: 10pt "Microsoft YaHei UI";
+                            font: {_pt(10)}pt "Microsoft YaHei UI";
                         }}
                         QGroupBox {{
                             background-color: {palette["group_bg"]};
@@ -1446,7 +1465,7 @@ class PyQtLauncher(QtWidgets.QMainWindow, process_events.ProcessCallback):
                             border-radius: 10px;
                             margin-top: 10px;
                             padding: 10px;
-                            font: bold 10pt "Microsoft YaHei UI";
+                            font: bold {_pt(10)}pt "Microsoft YaHei UI";
                         }}
                         QGroupBox::title {{
                             subcontrol-origin: margin;
@@ -1454,7 +1473,7 @@ class PyQtLauncher(QtWidgets.QMainWindow, process_events.ProcessCallback):
                             padding: 0 4px;
                             color: {palette["label"]};
                             background: transparent;
-                            font: bold 10pt "Microsoft YaHei UI";
+                            font: bold {_pt(10)}pt "Microsoft YaHei UI";
                         }}
                         QPushButton {{
                             background: {palette["button_bg"]};
@@ -1462,7 +1481,7 @@ class PyQtLauncher(QtWidgets.QMainWindow, process_events.ProcessCallback):
                             border: 1px solid {palette["input_border"]};
                             border-radius: 8px;
                             padding: 5px 10px;
-                            font: 10pt "Microsoft YaHei UI";
+                            font: {_pt(10)}pt "Microsoft YaHei UI";
                         }}
                         QPushButton:hover {{
                             background: {palette["button_hover"]};
@@ -1474,7 +1493,7 @@ class PyQtLauncher(QtWidgets.QMainWindow, process_events.ProcessCallback):
                             border: 1px solid {palette["input_border"]};
                             border-radius: 6px;
                             padding: 5px 10px;
-                            font: 10pt "Microsoft YaHei UI";
+                            font: {_pt(10)}pt "Microsoft YaHei UI";
                         }}
                         QComboBox {{
                             background-color: {palette["input_bg"]};
@@ -1482,11 +1501,11 @@ class PyQtLauncher(QtWidgets.QMainWindow, process_events.ProcessCallback):
                             border: 1px solid {palette["input_border"]};
                             border-radius: 6px;
                             padding: 5px 10px;
-                            font: 10pt "Microsoft YaHei UI";
+                            font: {_pt(10)}pt "Microsoft YaHei UI";
                         }}
                         QRadioButton, QCheckBox {{
                             color: {palette["text"]};
-                            font: 10pt "Microsoft YaHei UI";
+                            font: {_pt(10)}pt "Microsoft YaHei UI";
                             spacing: 6px;
                         }}
                         QCheckBox::indicator, QRadioButton::indicator {{
@@ -1515,7 +1534,7 @@ class PyQtLauncher(QtWidgets.QMainWindow, process_events.ProcessCallback):
                         border-radius: 12px;
                         padding: 0px 15px;
                         text-align: left;
-                        font: 10.5pt "Microsoft YaHei UI";
+                        font: {_pt(11)}pt "Microsoft YaHei UI";
                         margin: 0px 0px;
                     }}
                     QPushButton:hover {{
@@ -1588,7 +1607,7 @@ class PyQtLauncher(QtWidgets.QMainWindow, process_events.ProcessCallback):
                                 border: 1px solid rgba(255, 255, 255, 0.2);
                                 color: #E5E7EB;
                                 border-radius: 8px;
-                                font: 10pt "Microsoft YaHei UI";
+                                font: {_pt(10)}pt "Microsoft YaHei UI";
                             }
                             QPushButton#CollapseButton:hover {
                                 background: rgba(255, 255, 255, 0.2);
@@ -1602,7 +1621,7 @@ class PyQtLauncher(QtWidgets.QMainWindow, process_events.ProcessCallback):
                                 border: 1px solid rgba(0, 0, 0, 0.1);
                                 color: #1F2937;
                                 border-radius: 8px;
-                                font-size: 16px;
+                                font-size: {_pt(12)}pt;
                             }
                             QPushButton#CollapseButton:hover {
                                 background: rgba(0, 0, 0, 0.1);
@@ -1623,7 +1642,7 @@ class PyQtLauncher(QtWidgets.QMainWindow, process_events.ProcessCallback):
                                 border: 1px solid rgba(255, 255, 255, 0.2);
                                 color: #E5E7EB;
                                 border-radius: 8px;
-                                font-size: 16px;
+                                font-size: {_pt(12)}pt;
                             }
                             QPushButton#ExpandButton:hover {
                                 background: rgba(255, 255, 255, 0.2);
@@ -1637,7 +1656,7 @@ class PyQtLauncher(QtWidgets.QMainWindow, process_events.ProcessCallback):
                                 border: 1px solid rgba(0, 0, 0, 0.1);
                                 color: #1F2937;
                                 border-radius: 8px;
-                                font-size: 16px;
+                                font-size: {_pt(12)}pt;
                             }
                             QPushButton#ExpandButton:hover {
                                 background: rgba(0, 0, 0, 0.1);
@@ -1666,27 +1685,27 @@ class PyQtLauncher(QtWidgets.QMainWindow, process_events.ProcessCallback):
                         title_color = c.get("text")
                         author_color = c.get("label_muted")
                         self._header_labels[0].setStyleSheet(
-                            f'font: bold 18pt "Microsoft YaHei"; color: {title_color}; background: transparent;'
+                            f'font: bold {_pt(18)}pt "Microsoft YaHei"; color: {title_color}; background: transparent;'
                         )
                         self._header_labels[1].setStyleSheet(
-                            f'color: {author_color}; font: 9pt "Microsoft YaHei"; background: transparent;'
+                            f'color: {author_color}; font: {_pt(9)}pt "Microsoft YaHei"; background: transparent;'
                         )
                     else:
                         if dark:
                             # Dark theme: white title and gray author
                             self._header_labels[0].setStyleSheet(
-                                'font: bold 18pt "Microsoft YaHei"; color: #FFFFFF; background: transparent;'
+                                f'font: bold {_pt(18)}pt "Microsoft YaHei"; color: #FFFFFF; background: transparent;'
                             )
                             self._header_labels[1].setStyleSheet(
-                                'color: #9CA3AF; font: 9pt "Microsoft YaHei"; background: transparent;'
+                                f'color: #9CA3AF; font: {_pt(9)}pt "Microsoft YaHei"; background: transparent;'
                             )
                         else:
                             # Light theme: dark title and author
                             self._header_labels[0].setStyleSheet(
-                                'font: bold 18pt "Microsoft YaHei"; color: #1F2937; background: transparent;'
+                                f'font: bold {_pt(18)}pt "Microsoft YaHei"; color: #1F2937; background: transparent;'
                             )
                             self._header_labels[1].setStyleSheet(
-                                'color: #4B5563; font: 9pt "Microsoft YaHei"; background: transparent;'
+                                f'color: #4B5563; font: {_pt(9)}pt "Microsoft YaHei"; background: transparent;'
                             )
 
             # Update version label colors (value labels are even indices, title labels are odd indices)
@@ -1702,11 +1721,11 @@ class PyQtLauncher(QtWidgets.QMainWindow, process_events.ProcessCallback):
                     # Odd indices (1, 3, 5, ...) are title labels
                     if i % 2 == 0:
                         label.setStyleSheet(
-                            f'font: bold 10pt "Segoe UI", "Microsoft YaHei UI"; color: {value_color}; background: transparent;'
+                            f'font: bold {_pt(10)}pt "Segoe UI", "Microsoft YaHei UI"; color: {value_color}; background: transparent;'
                         )
                     else:
                         label.setStyleSheet(
-                            f'color: {title_color}; font: bold 9pt "Microsoft YaHei UI"; background: transparent;'
+                            f'color: {title_color}; font: bold {_pt(9)}pt "Microsoft YaHei UI"; background: transparent;'
                         )
 
             # Update version management page labels (当前分支, 当前提交)
@@ -1717,10 +1736,10 @@ class PyQtLauncher(QtWidgets.QMainWindow, process_events.ProcessCallback):
                     else ("#E5E7EB" if dark else "#0F172A")
                 )
                 self.lbl_ver_branch.setStyleSheet(
-                    f"color: {val_color_pv}; font: bold 10pt 'Microsoft YaHei UI';"
+                    f"color: {val_color_pv}; font: bold {_pt(10)}pt 'Microsoft YaHei UI';"
                 )
                 self.lbl_ver_commit.setStyleSheet(
-                    f"color: {val_color_pv}; font: bold 10pt 'Microsoft YaHei UI';"
+                    f"color: {val_color_pv}; font: bold {_pt(10)}pt 'Microsoft YaHei UI';"
                 )
 
             # Update version settings panel labels (当前分支, 当前提交, GitHub代理, 升级策略)
@@ -1732,7 +1751,7 @@ class PyQtLauncher(QtWidgets.QMainWindow, process_events.ProcessCallback):
                     label_color_pv = "#D1D5DB" if dark else "#374151"
                 for label in self._version_settings_labels:
                     label.setStyleSheet(
-                        f"color: {label_color_pv}; font: 10pt 'Microsoft YaHei UI';"
+                        f"color: {label_color_pv}; font: {_pt(10)}pt 'Microsoft YaHei UI';"
                     )
 
             # Update page title colors
@@ -1982,7 +2001,7 @@ class PyQtLauncher(QtWidgets.QMainWindow, process_events.ProcessCallback):
             color: #FFFFFF;
             border: none;
             border-radius: 12px;
-            font: bold 10pt "Microsoft YaHei UI";
+            font: bold {_pt(10)}pt "Microsoft YaHei UI";
             padding: 8px 16px;
         }}
         QPushButton:hover {{
@@ -2081,7 +2100,7 @@ class PyQtLauncher(QtWidgets.QMainWindow, process_events.ProcessCallback):
         title = QtWidgets.QLabel("ComfyUI\n启动器")
         title.setAlignment(Qt.AlignCenter)
         title.setStyleSheet(
-            'font: bold 18pt "Microsoft YaHei"; color: #FFFFFF; background: transparent;'
+            f'font: bold {_st(18)}pt "Microsoft YaHei"; color: #FFFFFF; background: transparent;'
         )
 
         # Add glow effect to title
@@ -2107,7 +2126,7 @@ class PyQtLauncher(QtWidgets.QMainWindow, process_events.ProcessCallback):
         author = QtWidgets.QLabel("by 黎黎原上咩")
         author.setAlignment(Qt.AlignCenter)
         author.setStyleSheet(
-            f'color: #6B7280; font: 9pt "Microsoft YaHei"; background: transparent;'
+            f'color: #6B7280; font: {_st(9)}pt "Microsoft YaHei"; background: transparent;'
         )
         header_layout.addWidget(author)
 
@@ -2127,7 +2146,7 @@ class PyQtLauncher(QtWidgets.QMainWindow, process_events.ProcessCallback):
                 super().__init__(text)
                 self.setCursor(Qt.PointingHandCursor)
                 self.setCheckable(True)
-                self.setMinimumHeight(45)
+                self.setMinimumHeight(_sp(45))
 
                 # Shadow effect for depth (applied once)
                 try:
@@ -2197,7 +2216,7 @@ class PyQtLauncher(QtWidgets.QMainWindow, process_events.ProcessCallback):
             btn = QtWidgets.QPushButton(f"{icon}  {label}")
             btn.setObjectName("ThemeBtn")
             btn.setCheckable(True)
-            btn.setFixedHeight(36)
+            btn.setFixedHeight(_sp(36))
             btn.setSizePolicy(
                 QtWidgets.QSizePolicy.Expanding, QtWidgets.QSizePolicy.Fixed
             )
@@ -2287,9 +2306,9 @@ class PyQtLauncher(QtWidgets.QMainWindow, process_events.ProcessCallback):
         sidebar.setHorizontalScrollBarPolicy(Qt.ScrollBarAlwaysOff)
         sidebar.setFrameShape(QtWidgets.QFrame.NoFrame)
         sidebar.setFixedWidth(
-            self._sidebar_collapsed_width
+            _sp(self._sidebar_collapsed_width)
             if self._sidebar_collapsed
-            else self._sidebar_expanded_width
+            else _sp(self._sidebar_expanded_width)
         )
         # 滚动区域用于控制宽度，内部的 sidebar_inner 负责实际的深色卡片样式
         self._sidebar_scroll = sidebar
@@ -2301,11 +2320,11 @@ class PyQtLauncher(QtWidgets.QMainWindow, process_events.ProcessCallback):
         collapse_panel_layout = QtWidgets.QVBoxLayout(collapse_panel)
         collapse_panel_layout.setContentsMargins(0, 0, 0, 0)
         collapse_panel_layout.setSpacing(0)
-        collapse_panel.setFixedWidth(12)
+        collapse_panel.setFixedWidth(_sp(12))
 
         collapse_btn = QtWidgets.QPushButton("◀")
         collapse_btn.setObjectName("CollapseButton")
-        collapse_btn.setFixedSize(12, 60)
+        collapse_btn.setFixedSize(_sp(12), _sp(60))
         collapse_btn.setCursor(Qt.PointingHandCursor)
         collapse_btn.setStyleSheet(
             self.theme_manager.styles.collapse_button_style()
@@ -2320,7 +2339,7 @@ class PyQtLauncher(QtWidgets.QMainWindow, process_events.ProcessCallback):
 
         expand_btn = QtWidgets.QPushButton("▶")
         expand_btn.setObjectName("ExpandButton")
-        expand_btn.setFixedSize(12, 60)
+        expand_btn.setFixedSize(_sp(12), _sp(60))
         expand_btn.setCursor(Qt.PointingHandCursor)
         expand_btn.setStyleSheet(
             self.theme_manager.styles.expand_button_style()
@@ -2363,7 +2382,9 @@ class PyQtLauncher(QtWidgets.QMainWindow, process_events.ProcessCallback):
 
         # Initialize ThemeManager for new pages
         is_dark = self._theme_value != "light"
-        self.theme_manager = ThemeManager(dark=is_dark)
+        # DPI 缩放：self._scale 已在 _setup_ui 开头算好（构建控件时就用它）。
+        # 这里把同一个 scale 喂给 ThemeManager，ThemeStyles 的 _pt/_px token 据此缩放。
+        self.theme_manager = ThemeManager(dark=is_dark, scale=self._scale)
 
         # Re-apply theme now that theme_manager is available
         # This ensures theme buttons and other widgets get proper theme colors
@@ -2676,12 +2697,19 @@ class PyQtLauncher(QtWidgets.QMainWindow, process_events.ProcessCallback):
             avail_geo = primary_screen.availableGeometry()
             s_w, s_h = avail_geo.width(), avail_geo.height()
 
-            # 使用固定的窗口初始尺寸
-            base_w = 1350
-            base_h = 900
+            # 使用固定的窗口初始尺寸（按 DPI 缩放，保证 HiDPI 下内容不挤成一团）
+            base_w = _sp(1350)
+            base_h = _sp(900)
 
             final_w = min(base_w, s_w - 40)
             final_h = min(base_h, s_h - 80)
+
+            # 最小窗口尺寸：防止用户缩到侧边栏 + 内容下限以下导致布局错乱。
+            # 数值也按 scale 缩放（HiDPI 下最小可用面积更大）。
+            try:
+                self.setMinimumSize(_sp(960), _sp(640))
+            except Exception:
+                pass
 
             # 调试日志
             try:
@@ -2872,7 +2900,8 @@ class PyQtLauncher(QtWidgets.QMainWindow, process_events.ProcessCallback):
     def _toggle_sidebar(self):
         """Toggle sidebar collapse/expand state"""
         self._sidebar_collapsed = not self._sidebar_collapsed
-        width = (
+        _sp = getattr(self, "_sp", lambda b: b)  # DPI 缩放 helper（_setup_ui 后可用）
+        width = _sp(
             self._sidebar_collapsed_width
             if self._sidebar_collapsed
             else self._sidebar_expanded_width
@@ -3356,7 +3385,7 @@ class PyQtLauncher(QtWidgets.QMainWindow, process_events.ProcessCallback):
     def reset_settings(self):
         try:
             self.compute_mode.set("gpu")
-            self.vram_mode.set("--normalvram")
+            self.vram_mode.set("")
             self.use_fast_mode.set(False)
             self.disable_api_nodes.set(False)
             self.enable_cors.set(True)
@@ -4127,6 +4156,119 @@ class PyQtLauncher(QtWidgets.QMainWindow, process_events.ProcessCallback):
                     self.logger.warning("退出时停止 ComfyUI 失败: %s", e)
             except Exception:
                 pass
+
+    # ==================== DPI 缩放 ====================
+    # 设计要点（避免历史上的卡顿）：
+    # - scale 只随屏幕 DPI / 用户 ui_settings.ui_scale 变化，绝不监听 resizeEvent。
+    # - 多显示器切换（screenChanged）用 250ms 单次 QTimer 防抖，避免拖过边界时连续重算。
+    # - 实际重排用 setUpdatesEnabled(False/True) 包裹，且 set_scale 无变化时早退。
+
+    def _compute_current_scale(self) -> float:
+        """根据当前所在屏幕 + config 的 ui_scale 解析缩放系数。"""
+        try:
+            screen = (
+                self.windowHandle().screen()
+                if self.windowHandle()
+                else QtWidgets.QApplication.primaryScreen()
+            )
+        except Exception:
+            screen = QtWidgets.QApplication.primaryScreen()
+        try:
+            dpi = screen.logicalDotsPerInch() if screen else 96.0
+        except Exception:
+            dpi = 96.0
+        try:
+            return resolve_ui_scale(self.config, dpi)
+        except Exception:
+            return 1.0
+
+    def showEvent(self, event):
+        """窗口首次显示时连接 screenChanged（QWindow 信号，窗口 realize 后才有）。"""
+        super().showEvent(event)
+        try:
+            wh = self.windowHandle()
+            if wh and not getattr(self, "_screen_changed_connected", False):
+                # 单次触发型防抖定时器：拖动跨显示器时会连续触发 screenChanged，
+                # 停下后只重算一次。
+                self._screen_changed_timer = QtCore.QTimer(self)
+                self._screen_changed_timer.setSingleShot(True)
+                self._screen_changed_timer.setInterval(250)
+                self._screen_changed_timer.timeout.connect(self._apply_screen_change)
+                wh.screenChanged.connect(self._on_screen_changed)
+                self._screen_changed_connected = True
+        except Exception:
+            if getattr(self, "logger", None):
+                self.logger.info("连接 screenChanged 失败", exc_info=True)
+
+    def _on_screen_changed(self):
+        """窗口拖到不同 DPI 的显示器时触发；防抖后真正重算。"""
+        timer = getattr(self, "_screen_changed_timer", None)
+        if timer is not None:
+            timer.start()
+        elif getattr(self, "logger", None):
+            self.logger.info("screenChanged 触发但防抖定时器未就绪，跳过")
+
+    def _apply_screen_change(self):
+        """防抖到期后真正执行：重算 scale 并受控地全量 repolish 一次。"""
+        if not getattr(self, "theme_manager", None):
+            return
+        try:
+            new_scale = self._compute_current_scale()
+        except Exception:
+            return
+        if abs(new_scale - getattr(self, "_scale", 1.0)) < 1e-3:
+            # 同一档 DPI（或用户锁定了 ui_scale），无需重排。
+            return
+        if getattr(self, "logger", None):
+            self.logger.info(
+                "检测到屏幕 DPI 变化，重算 UI 缩放: %.3f → %.3f",
+                getattr(self, "_scale", 1.0),
+                new_scale,
+            )
+        self._scale = new_scale
+        self.setUpdatesEnabled(False)
+        try:
+            # set_scale 内部会重建 ThemeStyles 并通知所有 BasePage 监听器
+            # （一次受控全量 repolish，开销与切主题等价）。
+            self.theme_manager.set_scale(new_scale)
+            self._apply_theme(self._theme_value)
+            self._apply_scaled_fixed_sizes()
+        except Exception:
+            if getattr(self, "logger", None):
+                self.logger.info("应用屏幕变化失败", exc_info=True)
+        finally:
+            self.setUpdatesEnabled(True)
+
+    def _apply_scaled_fixed_sizes(self):
+        """重算主窗口内联的 setFixedWidth 类尺寸（侧边栏宽度等）。
+
+        与 _apply_theme 分开：theme 变更只重设样式表，固定像素尺寸需要单独再算。
+        幂等：基于当前 self._scale 重新 setFixed*，多次调用结果一致。
+        """
+        try:
+            styles = self.theme_manager.styles
+        except Exception:
+            return
+        # 侧边栏宽度（_sidebar_expanded_width/_collapsed_width 在 _setup_ui 里是字面量，
+        # 这里运行时按 scale 重算并重新 setFixedWidth）。
+        # 注意：setFixedWidth 作用在 QScrollArea（_sidebar_scroll）上，不是内部 sidebar_inner。
+        collapsed = getattr(self, "_sidebar_collapsed", False)
+        expanded_w = styles._px(240)
+        collapsed_w = styles._px(60)
+        sidebar = getattr(self, "_sidebar_scroll", None)
+        if sidebar is not None:
+            try:
+                sidebar.setFixedWidth(collapsed_w if collapsed else expanded_w)
+            except Exception:
+                pass
+        # 折叠/展开按钮 12×60
+        for attr in ("_collapse_btn", "_expand_btn"):
+            btn = getattr(self, attr, None)
+            if btn is not None:
+                try:
+                    btn.setFixedSize(styles._px(12), styles._px(60))
+                except Exception:
+                    pass
 
     def closeEvent(self, event):
         """主窗口关闭事件。

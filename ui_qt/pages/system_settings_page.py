@@ -9,6 +9,118 @@ from PyQt5 import QtCore, QtWidgets
 from .base_page import BasePage
 from .environment_manager_section import EnvironmentManagerSection
 from ui_qt.widgets import InfoCard
+from core.ui_scaling import compute_scale_from_dpi, snap_scale
+
+
+# 界面缩放下拉选项：(显示文案, 持久化值)。None = 自动跟随屏幕 DPI。
+_SCALE_OPTIONS = [
+    ("自动跟随系统", None),
+    ("75%", 0.75),
+    ("85%", 0.85),
+    ("90%", 0.9),
+    ("100%", 1.0),
+    ("110%", 1.1),
+    ("125%", 1.25),
+]
+
+
+class _ScaleRow(QtWidgets.QFrame):
+    """界面缩放选择行：一个下拉框 + 说明文字。改动后即时预览并写回 config。
+
+    与 ``_CheckRow`` 平行，但不带复选框——改缩放是有副作用的实时操作
+    （setUpdatesEnabled 包裹 + theme_manager.set_scale 全量 repolish），
+    所以用 ``currentIndexChanged`` 直接触发，不需要「保存」按钮。
+    """
+
+    scale_changed = QtCore.pyqtSignal(object)  # 发出新 scale（float 或 None）
+
+    def __init__(self, theme_styles, current_scale, current_override, parent=None):
+        super().__init__(parent)
+        self.theme_styles = theme_styles
+        self.setObjectName("ScaleRow")
+        self.setStyleSheet("QFrame#ScaleRow { background: transparent; border: none; }")
+        self._build(current_scale, current_override)
+
+    def _build(self, current_scale, current_override):
+        _pt = self.theme_styles._pt
+        _px = self.theme_styles._px
+        layout = QtWidgets.QHBoxLayout(self)
+        layout.setContentsMargins(_px(4), _px(6), _px(4), _px(6))
+        layout.setSpacing(_px(12))
+
+        text_col = QtWidgets.QVBoxLayout()
+        text_col.setContentsMargins(0, 0, 0, 0)
+        text_col.setSpacing(2)
+
+        self.lbl_title = QtWidgets.QLabel("界面缩放")
+        self.lbl_title.setStyleSheet(
+            f"color: {self.theme_styles.c.get('label')}; "
+            f"font: bold {_pt(10)}pt \"Microsoft YaHei UI\"; background: transparent;"
+        )
+        text_col.addWidget(self.lbl_title)
+
+        # current_override=None → 自动；current_scale 是当前生效系数（用于文案）。
+        auto_suffix = ""
+        if current_override is None:
+            auto_suffix = f"（自动，当前 {current_scale * 100:.0f}%）"
+        self.lbl_desc = QtWidgets.QLabel(
+            f"调整启动器界面整体缩放。自动模式跟随屏幕 DPI；锁定后多显示器切换不再重算。{auto_suffix}"
+        )
+        self.lbl_desc.setStyleSheet(
+            f"color: {self.theme_styles.c.get('label_muted')}; "
+            f"font: {_pt(9)}pt \"Microsoft YaHei UI\"; background: transparent;"
+        )
+        self.lbl_desc.setWordWrap(True)
+        text_col.addWidget(self.lbl_desc)
+
+        layout.addLayout(text_col, 1)
+
+        self.combo = QtWidgets.QComboBox()
+        self.combo.setCursor(QtCore.Qt.PointingHandCursor)
+        for label, _val in _SCALE_OPTIONS:
+            self.combo.addItem(label)
+        # 选中当前值对应的项
+        self.combo.setCurrentIndex(self._index_for(current_override))
+        self.combo.setStyleSheet(self.theme_styles.input_style())
+        self.combo.setFixedWidth(_px(160))
+        self.combo.currentIndexChanged.connect(self._on_index_changed)
+        layout.addWidget(self.combo, 0, QtCore.Qt.AlignTop)
+
+    @staticmethod
+    def _index_for(override):
+        for i, (_label, val) in enumerate(_SCALE_OPTIONS):
+            if val is None and override is None:
+                return i
+            if val is not None and override is not None:
+                try:
+                    if abs(float(val) - float(override)) < 1e-3:
+                        return i
+                except (TypeError, ValueError):
+                    pass
+        return 0  # 默认「自动」
+
+    def _on_index_changed(self, idx):
+        try:
+            _label, val = _SCALE_OPTIONS[idx]
+        except Exception:
+            val = None
+        self.scale_changed.emit(val)
+
+    def update_theme(self, theme_styles):
+        self.theme_styles = theme_styles
+        try:
+            _pt = theme_styles._pt
+            self.lbl_title.setStyleSheet(
+                f"color: {theme_styles.c.get('label')}; "
+                f"font: bold {_pt(10)}pt \"Microsoft YaHei UI\"; background: transparent;"
+            )
+            self.lbl_desc.setStyleSheet(
+                f"color: {theme_styles.c.get('label_muted')}; "
+                f"font: {_pt(9)}pt \"Microsoft YaHei UI\"; background: transparent;"
+            )
+            self.combo.setStyleSheet(theme_styles.input_style())
+        except Exception:
+            pass
 
 
 class _CheckRow(QtWidgets.QFrame):
@@ -24,9 +136,11 @@ class _CheckRow(QtWidgets.QFrame):
         self._build(title, description)
 
     def _build(self, title, description):
+        _pt = self.theme_styles._pt
+        _px = self.theme_styles._px
         layout = QtWidgets.QHBoxLayout(self)
-        layout.setContentsMargins(4, 6, 4, 6)
-        layout.setSpacing(12)
+        layout.setContentsMargins(_px(4), _px(6), _px(4), _px(6))
+        layout.setSpacing(_px(12))
 
         self.checkbox = QtWidgets.QCheckBox()
         self.checkbox.setCursor(QtCore.Qt.PointingHandCursor)
@@ -40,7 +154,7 @@ class _CheckRow(QtWidgets.QFrame):
         self.lbl_title = QtWidgets.QLabel(title)
         self.lbl_title.setStyleSheet(
             f"color: {self.theme_styles.c.get('label')}; "
-            f"font: bold 10pt \"Microsoft YaHei UI\"; background: transparent;"
+            f"font: bold {_pt(10)}pt \"Microsoft YaHei UI\"; background: transparent;"
         )
         self.lbl_title.setWordWrap(True)
         text_col.addWidget(self.lbl_title)
@@ -48,7 +162,7 @@ class _CheckRow(QtWidgets.QFrame):
         self.lbl_desc = QtWidgets.QLabel(description)
         self.lbl_desc.setStyleSheet(
             f"color: {self.theme_styles.c.get('label_muted')}; "
-            f"font: 9pt \"Microsoft YaHei UI\"; background: transparent;"
+            f"font: {_pt(9)}pt \"Microsoft YaHei UI\"; background: transparent;"
         )
         self.lbl_desc.setWordWrap(True)
         text_col.addWidget(self.lbl_desc)
@@ -69,13 +183,14 @@ class _CheckRow(QtWidgets.QFrame):
     def update_theme(self, theme_styles):
         self.theme_styles = theme_styles
         try:
+            _pt = theme_styles._pt
             self.lbl_title.setStyleSheet(
                 f"color: {theme_styles.c.get('label')}; "
-                f"font: bold 10pt \"Microsoft YaHei UI\"; background: transparent;"
+                f"font: bold {_pt(10)}pt \"Microsoft YaHei UI\"; background: transparent;"
             )
             self.lbl_desc.setStyleSheet(
                 f"color: {theme_styles.c.get('label_muted')}; "
-                f"font: 9pt \"Microsoft YaHei UI\"; background: transparent;"
+                f"font: {_pt(9)}pt \"Microsoft YaHei UI\"; background: transparent;"
             )
             self._apply_checkbox_style()
         except Exception:
@@ -114,10 +229,11 @@ class SystemSettingsPage(BasePage):
         layout.setContentsMargins(25, 25, 25, 25)
         layout.setSpacing(15)
 
-        # \u6807\u9898
-        title = QtWidgets.QLabel("\u7cfb\u7edf\u8bbe\u7f6e")
+        # 标题
+        _pt = self.theme_manager.styles._pt
+        title = QtWidgets.QLabel("系统设置")
         title.setStyleSheet(
-            f"font: bold 16pt \"Microsoft YaHei UI\"; "
+            f"font: bold {_pt(16)}pt \"Microsoft YaHei UI\"; "
             f"color: {self.theme_manager.colors.get('label')}; margin-bottom: 5px;"
         )
         layout.addWidget(title)
@@ -168,6 +284,21 @@ class SystemSettingsPage(BasePage):
         self.row_minimize.toggled.connect(self._sync_dependencies)
         self.row_ask.toggled.connect(self._sync_dependencies)
 
+        # ----- 界面缩放卡片（DPI 自适应）-----
+        scale_card = InfoCard("界面缩放", self.theme_manager.styles)
+        layout.addWidget(scale_card)
+        scale_card_layout = scale_card.layout()
+        scale_card_layout.setSpacing(4)
+        _current_override = self._read_scale_override()
+        _current_scale = getattr(self.app, "_scale", 1.0) or 1.0
+        self.row_scale = _ScaleRow(
+            theme_styles=self.theme_manager.styles,
+            current_scale=_current_scale,
+            current_override=_current_override,
+        )
+        self.row_scale.scale_changed.connect(self._on_scale_changed)
+        scale_card_layout.addWidget(self.row_scale)
+
         # ----- \u63d0\u793a\u5361\u7247 -----
         tip_card = InfoCard("\u4f7f\u7528\u8bf4\u660e", self.theme_manager.styles)
         layout.addWidget(tip_card)
@@ -180,14 +311,14 @@ class SystemSettingsPage(BasePage):
         )
         tip_label.setStyleSheet(
             f"color: {self.theme_manager.colors.get('label_muted')}; "
-            f"font: 9pt \"Microsoft YaHei UI\"; background: transparent; line-height: 160%;"
+            f"font: {_pt(9)}pt \"Microsoft YaHei UI\"; background: transparent; line-height: 160%;"
         )
         tip_label.setWordWrap(True)
         tip_layout.addWidget(tip_label)
 
         layout.addStretch(1)
 
-        self._styled_widgets = [env_card, card, tip_card, self.row_minimize, self.row_ask]
+        self._styled_widgets = [env_card, card, scale_card, tip_card, self.row_minimize, self.row_ask, self.row_scale]
 
     def _load_from_config(self):
         cfg = self.app.config
@@ -199,19 +330,20 @@ class SystemSettingsPage(BasePage):
         self._sync_dependencies()
 
     def _sync_dependencies(self):
-        # \u201c\u6bcf\u6b21\u90fd\u63d0\u9192\u201d\u5173\u95ed\u540e\uff0c\u5219\u9690\u85cf\u201c\u6700\u5c0f\u5316\u5230\u6258\u76d8\u201d\uff08\u4e0d\u518d\u63d0\u9192 = \u76f4\u63a5\u9000\u51fa\uff09
+        # 「每次都提醒」关闭后，则隐藏「最小化到托盘」（不再提醒 = 直接退出）
+        _pt = self.theme_manager.styles._pt
         if not self.row_ask.is_checked():
             self.row_minimize.set_checked(False)
             self.row_minimize.checkbox.setEnabled(False)
             self.row_minimize.lbl_title.setStyleSheet(
                 f"color: {self.theme_manager.colors.get('label_muted')}; "
-                f"font: bold 10pt \"Microsoft YaHei UI\"; background: transparent;"
+                f"font: bold {_pt(10)}pt \"Microsoft YaHei UI\"; background: transparent;"
             )
         else:
             self.row_minimize.checkbox.setEnabled(True)
             self.row_minimize.lbl_title.setStyleSheet(
                 f"color: {self.theme_manager.colors.get('label')}; "
-                f"font: bold 10pt \"Microsoft YaHei UI\"; background: transparent;"
+                f"font: bold {_pt(10)}pt \"Microsoft YaHei UI\"; background: transparent;"
             )
 
     def _on_minimize_toggled(self, checked):
@@ -256,16 +388,89 @@ class SystemSettingsPage(BasePage):
         except Exception:
             pass
 
+    # ==================== 界面缩放 ====================
+    def _read_scale_override(self):
+        """读 config 里的 ui_settings.ui_scale（None=自动）。"""
+        try:
+            cfg = self.app.config
+            ui = cfg.get("ui_settings", {}) if isinstance(cfg, dict) else {}
+            return ui.get("ui_scale", None)
+        except Exception:
+            return None
+
+    def _on_scale_changed(self, override):
+        """用户在缩放下拉里选了新值。即时预览 + 持久化。
+
+        override 为 None 表示「自动跟随系统」，否则是锁定到该系数。
+        实际生效系数由 _compute_effective_scale 算（自动模式下走 DPI 推断）。
+        """
+        try:
+            # 1) 算实际生效系数（自动模式走 DPI；锁定模式直接用 override）。
+            effective = self._compute_effective_scale(override)
+            # 2) 写 config（先写内存，再持久化）
+            cfg = self.app.config
+            ui = cfg.setdefault("ui_settings", {})
+            ui["ui_scale"] = override
+            try:
+                self.app.config = cfg
+            except Exception:
+                pass
+            services = getattr(self.app, "services", None)
+            if services and getattr(services, "config", None):
+                try:
+                    services.config.save(cfg)
+                except Exception:
+                    pass
+            # 3) 即时应用：setUpdatesEnabled 包裹 + theme_manager.set_scale（受控全量 repolish）。
+            #    这与切主题等价开销，用户已接受。app 上的 _scale / 侧边栏固定尺寸也同步更新。
+            self.setUpdatesEnabled(False)
+            try:
+                if hasattr(self.app, "_scale"):
+                    self.app._scale = effective
+                if hasattr(self.app, "theme_manager") and self.app.theme_manager:
+                    self.app.theme_manager.set_scale(effective)
+                # 主窗口内联的固定尺寸（侧边栏宽度等）需要单独重算
+                if hasattr(self.app, "_apply_scaled_fixed_sizes"):
+                    self.app._apply_scaled_fixed_sizes()
+            finally:
+                self.setUpdatesEnabled(True)
+            # 4) 刷新本行的「当前 X%」文案（自动模式下显示推断值）
+            if override is None:
+                self.row_scale.lbl_desc.setText(
+                    f"调整启动器界面整体缩放。自动模式跟随屏幕 DPI；锁定后多显示器切换不再重算。"
+                    f"（自动，当前 {effective * 100:.0f}%）"
+                )
+            logger = getattr(self.app, "logger", None)
+            if logger:
+                logger.info("界面缩放更新: override=%s, effective=%.3f", override, effective)
+        except Exception:
+            if getattr(self.app, "logger", None):
+                self.app.logger.info("界面缩放更新失败", exc_info=True)
+
+    def _compute_effective_scale(self, override):
+        """算实际生效缩放系数。override=None → 走当前屏幕 DPI 推断。"""
+        try:
+            from PyQt5.QtGui import QGuiApplication
+
+            screen = QGuiApplication.primaryScreen()
+            dpi = screen.logicalDotsPerInch() if screen else 96.0
+        except Exception:
+            dpi = 96.0
+        return compute_scale_from_dpi(dpi, user_override=override)
+
     def update_theme(self, theme_styles=None):
         super().update_theme(theme_styles)
         try:
+            _pt = self.theme_manager.styles._pt
             title_color = self.theme_manager.colors.get("label")
             for ref in self._page_title_refs:
                 ref.setStyleSheet(
-                    f"font: bold 16pt \"Microsoft YaHei UI\"; color: {title_color}; margin-bottom: 5px;"
+                    f"font: bold {_pt(16)}pt \"Microsoft YaHei UI\"; color: {title_color}; margin-bottom: 5px;"
                 )
             self.row_minimize.update_theme(self.theme_manager.styles)
             self.row_ask.update_theme(self.theme_manager.styles)
+            if hasattr(self, "row_scale"):
+                self.row_scale.update_theme(self.theme_manager.styles)
             self._sync_dependencies()
         except Exception:
             pass

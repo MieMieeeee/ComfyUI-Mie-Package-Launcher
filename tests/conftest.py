@@ -3,6 +3,7 @@ Pytest fixtures for ComfyUI-Mie-Package-Launcher tests.
 """
 
 import json
+import os
 import sys
 import tempfile
 from pathlib import Path
@@ -10,6 +11,12 @@ from typing import Generator
 from unittest.mock import MagicMock, patch
 
 import pytest
+
+# Force offscreen Qt platform BEFORE any PyQt5 import so the entire UI test
+# suite is display-independent (runs on headless CI / no-real-display boxes).
+# Individual test modules historically set this ad-hoc; centralizing it here
+# removes that duplication and lets tests/ui/* run without a Windows desktop.
+os.environ.setdefault("QT_QPA_PLATFORM", "offscreen")
 
 from config.manager import ConfigManager
 from headless_app import HeadlessAppContext
@@ -19,11 +26,11 @@ def pytest_configure(config):
     """Ensure project root utils is prioritized over tests/utils."""
     project_root = Path(__file__).parent.parent
     project_root_str = str(project_root)
-    
+
     # Remove tests directory from sys.path to prevent shadowing
     if project_root_str in sys.path:
         sys.path.remove(project_root_str)
-    
+
     # Re-add at the beginning so project root is prioritized
     sys.path.insert(0, project_root_str)
 
@@ -108,14 +115,6 @@ def mock_paths(monkeypatch) -> Generator[MagicMock, None, None]:
     yield mock_path_factory
 
 
-@pytest.fixture
-def qtbot(qtbot):
-    """
-    Configure qtbot for pytest-qt widget testing.
-    
-    This fixture is provided by pytest-qt plugin. It provides:
-    - Widget cleanup between tests
-    - qtbot.waitUntil() for async operations
-    - qtbot.waitExposed() for widget visibility
-    """
-    return qtbot
+# NOTE: the qtbot fixture is provided natively by pytest-qt — do not override
+# it here (a previous override named the fixture `qtbot(qtbot)` which caused a
+# recursive-dependency error and blocked the entire tests/ui/ suite).

@@ -13,6 +13,9 @@ class AboutMePage(BasePage):
 
     def __init__(self, theme_manager, parent=None):
         super().__init__(theme_manager, parent)
+        _styles = theme_manager.styles if theme_manager else None
+        self._px = _styles._px if _styles else (lambda b: b)
+        self._pt = _styles._pt if _styles else (lambda b: b)
         self._setup_ui()
 
     def _setup_ui(self):

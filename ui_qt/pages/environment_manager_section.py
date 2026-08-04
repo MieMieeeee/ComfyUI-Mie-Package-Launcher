@@ -36,6 +36,10 @@ class EnvironmentManagerSection(QtWidgets.QWidget):
         super().__init__(parent)
         self.app = app_context
         self.theme_manager = theme_manager
+        # DPI-aware token helpers (scale by current DPI factor).
+        _styles = theme_manager.styles if theme_manager else None
+        self._px = _styles._px if _styles else (lambda b: b)
+        self._pt = _styles._pt if _styles else (lambda b: b)
         self._setup_ui()
         self.reload()
 
@@ -58,13 +62,13 @@ class EnvironmentManagerSection(QtWidgets.QWidget):
         )
         hint.setWordWrap(True)
         hint.setStyleSheet(
-            f"color: {self._label_muted_color}; font-size: 9pt; background: transparent;"
+            f"color: {self._label_muted_color}; font-size: {self._pt(9)}pt; background: transparent;"
         )
         layout.addWidget(hint)
 
         # 环境列表 —— 样式与 models_page 的 library_list 完全一致
         self.list_widget = QtWidgets.QListWidget()
-        self.list_widget.setMinimumHeight(120)
+        self.list_widget.setMinimumHeight(self._px(120))
         self.list_widget.setSelectionMode(QtWidgets.QAbstractItemView.SingleSelection)
         self.list_widget.setUniformItemSizes(True)
         self.list_widget.setStyleSheet(
@@ -424,6 +428,10 @@ class _EnvEditDialog(FramelessDraggableDialog):
         self.theme_manager = theme_manager
         self.existing_ids = existing_ids or set()
         self.result_data = None
+        # DPI-aware token helpers (scale by current DPI factor).
+        _styles = theme_manager.styles if theme_manager else None
+        self._px = _styles._px if _styles else (lambda b: b)
+        self._pt = _styles._pt if _styles else (lambda b: b)
         self._build(title, initial_name, initial_root, initial_python)
 
     def _theme_colors(self):
@@ -469,7 +477,7 @@ class _EnvEditDialog(FramelessDraggableDialog):
                 border: 1px solid {col['input_border']};
                 border-radius: 8px;
                 padding: 8px 10px;
-                font: 10pt "Microsoft YaHei UI";
+                font: {self._pt(10)}pt "Microsoft YaHei UI";
             }}
             QLineEdit:focus {{
                 border: 1px solid {col['accent']};
@@ -480,7 +488,7 @@ class _EnvEditDialog(FramelessDraggableDialog):
                 border: none;
                 border-radius: 8px;
                 padding: 8px 16px;
-                font: bold 10pt "Microsoft YaHei UI";
+                font: bold {self._pt(10)}pt "Microsoft YaHei UI";
             }}
             QPushButton:hover {{
                 background-color: {col['btn_hover']};
@@ -501,7 +509,7 @@ class _EnvEditDialog(FramelessDraggableDialog):
 
         # 标题
         lbl_title = QtWidgets.QLabel(title)
-        lbl_title.setStyleSheet(f"font: bold 14pt 'Microsoft YaHei UI'; color: {col['title_color']};")
+        lbl_title.setStyleSheet(f"font: bold {self._pt(14)}pt 'Microsoft YaHei UI'; color: {col['title_color']};")
         inner.addWidget(lbl_title)
 
         # 表单
@@ -511,7 +519,7 @@ class _EnvEditDialog(FramelessDraggableDialog):
         # label 左对齐 + 垂直居中，field 占满剩余宽度
         form.setLabelAlignment(Qt.AlignRight | Qt.AlignVCenter)
         form.setFieldGrowthPolicy(QtWidgets.QFormLayout.ExpandingFieldsGrow)
-        label_style = f"color: {col['text']}; font: 10pt 'Microsoft YaHei UI';"
+        label_style = f"color: {col['text']}; font: {self._pt(10)}pt 'Microsoft YaHei UI';"
 
         self.name_edit = QtWidgets.QLineEdit(name)
         self.name_edit.setPlaceholderText("如：ComfyUI V8 生产环境")
@@ -575,7 +583,7 @@ class _EnvEditDialog(FramelessDraggableDialog):
 
         inner.addLayout(btn_row)
 
-        self.setMinimumWidth(520)
+        self.setMinimumWidth(self._px(520))
 
     def _choose_root(self):
         d = QtWidgets.QFileDialog.getExistingDirectory(

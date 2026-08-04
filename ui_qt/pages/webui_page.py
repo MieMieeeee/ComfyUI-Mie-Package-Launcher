@@ -120,6 +120,9 @@ class WebuiPage(BasePage):
         super().__init__(theme_manager, parent)
         self.app = app
         self.theme_manager = theme_manager
+        _styles = theme_manager.styles if theme_manager else None
+        self._px = _styles._px if _styles else (lambda b: b)
+        self._pt = _styles._pt if _styles else (lambda b: b)
         self._state: str = STATE_NOT_INSTALLED
         self._state_check_timer = None
         self._pm: Optional[WebuiProcessManager] = None
@@ -192,7 +195,7 @@ class WebuiPage(BasePage):
             "QPlainTextEdit {"
             f"  background-color: {self._c('input_readonly_bg', '#1F2937')};"
             f"  color: {self._c('input_readonly_text', '#9CA3AF')};"
-            "  font: 9pt 'Consolas';"
+            f"  font: {self._pt(9)}pt 'Consolas';"
             f"  border: 1px solid {self._c('input_border', '#4B5563')};"
             "  border-radius: 6px;"
             "}"
@@ -214,7 +217,7 @@ class WebuiPage(BasePage):
 
     def _label_muted_style(self) -> str:
         return (
-            f'font: 9pt "Microsoft YaHei UI"; color: {self._c("label_muted", "#9CA3AF")};'
+            f'font: {self._pt(9)}pt "Microsoft YaHei UI"; color: {self._c("label_muted", "#9CA3AF")};'
         )
 
     def _config_label_style(self) -> str:
@@ -237,19 +240,19 @@ class WebuiPage(BasePage):
         hb.setAlignment(QtCore.Qt.AlignCenter)
 
         icon_lbl = QtWidgets.QLabel(icon_str)
-        icon_lbl.setStyleSheet("font-size: 14pt; background: transparent;")
+        icon_lbl.setStyleSheet(f"font-size: {self._pt(14)}pt; background: transparent;")
         hb.addWidget(icon_lbl)
 
         t = QtWidgets.QLabel("%s :" % title)
         t.setStyleSheet(
             f'color: {self._c("label_muted", "#9CA3AF")};'
-            f' font: bold 9pt "Microsoft YaHei UI"; background: transparent;'
+            f' font: bold {self._pt(9)}pt "Microsoft YaHei UI"; background: transparent;'
         )
         hb.addWidget(t)
 
         v = QtWidgets.QLabel(value)
         v.setStyleSheet(
-            f'font: bold 10pt "Segoe UI", "Microsoft YaHei UI";'
+            f'font: bold {self._pt(10)}pt "Segoe UI", "Microsoft YaHei UI";'
             f' color: {self._c("text", "#E5E7EB")}; background: transparent;'
         )
         hb.addWidget(v)
@@ -274,7 +277,7 @@ class WebuiPage(BasePage):
             v_lbl.setText(str(text))
             color = self._c("error", "#EF4444") if is_error else self._c("text", "#E5E7EB")
             v_lbl.setStyleSheet(
-                f'font: bold 10pt "Segoe UI", "Microsoft YaHei UI";'
+                f'font: bold {self._pt(10)}pt "Segoe UI", "Microsoft YaHei UI";'
                 f' color: {color}; background: transparent;'
             )
         except Exception:
@@ -335,7 +338,7 @@ class WebuiPage(BasePage):
         port_label = QtWidgets.QLabel("端口号：")
         port_label.setStyleSheet(lbl_style)
         self._port_edit = QtWidgets.QLineEdit()
-        self._port_edit.setFixedWidth(60)
+        self._port_edit.setFixedWidth(self._px(60))
         self._port_edit.setText(str(self._webui_options().get("port") or 8199))
         self._port_edit.setToolTip("WebUI工作台服务端口，默认8199")
         self._port_edit.textChanged.connect(
@@ -385,7 +388,7 @@ class WebuiPage(BasePage):
 
         self._cpath_btn = QtWidgets.QPushButton()
         self._cpath_btn.setCursor(QtCore.Qt.PointingHandCursor)
-        self._cpath_btn.setFixedWidth(32)
+        self._cpath_btn.setFixedWidth(self._px(32))
         try:
             self._cpath_btn.setIcon(self.style().standardIcon(QtWidgets.QStyle.SP_DirOpenIcon))
             self._cpath_btn.setIconSize(QtCore.QSize(14, 14))
@@ -441,7 +444,7 @@ class WebuiPage(BasePage):
 
         # --- 右: 按钮列 (固定宽, 一键启动大按钮 + 打开网页, 上下堆叠) ---
         btn_container = QtWidgets.QWidget()
-        btn_container.setFixedWidth(180)
+        btn_container.setFixedWidth(self._px(180))
         btn_col = QtWidgets.QVBoxLayout(btn_container)
         btn_col.setContentsMargins(0, 0, 0, 0)
         btn_col.setSpacing(8)
@@ -452,14 +455,14 @@ class WebuiPage(BasePage):
         self._btn_primary.setCursor(QtCore.Qt.PointingHandCursor)
         self._btn_primary.setSizePolicy(QtWidgets.QSizePolicy.Expanding, QtWidgets.QSizePolicy.Expanding)
         self._btn_primary.clicked.connect(self._on_primary_clicked)
-        self._btn_primary.setMinimumHeight(60)
+        self._btn_primary.setMinimumHeight(self._px(60))
         btn_col.addWidget(self._btn_primary, 4)
 
         # 打开网页 (stretch 1, 紧贴一键启动下方)
         self._btn_open = QtWidgets.QPushButton("🌐 打开网页")
         self._btn_open.setCursor(QtCore.Qt.PointingHandCursor)
         self._btn_open.setSizePolicy(QtWidgets.QSizePolicy.Expanding, QtWidgets.QSizePolicy.Expanding)
-        self._btn_open.setMinimumHeight(40)
+        self._btn_open.setMinimumHeight(self._px(40))
         self._btn_open.clicked.connect(self._on_open_browser)
         btn_col.addWidget(self._btn_open, 1)
 
@@ -493,7 +496,7 @@ class WebuiPage(BasePage):
 
         self._btn_update = QtWidgets.QPushButton("🔄 更新")
         self._btn_update.setCursor(QtCore.Qt.PointingHandCursor)
-        self._btn_update.setMinimumHeight(36)
+        self._btn_update.setMinimumHeight(self._px(36))
         self._btn_update.clicked.connect(self._on_update_clicked)
         self._btn_update.setToolTip("git pull 更新 WebUI工作台到最新版本")
         update_col.addWidget(self._btn_update)
@@ -504,7 +507,7 @@ class WebuiPage(BasePage):
         # - DestructiveButton 是实色 #EF4444, 跟全应用"高风险破坏性操作"视觉一致
         self._btn_remove = DestructiveButton("🗑 移除", self.theme_manager.styles)
         self._btn_remove.setCursor(QtCore.Qt.PointingHandCursor)
-        self._btn_remove.setMinimumHeight(36)
+        self._btn_remove.setMinimumHeight(self._px(36))
         self._btn_remove.clicked.connect(self._on_remove_clicked)
         self._btn_remove.setToolTip(
             "删除 WebUI工作台目录 (弹确认). "
@@ -703,12 +706,12 @@ class WebuiPage(BasePage):
             text_color = self._c("text", "#E5E7EB")
             for ref in getattr(self, "_version_title_refs", []):
                 ref.setStyleSheet(
-                    f'color: {label_muted}; font: bold 9pt "Microsoft YaHei UI";'
+                    f'color: {label_muted}; font: bold {self._pt(9)}pt "Microsoft YaHei UI";'
                     f' background: transparent;'
                 )
             for ref in getattr(self, "_version_value_refs", []):
                 ref.setStyleSheet(
-                    f'font: bold 10pt "Segoe UI", "Microsoft YaHei UI";'
+                    f'font: bold {self._pt(10)}pt "Segoe UI", "Microsoft YaHei UI";'
                     f' color: {text_color}; background: transparent;'
                 )
         except Exception:

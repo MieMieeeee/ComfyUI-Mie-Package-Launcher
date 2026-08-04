@@ -22,6 +22,10 @@ class VersionPage(BasePage):
         super().__init__(theme_manager, parent)
         self.app = app
         self.theme_manager = theme_manager
+        # DPI-aware token helpers (scale by current DPI factor).
+        _styles = theme_manager.styles if theme_manager else None
+        self._px = _styles._px if _styles else (lambda b: b)
+        self._pt = _styles._pt if _styles else (lambda b: b)
         self._setup_ui()
 
     def _setup_ui(self):
@@ -33,7 +37,7 @@ class VersionPage(BasePage):
         # 标题
         title = QtWidgets.QLabel("ComfyUI 内核版本管理")
         title.setStyleSheet(f"""
-            font: bold 16pt "Microsoft YaHei UI";
+            font: bold {self._pt(16)}pt "Microsoft YaHei UI";
             color: {self.theme_manager.colors.get('label')};
             margin-bottom: 5px;
         """)
@@ -57,8 +61,8 @@ class VersionPage(BasePage):
         self.lbl_kernel_version = QtWidgets.QLabel("检测中...")
 
         # 使用更醒目的标签颜色，不是 muted
-        lbl_style = f"color: {self.theme_manager.colors.get('label_dim')}; font: 10pt 'Microsoft YaHei UI';"
-        val_style = f"color: {self.theme_manager.colors.get('text')}; font: bold 10pt 'Microsoft YaHei UI';"
+        lbl_style = f"color: {self.theme_manager.colors.get('label_dim')}; font: {self._pt(10)}pt 'Microsoft YaHei UI';"
+        val_style = f"color: {self.theme_manager.colors.get('text')}; font: bold {self._pt(10)}pt 'Microsoft YaHei UI';"
 
         l_kv = QtWidgets.QLabel("内核版本:")
         l_kv.setStyleSheet(lbl_style)
@@ -83,7 +87,7 @@ class VersionPage(BasePage):
 
         self.pv_proxy_combo = NoWheelComboBox()
         self.pv_proxy_combo.addItems(["不使用", "gh-proxy", "自定义"])
-        self.pv_proxy_combo.setFixedWidth(140)
+        self.pv_proxy_combo.setFixedWidth(self._px(140))
         self.pv_proxy_combo.setStyleSheet(self.theme_manager.styles.input_style())
 
         if hasattr(self.app, 'version_manager'):
@@ -131,7 +135,7 @@ class VersionPage(BasePage):
 
         self.timeout_combo = NoWheelComboBox()
         self.timeout_combo.addItems(["60秒", "120秒", "180秒", "300秒", "600秒"])
-        self.timeout_combo.setFixedWidth(85)
+        self.timeout_combo.setFixedWidth(self._px(85))
         self.timeout_combo.setStyleSheet(self.theme_manager.styles.input_style())
 
         # 设置当前值
@@ -210,7 +214,7 @@ class VersionPage(BasePage):
         self.history_table = StyledTableWidget(self.theme_manager.styles)
         self.history_table.setColumnCount(4)
         self.history_table.setHorizontalHeaderLabels(["提交哈希", "日期", "作者", "提交信息"])
-        self.history_table.setMinimumHeight(400)
+        self.history_table.setMinimumHeight(self._px(400))
 
         header = self.history_table.horizontalHeader()
         header.setSectionResizeMode(0, QtWidgets.QHeaderView.ResizeToContents)
@@ -810,11 +814,11 @@ class VersionPage(BasePage):
 
         title_color = self.theme_manager.colors.get('label')
         for ref in self._page_title_refs:
-            ref.setStyleSheet(f"font: bold 12pt 'Microsoft YaHei UI'; color: {title_color}; margin-top: 10px;" if "提交历史" in ref.text() else f"font: bold 16pt 'Microsoft YaHei UI'; color: {title_color}; margin-bottom: 5px;")
+            ref.setStyleSheet(f"font: bold {self._pt(12)}pt 'Microsoft YaHei UI'; color: {title_color}; margin-top: 10px;" if "提交历史" in ref.text() else f"font: bold {self._pt(16)}pt 'Microsoft YaHei UI'; color: {title_color}; margin-bottom: 5px;")
 
         # 更新版本信息标签样式
-        lbl_style = f"color: {self.theme_manager.colors.get('label_muted')}; font: 10pt 'Microsoft YaHei UI';"
-        val_style = f"color: {self.theme_manager.colors.get('text')}; font: bold 10pt 'Microsoft YaHei UI';"
+        lbl_style = f"color: {self.theme_manager.colors.get('label_muted')}; font: {self._pt(10)}pt 'Microsoft YaHei UI';"
+        val_style = f"color: {self.theme_manager.colors.get('text')}; font: bold {self._pt(10)}pt 'Microsoft YaHei UI';"
         self.lbl_kernel_version.setStyleSheet(val_style)
 
         # 更新设置面板背景颜色

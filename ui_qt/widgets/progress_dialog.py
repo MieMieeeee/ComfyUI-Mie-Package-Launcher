@@ -13,6 +13,10 @@ class ProgressDialog(FramelessDraggableDialog):
         # background / 拖拽 都在基类统一处理。
         super().__init__(parent=parent, modal=False, window_type=QtCore.Qt.Tool)
         self.theme_manager = theme_manager
+        # DPI 缩放 helper（theme_manager 缺失时退化为 1.0 缩放，保证可独立构造）。
+        _styles = theme_manager.styles if theme_manager else None
+        _px = _styles._px if _styles else (lambda b: b)
+        _pt = _styles._pt if _styles else (lambda b: b)
         self._cancelled = False
         self._backgrounded = False
         self._on_cancel_callback = None
@@ -48,20 +52,20 @@ class ProgressDialog(FramelessDraggableDialog):
             QFrame#ProgressContainer {{
                 background-color: {bg};
                 border: 1px solid {border};
-                border-radius: 12px;
+                border-radius: {_px(12)}px;
             }}
             QLabel {{
                 color: {text};
-                font: 10pt "Microsoft YaHei UI";
+                font: {_pt(10)}pt "Microsoft YaHei UI";
                 background: transparent;
             }}
             QPushButton {{
                 background-color: {btn_bg};
                 color: {text};
                 border: none;
-                border-radius: 6px;
-                padding: 8px 20px;
-                font: 10pt "Microsoft YaHei UI";
+                border-radius: {_px(6)}px;
+                padding: {_px(8)}px {_px(20)}px;
+                font: {_pt(10)}pt "Microsoft YaHei UI";
             }}
             QPushButton:hover {{
                 background-color: {btn_hover};
@@ -74,10 +78,10 @@ class ProgressDialog(FramelessDraggableDialog):
 
         # 标题
         self.lbl_title = QtWidgets.QLabel(title)
-        self.lbl_title.setStyleSheet("font: bold 12pt 'Microsoft YaHei UI';")
+        self.lbl_title.setStyleSheet(f"font: bold {_pt(12)}pt 'Microsoft YaHei UI';")
         self.lbl_title.setAlignment(QtCore.Qt.AlignCenter)
         self.lbl_title.setWordWrap(True)
-        self.lbl_title.setMinimumWidth(380)
+        self.lbl_title.setMinimumWidth(_px(380))
         inner_layout.addWidget(self.lbl_title)
 
         # 状态文本
@@ -88,7 +92,7 @@ class ProgressDialog(FramelessDraggableDialog):
 
         # 进度条
         self.pbar = QtWidgets.QProgressBar()
-        self.pbar.setFixedHeight(6)
+        self.pbar.setFixedHeight(_px(6))
         self.pbar.setTextVisible(False)
         self.pbar.setRange(0, 0) # 默认脉冲模式
 
@@ -99,12 +103,12 @@ class ProgressDialog(FramelessDraggableDialog):
         self.pbar.setStyleSheet(f"""
             QProgressBar {{
                 background-color: rgba(0,0,0,0.1);
-                border-radius: 3px;
+                border-radius: {_px(3)}px;
                 border: none;
             }}
             QProgressBar::chunk {{
                 background-color: {accent};
-                border-radius: 3px;
+                border-radius: {_px(3)}px;
             }}
         """)
         inner_layout.addWidget(self.pbar)
@@ -125,7 +129,7 @@ class ProgressDialog(FramelessDraggableDialog):
                 _btn_style = None
             if show_background:
                 self.btn_background = QtWidgets.QPushButton("后台运行")
-                self.btn_background.setFixedWidth(100)
+                self.btn_background.setFixedWidth(_px(100))
                 try:
                     if _btn_style and hasattr(_btn_style, "secondary_button_style"):
                         self.btn_background.setStyleSheet(_btn_style.secondary_button_style())
@@ -135,7 +139,7 @@ class ProgressDialog(FramelessDraggableDialog):
                 btn_layout.addWidget(self.btn_background)
             if show_cancel:
                 self.btn_cancel = QtWidgets.QPushButton("取消")
-                self.btn_cancel.setFixedWidth(100)
+                self.btn_cancel.setFixedWidth(_px(100))
                 # 取消是破坏性操作 → 红色描边警示（与卸载/退出弹窗的红色统一）
                 try:
                     if _btn_style and hasattr(_btn_style, "destructive_outline_button_style"):
@@ -157,9 +161,9 @@ class ProgressDialog(FramelessDraggableDialog):
         # setGeometry Unable to set geometry 420x165 -> 420x203". 设 minimumSize=(420, 210) 比 Windows
         # 强制值高 7px, adjustSize 算出来就 >= 210, Windows 不会再顶也不会警告. (高度还是随 set_status
         # 自适应, 不影响长文本.)
-        self.setMinimumSize(420, 210)
-        self.setFixedWidth(420)
-        self.resize(420, 210)
+        self.setMinimumSize(_px(420), _px(210))
+        self.setFixedWidth(_px(420))
+        self.resize(_px(420), _px(210))
         self.setSizePolicy(
             QtWidgets.QSizePolicy.Fixed,
             QtWidgets.QSizePolicy.Preferred,

@@ -80,6 +80,9 @@ class ConfigManager:
                 "minimize_to_tray_on_close": False,
                 "minimize_to_tray_ask_every_time": True,
                 "window_size": "500x680",
+                # UI 缩放：None=自动跟随屏幕 DPI；设为 0.75~1.25 内的值则锁定。
+                # 由 core.ui_scaling.resolve_ui_scale() 解析。
+                "ui_scale": None,
             },
             "paths": {
                 "comfyui_root": ".",
@@ -164,6 +167,8 @@ class ConfigManager:
                     ui = self.config.setdefault("ui_settings", {})
                     ui.setdefault("minimize_to_tray_on_close", False)
                     ui.setdefault("minimize_to_tray_ask_every_time", True)
+                    # UI 缩放字段：老配置补 None（=自动跟随 DPI）。
+                    ui.setdefault("ui_scale", None)
                     # 多环境迁移：老 paths 段 → environments 数组 + active_env_id
                     try:
                         migrate_environments(self.config)

@@ -33,6 +33,10 @@ class EnvironmentSelector(QtWidgets.QWidget):
         super().__init__(parent)
         self.app = app_context
         self.theme_manager = theme_manager
+        # DPI 缩放 helper
+        _styles = theme_manager.styles if theme_manager else None
+        self._px = _styles._px if _styles else (lambda b: b)
+        self._pt = _styles._pt if _styles else (lambda b: b)
         self._guard = False  # 阻止程序化 setCurrentIndex 触发用户回调
         self._setup_ui()
         self.reload()
@@ -77,7 +81,7 @@ class EnvironmentSelector(QtWidgets.QWidget):
 
         # 中：环境下拉（更宽，体现重要性）
         self.combo = NoWheelComboBox()
-        self.combo.setMinimumWidth(240)
+        self.combo.setMinimumWidth(self._px(240))
         self.combo.setStyleSheet(self._combo_style())
         self.combo.currentIndexChanged.connect(self._on_index_changed)
         top_row.addWidget(self.combo)

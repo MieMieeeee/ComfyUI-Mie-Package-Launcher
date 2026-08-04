@@ -164,7 +164,7 @@ class ThemeStyles:
         QWidget#SideBar {{
             background: qlineargradient(x1:0, y1:0, x2:0, y2:1, stop:0 {self.c.get('sidebar_grad_top')}, stop:1 {self.c.get('sidebar_grad_bottom')});
             border: 1px solid {self.c.get('sidebar_border')};
-            border-radius: 20px;
+            border-radius: {self._px(20)}px;
         }}
         """
 
@@ -173,7 +173,7 @@ class ThemeStyles:
         return f"""
         QWidget#MainContent {{
             background-color: {self.c.get('content_bg')};
-            border-radius: 20px;
+            border-radius: {self._px(20)}px;
         }}
         QLabel {{
             color: {self.c.get('label')};
@@ -251,10 +251,10 @@ class ThemeStyles:
             width: {self._px(18)}px;
             height: {self._px(18)}px;
             border: 2px solid {self.c.get('input_border')};
-            border-radius: 4px;
+            border-radius: {self._px(4)}px;
             background: transparent;
         }}
-        QRadioButton::indicator {{ border-radius: 9px; }}
+        QRadioButton::indicator {{ border-radius: {self._px(9)}px; }}
         QCheckBox::indicator, QRadioButton::indicator {{
             width: {self._px(20)}px;
             height: {self._px(20)}px;
@@ -270,7 +270,7 @@ class ThemeStyles:
         return f"""
         QWidget#MainContent {{
             background-color: {self.c.get('content_bg')};
-            border-radius: 20px;
+            border-radius: {self._px(20)}px;
         }}
         QLabel {{
             color: {self.c.get('label')};
@@ -347,10 +347,10 @@ class ThemeStyles:
             width: {self._px(18)}px;
             height: {self._px(18)}px;
             border: 2px solid {self.c.get('input_border')};
-            border-radius: 4px;
+            border-radius: {self._px(4)}px;
             background: transparent;
         }}
-        QRadioButton::indicator {{ border-radius: 9px; }}
+        QRadioButton::indicator {{ border-radius: {self._px(9)}px; }}
         QCheckBox::indicator, QRadioButton::indicator {{
             width: {self._px(20)}px;
             height: {self._px(20)}px;
@@ -443,7 +443,7 @@ class ThemeStyles:
             background: transparent;
             color: {text_muted};
             border: 1px solid {border_color};
-            border-radius: 8px;
+            border-radius: {self._px(8)}px;
             padding: {self._px(6)}px {self._px(8)}px;
             font: {self._pt(9)}pt "Microsoft YaHei UI";
         }}
@@ -496,11 +496,11 @@ class ThemeStyles:
         }}
         QScrollBar:vertical {{
             background: transparent;
-            width: 8px;
+            width: {self._px(8)}px;
         }}
         QScrollBar::handle:vertical {{
             background: {self.c.get('table_scroll_bg')};
-            border-radius: 4px;
+            border-radius: {self._px(4)}px;
         }}
         QScrollBar::handle:vertical:hover {{
             background: {self.c.get('label_dim')};
@@ -515,7 +515,7 @@ class ThemeStyles:
         #ProfileCard, #HeroCard, #LauncherHeroCard, #InfoCard {{
             background-color: {self.c.get('card_bg')};
             border: 2px solid {self.c.get('card_border')};
-            border-radius: 16px;
+            border-radius: {self._px(16)}px;
         }}
         """
 
@@ -531,7 +531,7 @@ class ThemeStyles:
             color: {self.c.get('link_text')};
             font: {self._pt(11)}pt "Microsoft YaHei UI";
             qproperty-flat: false;
-            min-width: 160px;
+            min-width: {self._px(160)}px;
         }}
         QPushButton#LinkButton:hover {{
             background-color: {self.c.get('link_hover_bg')};
@@ -630,7 +630,7 @@ class ThemeStyles:
         QComboBox::drop-down {{
             border: none;
             background-color: {self.c.get('input_bg')};
-            width: 20px;
+            width: {self._px(20)}px;
         }}
         QComboBox::down-arrow {{
             image: none;
@@ -639,7 +639,7 @@ class ThemeStyles:
             border-top: 5px solid {self.c.get('label_muted')};
             width: 0;
             height: 0;
-            margin-right: 8px;
+            margin-right: {self._px(8)}px;
         }}
         QComboBox QAbstractItemView {{
             background-color: {self.c.get('input_bg')};

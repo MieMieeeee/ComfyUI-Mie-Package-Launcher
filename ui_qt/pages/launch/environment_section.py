@@ -24,8 +24,12 @@ class EnvironmentSection(QtWidgets.QWidget):
         super().__init__(parent)
         self.app = app_context
         self.theme_manager = theme_manager
+        # DPI 缩放 helper（theme_manager 缺失时退化为 1.0）
+        _styles = theme_manager.styles if theme_manager else None
+        self._px = _styles._px if _styles else (lambda b: b)
+        self._pt = _styles._pt if _styles else (lambda b: b)
         self._setup_ui()
-        
+
         # 注册主题监听
         if self.theme_manager:
             self.theme_manager.register_listener(self._on_theme_changed)
@@ -63,14 +67,14 @@ class EnvironmentSection(QtWidgets.QWidget):
         # ============== HF 镜像 ==============
         env_hf_combo = NoWheelComboBox()
         env_hf_combo.addItems(["不使用", "hf-mirror", "自定义"])
-        env_hf_combo.setMinimumWidth(120)
+        env_hf_combo.setMinimumWidth(self._px(120))
         env_hf_combo.setStyleSheet(self._get_input_style())
 
         env_hf_entry = QtWidgets.QLineEdit()
         env_hf_entry.setPlaceholderText("请输入镜像地址...")
         env_hf_entry.setStyleSheet(self._get_input_style())
         env_hf_entry.setSizePolicy(QtWidgets.QSizePolicy.Expanding, QtWidgets.QSizePolicy.Fixed)
-        env_hf_entry.setMinimumWidth(520)
+        env_hf_entry.setMinimumWidth(self._px(520))
 
         if hasattr(self.app, 'selected_hf_mirror'):
             env_hf_combo.setCurrentText(self.app.selected_hf_mirror.get() if self.app.selected_hf_mirror.get() in ["不使用", "hf-mirror", "自定义"] else "hf-mirror")
@@ -117,7 +121,7 @@ class EnvironmentSection(QtWidgets.QWidget):
         hf_label = QtWidgets.QLabel("HF 镜像源：")
         hf_label.setStyleSheet(lbl_style)
         hf_label.setAlignment(Qt.AlignRight | Qt.AlignVCenter)
-        hf_label.setFixedWidth(100)
+        hf_label.setFixedWidth(self._px(100))
 
         form_layout.addWidget(hf_label, 0, 0)
         form_layout.addWidget(_add_hf_container, 0, 1)
@@ -125,14 +129,14 @@ class EnvironmentSection(QtWidgets.QWidget):
         # ============== GitHub 代理 ==============
         env_gh_combo = NoWheelComboBox()
         env_gh_combo.addItems(["不使用", "gh-proxy", "自定义"])
-        env_gh_combo.setMinimumWidth(120)
+        env_gh_combo.setMinimumWidth(self._px(120))
         env_gh_combo.setStyleSheet(self._get_input_style())
 
         env_gh_entry = QtWidgets.QLineEdit()
         env_gh_entry.setPlaceholderText("请输入代理地址...")
         env_gh_entry.setStyleSheet(self._get_input_style())
         env_gh_entry.setSizePolicy(QtWidgets.QSizePolicy.Expanding, QtWidgets.QSizePolicy.Fixed)
-        env_gh_entry.setMinimumWidth(520)
+        env_gh_entry.setMinimumWidth(self._px(520))
 
         if hasattr(self.app, 'version_manager') and hasattr(self.app.version_manager, 'proxy_mode_ui_var'):
             env_gh_combo.setCurrentText(self.app.version_manager.proxy_mode_ui_var.get())
@@ -180,7 +184,7 @@ class EnvironmentSection(QtWidgets.QWidget):
         gh_label = QtWidgets.QLabel("GitHub 代理：")
         gh_label.setStyleSheet(lbl_style)
         gh_label.setAlignment(Qt.AlignRight | Qt.AlignVCenter)
-        gh_label.setFixedWidth(100)
+        gh_label.setFixedWidth(self._px(100))
 
         form_layout.addWidget(gh_label, 1, 0)
         form_layout.addWidget(_add_gh_container, 1, 1)
@@ -199,14 +203,14 @@ class EnvironmentSection(QtWidgets.QWidget):
         _pypi_builtin_texts = [t for (t, _m, _u) in _pypi_builtin_options]
         env_pypi_combo = NoWheelComboBox()
         env_pypi_combo.addItems(["不使用"] + _pypi_builtin_texts + ["自定义"])
-        env_pypi_combo.setMinimumWidth(120)
+        env_pypi_combo.setMinimumWidth(self._px(120))
         env_pypi_combo.setStyleSheet(self._get_input_style())
 
         env_pypi_entry = QtWidgets.QLineEdit()
         env_pypi_entry.setPlaceholderText("请输入 PyPI 源地址...")
         env_pypi_entry.setStyleSheet(self._get_input_style())
         env_pypi_entry.setSizePolicy(QtWidgets.QSizePolicy.Expanding, QtWidgets.QSizePolicy.Fixed)
-        env_pypi_entry.setMinimumWidth(520)
+        env_pypi_entry.setMinimumWidth(self._px(520))
 
         if hasattr(self.app, 'pypi_proxy_mode_ui'):
             env_pypi_combo.setCurrentText(self.app.pypi_proxy_mode_ui.get())
@@ -267,7 +271,7 @@ class EnvironmentSection(QtWidgets.QWidget):
         pypi_label = QtWidgets.QLabel("PyPI 代理：")
         pypi_label.setStyleSheet(lbl_style)
         pypi_label.setAlignment(Qt.AlignRight | Qt.AlignVCenter)
-        pypi_label.setFixedWidth(100)
+        pypi_label.setFixedWidth(self._px(100))
 
         form_layout.addWidget(pypi_label, 2, 0)
         form_layout.addWidget(_add_pypi_container, 2, 1)

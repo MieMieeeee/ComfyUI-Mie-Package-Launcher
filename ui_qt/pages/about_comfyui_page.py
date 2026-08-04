@@ -13,6 +13,9 @@ class AboutComfyUIPage(BasePage):
 
     def __init__(self, theme_manager, parent=None):
         super().__init__(theme_manager, parent)
+        _styles = theme_manager.styles if theme_manager else None
+        self._px = _styles._px if _styles else (lambda b: b)
+        self._pt = _styles._pt if _styles else (lambda b: b)
         self._setup_ui()
 
     def _setup_ui(self):
@@ -28,7 +31,7 @@ class AboutComfyUIPage(BasePage):
         container = QtWidgets.QFrame()
         container.setObjectName("ContentWrapper")
         container.setStyleSheet("background: transparent; border: none;")
-        container.setMaximumWidth(800)
+        container.setMaximumWidth(self._px(800))
 
         # 内容区域
         inner_layout = QtWidgets.QVBoxLayout(container)
@@ -93,7 +96,7 @@ class AboutComfyUIPage(BasePage):
 
         # Logo (Banner Image)
         banner_label = QtWidgets.QLabel()
-        banner_label.setFixedHeight(120)
+        banner_label.setFixedHeight(self._px(120))
         banner_label.setAlignment(QtCore.Qt.AlignCenter)
         banner_label.setSizePolicy(QtWidgets.QSizePolicy.Expanding, QtWidgets.QSizePolicy.Fixed)
 
@@ -104,14 +107,14 @@ class AboutComfyUIPage(BasePage):
             if p and p.exists():
                 pix = QtGui.QPixmap(str(p))
                 if not pix.isNull():
-                    banner_label.setPixmap(pix.scaledToHeight(120, QtCore.Qt.SmoothTransformation))
+                    banner_label.setPixmap(pix.scaledToHeight(self._px(120), QtCore.Qt.SmoothTransformation))
                     banner_label.setStyleSheet("background: transparent;")
                 else:
-                    banner_label.setStyleSheet(f"font: bold 40px 'Microsoft YaHei UI'; color: {self.theme_manager.colors.get('text')}; background: transparent;")
+                    banner_label.setStyleSheet(f"font: bold {self._pt(30)}pt 'Microsoft YaHei UI'; color: {self.theme_manager.colors.get('text')}; background: transparent;")
             else:
-                banner_label.setStyleSheet(f"font: bold 40px 'Microsoft YaHei UI'; color: {self.theme_manager.colors.get('text')}; background: transparent;")
+                banner_label.setStyleSheet(f"font: bold {self._pt(30)}pt 'Microsoft YaHei UI'; color: {self.theme_manager.colors.get('text')}; background: transparent;")
         except Exception:
-            banner_label.setStyleSheet(f"font: bold 40px 'Microsoft YaHei UI'; color: {self.theme_manager.colors.get('text')}; background: transparent;")
+            banner_label.setStyleSheet(f"font: bold {self._pt(30)}pt 'Microsoft YaHei UI'; color: {self.theme_manager.colors.get('text')}; background: transparent;")
 
         layout.addWidget(banner_label)
 
@@ -119,7 +122,7 @@ class AboutComfyUIPage(BasePage):
         muted_color = self.theme_manager.colors.get('label_muted')
         desc = QtWidgets.QLabel(
             "<div style='text-align: center;'>"
-            f"<p style='font-size: 14px; color: {muted_color}; line-height: 160%;'>"
+            f"<p style='font-size: {self._pt(10)}pt; color: {muted_color}; line-height: 160%;'>"
             "ComfyUI 以模块化节点为核心，支持灵活的工作流构建与高效的推理执行。<br>"
             "让创作者与开发者都能快速搭建生成式 AI 应用。"
             "</p>"
@@ -189,7 +192,7 @@ class AboutComfyUIPage(BasePage):
                 muted_color = self.theme_manager.colors.get('label_muted')
                 self._desc_label.setText(
                     "<div style='text-align: center;'>"
-                    f"<p style='font-size: 14px; color: {muted_color}; line-height: 160%;'>"
+                    f"<p style='font-size: {self._pt(10)}pt; color: {muted_color}; line-height: 160%;'>"
                     "ComfyUI 以模块化节点为核心，支持灵活的工作流构建与高效的推理执行。<br>"
                     "让创作者与开发者都能快速搭建生成式 AI 应用。"
                     "</p>"

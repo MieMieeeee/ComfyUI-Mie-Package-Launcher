@@ -22,12 +22,17 @@ class ModelsPage(BasePage):
         self.app = app
         self._page_title_refs = []
 
+        # DPI-aware token helpers (scale by current DPI factor).
+        _styles = theme_manager.styles if theme_manager else None
+        self._px = _styles._px if _styles else (lambda b: b)
+        self._pt = _styles._pt if _styles else (lambda b: b)
+
         # Convenience handles
         self._model_path = getattr(self.app.services, "model_path", None)
         self._is_silent = False  # suppress listbox signal during bulk refresh
 
         self.library_list = QtWidgets.QListWidget()
-        self.library_list.setMinimumWidth(220)
+        self.library_list.setMinimumWidth(self._px(220))
         self.library_list.setSelectionMode(QtWidgets.QAbstractItemView.SingleSelection)
         self.library_list.setUniformItemSizes(True)
         # Theme-driven colors so the items stay legible in both light and dark modes.
@@ -64,7 +69,7 @@ class ModelsPage(BasePage):
         self.mapping_table = StyledTableWidget(self.theme_manager.styles)
         self.mapping_table.setColumnCount(2)
         self.mapping_table.setHorizontalHeaderLabels(["名称", "路径"])
-        self.mapping_table.setMinimumHeight(360)
+        self.mapping_table.setMinimumHeight(self._px(360))
         self.mapping_table.setWordWrap(True)
         try:
             self.mapping_table.setTextElideMode(QtCore.Qt.ElideNone)
@@ -82,9 +87,9 @@ class ModelsPage(BasePage):
         )
         self.mapping_hint_label.setWordWrap(True)
         self.mapping_hint_label.setStyleSheet(
-            "color: " + self.theme_manager.colors.get("label_muted") + ";"
+            f"color: {self.theme_manager.colors.get('label_muted')};"
             " background: transparent;"
-            " font: 9pt \"Microsoft YaHei UI\";"
+            f" font: {self._pt(9)}pt \"Microsoft YaHei UI\";"
             " padding-top: 4px;"
         )
 
@@ -149,7 +154,7 @@ class ModelsPage(BasePage):
 
         title = QtWidgets.QLabel("外置模型库")
         title.setStyleSheet(
-            f'font: bold 16pt "Microsoft YaHei UI"; color: {self.theme_manager.colors.get("label")};'
+            f'font: bold {self._pt(16)}pt "Microsoft YaHei UI"; color: {self.theme_manager.colors.get("label")};'
         )
         layout.addWidget(title)
         self._page_title_refs.append(title)
@@ -176,7 +181,7 @@ class ModelsPage(BasePage):
         for b in (self._btn_save, self._btn_open_yaml,
                   self._btn_builtin, self._btn_restore,
                   self._btn_add, self._btn_remove):
-            b.setFixedHeight(28)
+            b.setFixedHeight(self._px(28))
             global_btn_row.addWidget(b)
         global_btn_row.addStretch(1)
         global_layout.addLayout(global_btn_row)

@@ -29,36 +29,39 @@ class _TaskRow(QtWidgets.QFrame):
         accent = c.get("btn_primary_hover", "#9E77ED")
         success = "#22C55E"
         error_color = c.get("error", "#EF4444")
+        # DPI 缩放 helper
+        _px = styles._px if styles else (lambda b: b)
+        _pt = styles._pt if styles else (lambda b: b)
 
         self.setStyleSheet(f"""
             _TaskRow {{
                 background-color: {card_bg};
                 border: 1px solid {border};
-                border-radius: 10px;
+                border-radius: {_px(10)}px;
             }}
         """)
         rl = QtWidgets.QHBoxLayout(self)
-        rl.setContentsMargins(16, 14, 16, 14)
-        rl.setSpacing(12)
+        rl.setContentsMargins(_px(16), _px(14), _px(16), _px(14))
+        rl.setSpacing(_px(12))
 
         # 状态色点
         dot_color = accent if task.is_active() else (error_color if task.error else success)
         dot = QtWidgets.QLabel("●")
-        dot.setStyleSheet(f"color: {dot_color}; font: 16pt 'Microsoft YaHei UI'; border: none;")
-        dot.setFixedWidth(18)
+        dot.setStyleSheet(f"color: {dot_color}; font: {_pt(16)}pt 'Microsoft YaHei UI'; border: none;")
+        dot.setFixedWidth(_px(18))
         rl.addWidget(dot)
 
         # 标题 + 状态/进度
         info = QtWidgets.QVBoxLayout()
-        info.setSpacing(4)
+        info.setSpacing(_px(4))
         title_lbl = QtWidgets.QLabel(task.title)
         title_lbl.setStyleSheet(
-            f"color: {c.get('label', '#E5E7EB')}; font: bold 11pt 'Microsoft YaHei UI'; border: none;")
+            f"color: {c.get('label', '#E5E7EB')}; font: bold {_pt(11)}pt 'Microsoft YaHei UI'; border: none;")
         info.addWidget(title_lbl)
 
         status_text = task.status or ("已完成" if task.done else ("失败" if task.error else "等待中..."))
         status_lbl = QtWidgets.QLabel(status_text)
-        status_lbl.setStyleSheet(f"color: {muted}; font: 9pt 'Microsoft YaHei UI'; border: none;")
+        status_lbl.setStyleSheet(f"color: {muted}; font: {_pt(9)}pt 'Microsoft YaHei UI'; border: none;")
         status_lbl.setWordWrap(True)
         info.addWidget(status_lbl)
 
@@ -72,12 +75,12 @@ class _TaskRow(QtWidgets.QFrame):
             else:
                 pb.setRange(0, 0)  # 脉冲
             pb.setTextVisible(False)
-            pb.setFixedHeight(5)
+            pb.setFixedHeight(_px(5))
             pb.setStyleSheet(f"""
                 QProgressBar {{
-                    background-color: rgba(255,255,255,0.08); border: none; border-radius: 3px;
+                    background-color: rgba(255,255,255,0.08); border: none; border-radius: {_px(3)}px;
                 }}
-                QProgressBar::chunk {{ background-color: {accent}; border-radius: 3px; }}
+                QProgressBar::chunk {{ background-color: {accent}; border-radius: {_px(3)}px; }}
             """)
             info.addWidget(pb)
         rl.addLayout(info, 1)
@@ -85,7 +88,7 @@ class _TaskRow(QtWidgets.QFrame):
         # 操作按钮
         show_btn = QtWidgets.QPushButton("显示")
         self._style_btn(show_btn, styles, "secondary")
-        show_btn.setFixedWidth(64)
+        show_btn.setFixedWidth(_px(64))
         show_btn.clicked.connect(lambda: self._page._restore_task(task.task_id))
         if task.dialog is None:
             show_btn.setEnabled(False)
@@ -94,7 +97,7 @@ class _TaskRow(QtWidgets.QFrame):
         if not task.is_active():
             clear_btn = QtWidgets.QPushButton("清除")
             self._style_btn(clear_btn, styles, "destructive_outline")
-            clear_btn.setFixedWidth(64)
+            clear_btn.setFixedWidth(_px(64))
             clear_btn.clicked.connect(lambda: self._page.registry.remove(task.task_id))
             rl.addWidget(clear_btn)
 
@@ -131,6 +134,8 @@ class BackgroundTasksPage(QtWidgets.QWidget):
     def _build_ui(self):
         c = self.theme_manager.colors if self.theme_manager else {}
         styles = self.theme_manager.styles if self.theme_manager else None
+        _px = styles._px if styles else (lambda b: b)
+        self._btp_px = _px  # 供 _make_list_page 复用
         label = c.get("label", "#E5E7EB")
         muted = c.get("label_muted", "#9CA3AF")
         accent = c.get("btn_primary_hover", "#9E77ED")
@@ -193,7 +198,7 @@ class BackgroundTasksPage(QtWidgets.QWidget):
         from PyQt5 import QtCore as _QtCore
         self._tabs.tabBar().setExpanding(False)
         self._tabs.setElideMode(_QtCore.Qt.TextElideMode.ElideNone)
-        self._tabs.setMinimumSize(_QtCore.QSize(260, 0))
+        self._tabs.setMinimumSize(_QtCore.QSize(_px(260), 0))
         self._tabs.setCurrentIndex(0)
         layout.addWidget(self._tabs, 1)
 
@@ -291,12 +296,14 @@ class BackgroundTaskPanel(FramelessDraggableDialog):
         super().__init__(parent=parent, modal=False, window_type=QtCore.Qt.Tool)
         self.setWindowTitle("后台任务")
         self.setCursor(QtCore.Qt.ArrowCursor)
+        _styles = theme_manager.styles if theme_manager else None
+        _px = _styles._px if _styles else (lambda b: b)
         layout = QtWidgets.QVBoxLayout(self)
         layout.setContentsMargins(0, 0, 0, 0)
         self._page = BackgroundTasksPage(registry, theme_manager=theme_manager, parent=self)
         layout.addWidget(self._page)
-        self.setFixedWidth(560)
-        self.setMinimumHeight(440)
+        self.setFixedWidth(_px(560))
+        self.setMinimumHeight(_px(440))
 
     def refresh(self, *args):
         self._page.refresh(*args)

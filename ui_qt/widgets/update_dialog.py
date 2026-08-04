@@ -20,6 +20,10 @@ class UpdateDialog(FramelessDraggableDialog):
         super().__init__(parent=parent)
         self.theme_manager = theme_manager
         self._update_info = update_info or {}
+        # DPI 缩放 helper
+        _styles = theme_manager.styles if theme_manager else None
+        _px = _styles._px if _styles else (lambda b: b)
+        _pt = _styles._pt if _styles else (lambda b: b)
 
         # UI Setup
         layout = QtWidgets.QVBoxLayout(self)
@@ -57,7 +61,7 @@ class UpdateDialog(FramelessDraggableDialog):
             QFrame#UpdateContainer {{
                 background-color: {bg};
                 border: 1px solid {border};
-                border-radius: 16px;
+                border-radius: {_px(16)}px;
             }}
             QLabel {{
                 background: transparent;
@@ -66,9 +70,9 @@ class UpdateDialog(FramelessDraggableDialog):
                 background-color: {btn_bg};
                 color: {text};
                 border: none;
-                border-radius: 8px;
-                padding: 10px 20px;
-                font: bold 10pt "Microsoft YaHei UI";
+                border-radius: {_px(8)}px;
+                padding: {_px(10)}px {_px(20)}px;
+                font: bold {_pt(10)}pt "Microsoft YaHei UI";
             }}
             QPushButton:hover {{
                 background-color: {btn_hover};
@@ -92,7 +96,7 @@ class UpdateDialog(FramelessDraggableDialog):
 
         # 标题
         self.lbl_title = QtWidgets.QLabel("发现新版本")
-        self.lbl_title.setStyleSheet(f"font: bold 16pt 'Microsoft YaHei UI'; color: {title_color};")
+        self.lbl_title.setStyleSheet(f"font: bold {_pt(16)}pt 'Microsoft YaHei UI'; color: {title_color};")
         self.lbl_title.setAlignment(QtCore.Qt.AlignCenter)
         inner_layout.addWidget(self.lbl_title)
 
@@ -104,16 +108,16 @@ class UpdateDialog(FramelessDraggableDialog):
         version_widget = QtWidgets.QWidget()
         version_layout = QtWidgets.QHBoxLayout(version_widget)
         version_layout.setContentsMargins(0, 0, 0, 0)
-        version_layout.setSpacing(8)
+        version_layout.setSpacing(_px(8))
 
         current_label = QtWidgets.QLabel(f"当前: {current_ver}")
-        current_label.setStyleSheet(f"color: {badge_text}; font: 10pt 'Microsoft YaHei UI';")
+        current_label.setStyleSheet(f"color: {badge_text}; font: {_pt(10)}pt 'Microsoft YaHei UI';")
 
         arrow_label = QtWidgets.QLabel("→")
-        arrow_label.setStyleSheet(f"color: {text}; font: 10pt 'Microsoft YaHei UI';")
+        arrow_label.setStyleSheet(f"color: {text}; font: {_pt(10)}pt 'Microsoft YaHei UI';")
 
         latest_label = QtWidgets.QLabel(f"最新: {latest_ver}")
-        latest_label.setStyleSheet(f"color: {accent}; font: bold 10pt 'Microsoft YaHei UI';")
+        latest_label.setStyleSheet(f"color: {accent}; font: bold {_pt(10)}pt 'Microsoft YaHei UI';")
 
         version_layout.addStretch()
         version_layout.addWidget(current_label)
@@ -121,7 +125,7 @@ class UpdateDialog(FramelessDraggableDialog):
         version_layout.addWidget(latest_label)
         if release_date:
             date_label = QtWidgets.QLabel(f"  ({release_date})")
-            date_label.setStyleSheet(f"color: {badge_text}; font: 9pt 'Microsoft YaHei UI';")
+            date_label.setStyleSheet(f"color: {badge_text}; font: {_pt(9)}pt 'Microsoft YaHei UI';")
             version_layout.addWidget(date_label)
         version_layout.addStretch()
 
@@ -131,7 +135,7 @@ class UpdateDialog(FramelessDraggableDialog):
         changelog = self._update_info.get("changelog", "")
         if changelog:
             changelog_label = QtWidgets.QLabel("更新日志")
-            changelog_label.setStyleSheet(f"color: {badge_text}; font: 9pt 'Microsoft YaHei UI';")
+            changelog_label.setStyleSheet(f"color: {badge_text}; font: {_pt(9)}pt 'Microsoft YaHei UI';")
             inner_layout.addWidget(changelog_label)
 
             self.changelog_edit = QtWidgets.QTextEdit()
@@ -142,12 +146,12 @@ class UpdateDialog(FramelessDraggableDialog):
                     background-color: rgba(0,0,0,0.2);
                     color: {text};
                     border: 1px solid {border};
-                    border-radius: 8px;
-                    padding: 10px;
-                    font: 9pt "Microsoft YaHei UI";
+                    border-radius: {_px(8)}px;
+                    padding: {_px(10)}px;
+                    font: {_pt(9)}pt "Microsoft YaHei UI";
                 }}
             """)
-            self.changelog_edit.setFixedHeight(150)
+            self.changelog_edit.setFixedHeight(_px(150))
             inner_layout.addWidget(self.changelog_edit)
 
         # 进度区域（初始隐藏）
@@ -157,23 +161,23 @@ class UpdateDialog(FramelessDraggableDialog):
         progress_layout.setSpacing(8)
 
         self.lbl_status = QtWidgets.QLabel("准备下载...")
-        self.lbl_status.setStyleSheet(f"color: {text}; font: 10pt 'Microsoft YaHei UI';")
+        self.lbl_status.setStyleSheet(f"color: {text}; font: {_pt(10)}pt 'Microsoft YaHei UI';")
         self.lbl_status.setAlignment(QtCore.Qt.AlignCenter)
         progress_layout.addWidget(self.lbl_status)
 
         self.progress_bar = QtWidgets.QProgressBar()
-        self.progress_bar.setFixedHeight(6)
+        self.progress_bar.setFixedHeight(_px(6))
         self.progress_bar.setTextVisible(False)
         self.progress_bar.setRange(0, 100)
         self.progress_bar.setStyleSheet(f"""
             QProgressBar {{
                 background-color: rgba(0,0,0,0.2);
-                border-radius: 3px;
+                border-radius: {_px(3)}px;
                 border: none;
             }}
             QProgressBar::chunk {{
                 background-color: {accent};
-                border-radius: 3px;
+                border-radius: {_px(3)}px;
             }}
         """)
         progress_layout.addWidget(self.progress_bar)
@@ -189,8 +193,8 @@ class UpdateDialog(FramelessDraggableDialog):
         self.btn_later.setStyleSheet(f"""
             QLabel {{
                 color: {badge_text};
-                font: 10pt "Microsoft YaHei UI";
-                padding: 10px 20px;
+                font: {_pt(10)}pt "Microsoft YaHei UI";
+                padding: {_px(10)}px {_px(20)}px;
             }}
             QLabel:hover {{
                 color: {text};
@@ -213,7 +217,7 @@ class UpdateDialog(FramelessDraggableDialog):
 
         layout.addWidget(self.container)
 
-        self.setFixedWidth(480)
+        self.setFixedWidth(_px(480))
         self.adjustSize()
 
     def _on_update(self):

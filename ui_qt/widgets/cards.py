@@ -18,7 +18,7 @@ class ProfileCard(QtWidgets.QFrame):
         self.avatar_pixmap = avatar_pixmap
         self.avatar_size = avatar_size
         self.setObjectName("ProfileCard")
-        self.setMinimumHeight(100)
+        self.setMinimumHeight(theme_styles._px(100))
         self.setAttribute(QtCore.Qt.WA_StyledBackground, True)
         self._apply_style()
         self._setup_shadow(avatar_pixmap)
@@ -45,8 +45,8 @@ class ProfileCard(QtWidgets.QFrame):
         outer.setContentsMargins(0, 0, 0, 0)
         outer.addStretch(1)
 
-        # 头像
-        avatar = CircleAvatar(pixmap=self.avatar_pixmap, size=self.avatar_size)
+        # 头像（avatar_size 按 DPI 缩放）
+        avatar = CircleAvatar(pixmap=self.avatar_pixmap, size=self.theme_styles._px(self.avatar_size))
         outer.addWidget(avatar)
 
         # 信息
@@ -56,10 +56,11 @@ class ProfileCard(QtWidgets.QFrame):
         info_layout.setAlignment(QtCore.Qt.AlignVCenter)
 
         # 姓名
+        _pt = self.theme_styles._pt
         self._name_label = QtWidgets.QLabel(name)
         self._name_label.setAlignment(QtCore.Qt.AlignCenter)
         self._name_label.setStyleSheet(f"""
-            font: bold 18pt "Microsoft YaHei UI";
+            font: bold {_pt(18)}pt "Microsoft YaHei UI";
             color: {self.theme_styles.c.get('sidebar_text')};
             background: transparent;
         """)
@@ -69,7 +70,7 @@ class ProfileCard(QtWidgets.QFrame):
         self._quote_label = QtWidgets.QLabel(quote)
         self._quote_label.setStyleSheet(f"""
             color: {self.theme_styles.c.get('label_muted')};
-            font: 12pt "KaiTi", "SimKai", "Microsoft YaHei UI";
+            font: {_pt(12)}pt "KaiTi", "SimKai", "Microsoft YaHei UI";
             background: transparent;
         """)
         info_layout.addWidget(self._quote_label)
@@ -86,10 +87,11 @@ class ProfileCard(QtWidgets.QFrame):
         self.theme_styles = theme_styles
         self._apply_style()
         try:
+            _pt = self.theme_styles._pt
             if hasattr(self, "_name_label"):
-                self._name_label.setStyleSheet(f"font: bold 18pt \"Microsoft YaHei UI\"; color: {self.theme_styles.c.get('sidebar_text')}; background: transparent;")
+                self._name_label.setStyleSheet(f"font: bold {_pt(18)}pt \"Microsoft YaHei UI\"; color: {self.theme_styles.c.get('sidebar_text')}; background: transparent;")
             if hasattr(self, "_quote_label"):
-                self._quote_label.setStyleSheet(f"color: {self.theme_styles.c.get('label_muted')}; font: 12pt \"KaiTi\", \"SimKai\", \"Microsoft YaHei UI\"; background: transparent;")
+                self._quote_label.setStyleSheet(f"color: {self.theme_styles.c.get('label_muted')}; font: {_pt(12)}pt \"KaiTi\", \"SimKai\", \"Microsoft YaHei UI\"; background: transparent;")
         except Exception:
             pass
 
@@ -99,7 +101,9 @@ class HeroCard(QtWidgets.QFrame):
     def __init__(self, title: str, theme_styles: ThemeStyles, title_font_size: int = 40, parent=None):
         super().__init__(parent)
         self.theme_styles = theme_styles
-        self._title_font_size = title_font_size
+        # title_font_size 历史上是 px 单位的裸值（默认 40px）。现在统一转 pt 基准
+        # （px * 72/96 = px * 0.75），再交给 ThemeStyles._pt 按 DPI 缩放。
+        self._title_font_pt_base = max(6, int(round(title_font_size * 0.75)))
         self.setObjectName("HeroCard")
         self.setAttribute(QtCore.Qt.WA_StyledBackground, True)
         self._apply_style()
@@ -110,15 +114,16 @@ class HeroCard(QtWidgets.QFrame):
 
     def _setup_content(self, title: str):
         """设置卡片内容"""
+        _pt = self.theme_styles._pt
         layout = QtWidgets.QVBoxLayout(self)
         layout.setContentsMargins(20, 10, 20, 10)
         layout.setAlignment(QtCore.Qt.AlignCenter)
 
-        # 标题 (字号可定制; 默认 40, 较长标题如"ComfyUI 启动器"传更小值避免占太多视觉权重)
+        # 标题 (字号可定制; 默认对应原 40px, 较长标题如"ComfyUI 启动器"传更小值)
         self._title_label = QtWidgets.QLabel(title)
         self._title_label.setAlignment(QtCore.Qt.AlignCenter)
         self._title_label.setStyleSheet(f"""
-            font: bold {self._title_font_size}px "Microsoft YaHei UI";
+            font: bold {_pt(self._title_font_pt_base)}pt "Microsoft YaHei UI";
             color: {self.theme_styles.c.get('sidebar_text')};
             background: transparent;
         """)
@@ -130,7 +135,8 @@ class HeroCard(QtWidgets.QFrame):
         self._apply_style()
         try:
             if hasattr(self, "_title_label"):
-                self._title_label.setStyleSheet(f"font: bold {self._title_font_size}px \"Microsoft YaHei UI\"; color: {self.theme_styles.c.get('sidebar_text')}; background: transparent;")
+                _pt = self.theme_styles._pt
+                self._title_label.setStyleSheet(f"font: bold {_pt(self._title_font_pt_base)}pt \"Microsoft YaHei UI\"; color: {self.theme_styles.c.get('sidebar_text')}; background: transparent;")
         except Exception:
             pass
 
@@ -156,6 +162,7 @@ class InfoCard(QtWidgets.QFrame):
         layout.setSpacing(8)
         layout.setAlignment(QtCore.Qt.AlignVCenter)
         self._title_labels = []
+        _pt = self.theme_styles._pt
         if title and title.strip():
             for txt in title.split('\n'):
                 t = txt.strip()
@@ -165,7 +172,7 @@ class InfoCard(QtWidgets.QFrame):
                 label.setStyleSheet(
                     f"color: {self.theme_styles.c.get('label')}; "
                     f"background: transparent; "
-                    f"font: bold 12pt \"Microsoft YaHei UI\";"
+                    f"font: bold {_pt(12)}pt \"Microsoft YaHei UI\";"
                 )
                 layout.addWidget(label)
                 self._title_labels.append(label)
@@ -175,11 +182,12 @@ class InfoCard(QtWidgets.QFrame):
         self.theme_styles = theme_styles
         self._apply_style()
         try:
+            _pt = self.theme_styles._pt
             for label in getattr(self, "_title_labels", []):
                 label.setStyleSheet(
                     f"color: {self.theme_styles.c.get('label')}; "
                     f"background: transparent; "
-                    f"font: bold 12pt \"Microsoft YaHei UI\";"
+                    f"font: bold {_pt(12)}pt \"Microsoft YaHei UI\";"
                 )
             for btn in self.findChildren(QtWidgets.QPushButton):
                 if hasattr(btn, "update_theme"):
