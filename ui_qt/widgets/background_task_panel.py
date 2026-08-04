@@ -135,7 +135,9 @@ class BackgroundTasksPage(QtWidgets.QWidget):
         c = self.theme_manager.colors if self.theme_manager else {}
         styles = self.theme_manager.styles if self.theme_manager else None
         _px = styles._px if styles else (lambda b: b)
+        _pt = styles._pt if styles else (lambda b: b)
         self._btp_px = _px  # 供 _make_list_page 复用
+        self._btp_pt = _pt
         label = c.get("label", "#E5E7EB")
         muted = c.get("label_muted", "#9CA3AF")
         accent = c.get("btn_primary_hover", "#9E77ED")
@@ -147,12 +149,12 @@ class BackgroundTasksPage(QtWidgets.QWidget):
         layout.setSpacing(12)
 
         title = QtWidgets.QLabel("后台任务")
-        title.setStyleSheet(f"font: bold 16pt 'Microsoft YaHei UI'; color: {label};")
+        title.setStyleSheet(f"font: bold {_pt(16)}pt 'Microsoft YaHei UI'; color: {label};")
         layout.addWidget(title)
 
         hint = QtWidgets.QLabel("查看正在运行和已完成的任务。后台运行的任务可点「显示」找回进度弹窗。")
         hint.setWordWrap(True)
-        hint.setStyleSheet(f"color: {muted}; font: 9pt 'Microsoft YaHei UI';")
+        hint.setStyleSheet(f"color: {muted}; font: {_pt(9)}pt 'Microsoft YaHei UI';")
         layout.addWidget(hint)
 
         # 标签页（进行中 / 已完成）
@@ -160,7 +162,7 @@ class BackgroundTasksPage(QtWidgets.QWidget):
         self._tabs.setStyleSheet(f"""
             QTabWidget::pane {{
                 border: 1px solid {tab_border};
-                border-radius: 8px;
+                border-radius: {_px(8)}px;
                 background-color: {tab_bg};
                 top: -1px;
             }}
@@ -169,16 +171,16 @@ class BackgroundTasksPage(QtWidgets.QWidget):
                 color: {muted};
                 border: 1px solid {tab_border};
                 border-bottom: none;
-                border-top-left-radius: 8px;
-                border-top-right-radius: 8px;
+                border-top-left-radius: {_px(8)}px;
+                border-top-right-radius: {_px(8)}px;
                 /* 14px horizontal padding + 96px min-width keeps Chinese
                    titles (and count badges) readable even when the page
                    is narrow; previous 20px padding squeezed tabs past their
                    text sizeHint and clipped half-width. */
-                padding: 8px 14px;
-                min-width: 96px;
-                margin-right: 4px;
-                font: 10pt 'Microsoft YaHei UI';
+                padding: {_px(8)}px {_px(14)}px;
+                min-width: {_px(96)}px;
+                margin-right: {_px(4)}px;
+                font: {_pt(10)}pt 'Microsoft YaHei UI';
             }}
             QTabBar::tab:selected {{
                 background-color: {tab_bg};
@@ -230,7 +232,9 @@ class BackgroundTasksPage(QtWidgets.QWidget):
         pl.addWidget(scroll, 1)
         empty = QtWidgets.QLabel(empty_text)
         muted = self.theme_manager.colors.get("label_muted", "#9CA3AF") if self.theme_manager else "#9CA3AF"
-        empty.setStyleSheet(f"color: {muted}; font: 10pt 'Microsoft YaHei UI'; padding: 40px;")
+        _pt = getattr(self, "_btp_pt", None) or (lambda b: b)
+        _px = getattr(self, "_btp_px", None) or (lambda b: b)
+        empty.setStyleSheet(f"color: {muted}; font: {_pt(10)}pt 'Microsoft YaHei UI'; padding: {_px(40)}px;")
         empty.setAlignment(QtCore.Qt.AlignCenter)
         pl.addWidget(empty)
         page._list_vbox = vbox

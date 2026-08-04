@@ -32,9 +32,13 @@ def panel_source() -> str:
 class TestTabQssLayout:
     def test_qss_uses_14px_horizontal_padding(self, panel_source):
         """Padding 8px 20px 被裁 "进行中 / 已完成". 8px 14px 配 96px min-width
-        才能让 Chinese 4-char 标题 + 计数括号都放下."""
+        才能让 Chinese 4-char 标题 + 计数括号都放下.
+
+        Note: values are now DPI-tokenized via _px() (e.g. ``padding: {_px(8)}px {_px(14)}px;``),
+        so we match the base ints inside the _px(...) calls instead of raw px literals.
+        """
         m = re.search(
-            r"QTabBar::tab\s*\{\{[\s\S]*?padding:\s*8px\s+(\d+)px;",
+            r"QTabBar::tab\s*\{\{[\s\S]*?padding:\s*\{_px\(8\)\}px\s+\{_px\((\d+)\)\}px;",
             panel_source,
             flags=re.DOTALL,
         )
@@ -46,9 +50,12 @@ class TestTabQssLayout:
         )
 
     def test_qss_pins_min_width(self, panel_source):
-        """Min-width: 96px 必须存在, 否则窄容器里 Qt 会把 tab cell 压到字号以下."""
+        """Min-width: 96px 必须存在, 否则窄容器里 Qt 会把 tab cell 压到字号以下.
+
+        Now DPI-tokenized: ``min-width: {_px(96)}px;``.
+        """
         m = re.search(
-            r"QTabBar::tab\s*\{\{[\s\S]*?min-width:\s*(\d+)px;",
+            r"QTabBar::tab\s*\{\{[\s\S]*?min-width:\s*\{_px\((\d+)\)\}px;",
             panel_source,
             flags=re.DOTALL,
         )

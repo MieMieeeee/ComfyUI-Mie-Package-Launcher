@@ -192,7 +192,7 @@ class VersionSection(QtWidgets.QWidget):
         hb.setAlignment(Qt.AlignCenter)
 
         icon_lbl = QtWidgets.QLabel(icon_str)
-        icon_lbl.setStyleSheet("font-size: 14pt; background: transparent;")
+        icon_lbl.setStyleSheet(f"font-size: {self._pt(14)}pt; background: transparent;")
         hb.addWidget(icon_lbl)
 
         t = QtWidgets.QLabel(f"{title} :")

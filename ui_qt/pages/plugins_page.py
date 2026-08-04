@@ -419,6 +419,10 @@ class PluginsPage(BasePage):
     def __init__(self, app=None, theme_manager=None, parent=None):
         super().__init__(theme_manager, parent)
         self.app = app
+        # DPI 缩放 helper（BasePage 已存 self.theme_manager）
+        _styles = theme_manager.styles if theme_manager else None
+        self._px = _styles._px if _styles else (lambda b: b)
+        self._pt = _styles._pt if _styles else (lambda b: b)
         self._outdated_dir_names = set()  # 当前标记为「有更新」的 dir_name（populate 时清空）
         self._loader = None  # 由 PluginController.set_loader 注入；showEvent 据它触发首次加载
         self._setup_ui()
@@ -461,7 +465,7 @@ class PluginsPage(BasePage):
 
         title = QtWidgets.QLabel("插件管理")
         title.setStyleSheet(f"""
-            font: bold 16pt "Microsoft YaHei UI";
+            font: bold {self._pt(16)}pt "Microsoft YaHei UI";
             color: {c.get('label')};
             margin-bottom: 2px;
         """)
@@ -506,20 +510,20 @@ class PluginsPage(BasePage):
                 border-radius: 6px;
             }}
         """)
-        self._action_bar.setFixedHeight(44)  # 固定高度，杜绝表格抖动
+        self._action_bar.setFixedHeight(self._px(44))  # 固定高度，杜绝表格抖动
         ab_layout = QtWidgets.QHBoxLayout(self._action_bar)
         ab_layout.setContentsMargins(10, 6, 10, 6)
         ab_layout.setSpacing(8)
         # 未勾选时的提示文字（默认显示）
         self._ab_hint_label = QtWidgets.QLabel("勾选插件以显示批量操作")
         self._ab_hint_label.setStyleSheet(
-            f"color: {c.get('label_dim', '#6B7280')}; font: 9pt 'Microsoft YaHei UI';")
+            f"color: {c.get('label_dim', '#6B7280')}; font: {self._pt(9)}pt 'Microsoft YaHei UI';")
         # 勾选时的标签 + 计数
         ab_label = QtWidgets.QLabel("已选中：")
-        ab_label.setStyleSheet(f"color: {c.get('label_muted', '#9CA3AF')}; font: 9pt 'Microsoft YaHei UI';")
+        ab_label.setStyleSheet(f"color: {c.get('label_muted', '#9CA3AF')}; font: {self._pt(9)}pt 'Microsoft YaHei UI';")
         self._ab_count_label = QtWidgets.QLabel("0")
         self._ab_count_label.setStyleSheet(
-            f"color: {c.get('btn_primary_hover', '#9E77ED')}; font: bold 9pt 'Microsoft YaHei UI';")
+            f"color: {c.get('btn_primary_hover', '#9E77ED')}; font: bold {self._pt(9)}pt 'Microsoft YaHei UI';")
         self.update_selected_btn = QtWidgets.QPushButton("更新选中")
         self.enable_btn = QtWidgets.QPushButton("启用选中")
         self.disable_btn = QtWidgets.QPushButton("禁用选中")
@@ -573,7 +577,7 @@ class PluginsPage(BasePage):
                 border-bottom-left-radius: 6px;
                 border-bottom-right-radius: 6px;
                 padding: 4px;
-                font: 10pt "Microsoft YaHei UI";
+                font: {self._pt(10)}pt "Microsoft YaHei UI";
                 outline: none;
             }}
             /* 列表内部滚动条：紫色半透明 handle（外层 wrap_in_scroll 的 QSS 不继承进来，故单设） */

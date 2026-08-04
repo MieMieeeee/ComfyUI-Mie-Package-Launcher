@@ -25,7 +25,7 @@ class StyledLineEdit(QtWidgets.QLineEdit):
                     border: 1px solid {self.theme_styles.c.get('input_border')};
                     border-radius: 6px;
                     padding: 5px 10px;
-                    font: 10pt "Microsoft YaHei UI";
+                    font: {self.theme_styles._pt(10)}pt "Microsoft YaHei UI";
                 }}
             """)
         else:
@@ -36,7 +36,7 @@ class StyledLineEdit(QtWidgets.QLineEdit):
                     border: 1px solid {self.theme_styles.c.get('input_border')};
                     border-radius: 6px;
                     padding: 5px 10px;
-                    font: 10pt "Microsoft YaHei UI";
+                    font: {self.theme_styles._pt(10)}pt "Microsoft YaHei UI";
                     selection-background-color: {self.theme_styles.c.get('accent')};
                 }}
                 QLineEdit:hover {{
@@ -73,7 +73,7 @@ class ReadOnlyField(QtWidgets.QLineEdit):
                 border: 1px solid {self.theme_styles.c.get('input_border')};
                 border-radius: 6px;
                 padding: 5px 10px;
-                font: 10pt "Microsoft YaHei UI";
+                font: {self.theme_styles._pt(10)}pt "Microsoft YaHei UI";
             }}
         """)
 
@@ -103,7 +103,7 @@ class NoWheelComboBox(QtWidgets.QComboBox):
                 border: 1px solid {self.theme_styles.c.get('input_border')};
                 border-radius: 6px;
                 padding: 5px 10px;
-                font: 10pt "Microsoft YaHei UI";
+                font: {self.theme_styles._pt(10)}pt "Microsoft YaHei UI";
             }}
             QComboBox::drop-down {{
                 border: none;
@@ -125,7 +125,7 @@ class NoWheelComboBox(QtWidgets.QComboBox):
                 border: 1px solid {self.theme_styles.c.get('input_border')};
                 selection-background-color: {self.theme_styles.c.get('input_border')};
                 selection-color: #FFFFFF;
-                font: 10pt "Microsoft YaHei UI";
+                font: {self.theme_styles._pt(10)}pt "Microsoft YaHei UI";
                 outline: none;
             }}
         """)
@@ -153,7 +153,7 @@ class StyledComboBox(QtWidgets.QComboBox):
                 border: 1px solid {self.theme_styles.c.get('input_border')};
                 border-radius: 6px;
                 padding: 5px 10px;
-                font: 10pt "Microsoft YaHei UI";
+                font: {self.theme_styles._pt(10)}pt "Microsoft YaHei UI";
             }}
             QComboBox::drop-down {{
                 border: none;
@@ -175,7 +175,7 @@ class StyledComboBox(QtWidgets.QComboBox):
                 border: 1px solid {self.theme_styles.c.get('input_border')};
                 selection-background-color: {self.theme_styles.c.get('input_border')};
                 selection-color: #FFFFFF;
-                font: 10pt "Microsoft YaHei UI";
+                font: {self.theme_styles._pt(10)}pt "Microsoft YaHei UI";
                 outline: none;
             }}
         """)

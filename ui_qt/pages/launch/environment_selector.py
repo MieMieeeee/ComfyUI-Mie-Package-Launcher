@@ -69,12 +69,12 @@ class EnvironmentSelector(QtWidgets.QWidget):
 
         # 左：图标 + 「当前环境」标签
         icon_lbl = QtWidgets.QLabel("🧩")
-        icon_lbl.setStyleSheet("font-size: 12pt; background: transparent; border: none;")
+        icon_lbl.setStyleSheet(f"font-size: {self._pt(12)}pt; background: transparent; border: none;")
         top_row.addWidget(icon_lbl)
 
         title_lbl = QtWidgets.QLabel("当前环境")
         title_lbl.setStyleSheet(
-            f"font-weight: bold; font-size: 10pt; color: {self._color('label', '#E5E7EB')};"
+            f"font-weight: bold; font-size: {self._pt(10)}pt; color: {self._color('label', '#E5E7EB')};"
             " background: transparent; border: none;"
         )
         top_row.addWidget(title_lbl)
@@ -107,7 +107,7 @@ class EnvironmentSelector(QtWidgets.QWidget):
         # 不可编辑，改路径走「管理环境」弹窗。
         self.path_summary = QtWidgets.QLabel("")
         self.path_summary.setStyleSheet(
-            f"color: {self._color('label_muted', '#9CA3AF')}; font-size: 8pt;"
+            f"color: {self._color('label_muted', '#9CA3AF')}; font-size: {self._pt(8)}pt;"
             " padding: 0 2px 0 28px; background: transparent; border: none;"
         )
         self.path_summary.setWordWrap(True)
@@ -184,9 +184,9 @@ class EnvironmentSelector(QtWidgets.QWidget):
             background-color: rgba(99, 102, 241, 0.18);
             color: {self._color('badge_text', '#A5B4FC')};
             border: 1px solid rgba(99, 102, 241, 0.4);
-            border-radius: 9px;
+            border-radius: {self._px(9)}px;
             padding: 1px 8px;
-            font-size: 8pt;
+            font-size: {self._pt(8)}pt;
             font-weight: bold;
         }}
         """

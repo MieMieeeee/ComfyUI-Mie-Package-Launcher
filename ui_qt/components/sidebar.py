@@ -14,8 +14,9 @@ class Sidebar(QtWidgets.QWidget):
         self.theme_styles = theme_styles
         self.on_collapse = on_collapse
         self.collapsed = False
-        self.expanded_width = 240
-        self.collapsed_width = 60
+        # base 宽度（按 DPI 缩放，与 qt_app 主窗口侧边栏一致）
+        self._expanded_base = 240
+        self._collapsed_base = 60
 
         self.setObjectName("SideBar")
         self._apply_style()
@@ -26,15 +27,17 @@ class Sidebar(QtWidgets.QWidget):
 
     def _setup_layout(self):
         """设置侧边栏布局"""
+        _px = self.theme_styles._px
         layout = QtWidgets.QVBoxLayout(self)
-        layout.setContentsMargins(15, 15, 15, 15)
-        layout.setSpacing(15)
+        layout.setContentsMargins(_px(15), _px(15), _px(15), _px(15))
+        layout.setSpacing(_px(15))
         self.setLayout(layout)
 
     def set_collapsed(self, collapsed: bool):
         """设置折叠/展开状态"""
         self.collapsed = collapsed
-        self.setFixedWidth(self.collapsed_width if collapsed else self.expanded_width)
+        _px = self.theme_styles._px
+        self.setFixedWidth(_px(self._collapsed_base if collapsed else self._expanded_base))
 
     def add_header(self, widget):
         """添加头部"""
@@ -86,7 +89,7 @@ class SidebarHeader(QtWidgets.QWidget):
         title_label = QtWidgets.QLabel(title)
         title_label.setAlignment(QtCore.Qt.AlignCenter)
         title_label.setStyleSheet(f"""
-            font: bold 18pt "Microsoft YaHei";
+            font: bold {theme_styles._pt(18)}pt "Microsoft YaHei";
             color: {theme_styles.c.get('sidebar_text')};
             background: transparent;
         """)
@@ -105,7 +108,7 @@ class SidebarHeader(QtWidgets.QWidget):
         author_label.setAlignment(QtCore.Qt.AlignCenter)
         author_label.setStyleSheet(f"""
             color: {theme_styles.c.get('sidebar_text_muted')};
-            font: 9pt "Microsoft YaHei";
+            font: {theme_styles._pt(9)}pt "Microsoft YaHei";
             background: transparent;
         """)
 

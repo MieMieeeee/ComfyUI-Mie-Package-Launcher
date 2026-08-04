@@ -13,6 +13,10 @@ class CustomConfirmDialog(FramelessDraggableDialog):
         self.theme_manager = theme_manager
         self._result = None
         self._input_widget = None  # 仅 show_input=True 时创建
+        # DPI 缩放 helper（theme_manager 缺失时退化为 1.0）
+        _styles = theme_manager.styles if theme_manager else None
+        _px = _styles._px if _styles else (lambda b: b)
+        _pt = _styles._pt if _styles else (lambda b: b)
         
         # UI Setup
         layout = QtWidgets.QVBoxLayout(self)
@@ -48,7 +52,7 @@ class CustomConfirmDialog(FramelessDraggableDialog):
             
         # 记住选择复选框的样式模板，在上面动态插入
         REMEMBER_STYLESHEET = f'''
-QCheckBox {{ color: {label_muted_color}; font: 9pt "Microsoft YaHei UI"; background: transparent; spacing: 6px; padding: 2px; }}
+QCheckBox {{ color: {label_muted_color}; font: {_pt(9)}pt "Microsoft YaHei UI"; background: transparent; spacing: 6px; padding: 2px; }}
 QCheckBox::indicator {{ width: 16px; height: 16px; border: 1px solid {border}; border-radius: 4px; background-color: {input_bg}; }}
 QCheckBox::indicator:hover {{ border: 1px solid {accent}; }}
 QCheckBox::indicator:checked {{ background-color: {accent}; border: 1px solid {accent}; image: none; }}
@@ -59,7 +63,7 @@ QCheckBox::indicator:checked:hover {{ background-color: {accent_hover}; border: 
             QFrame#ConfirmContainer {{
                 background-color: {bg};
                 border: 1px solid {border};
-                border-radius: 16px;
+                border-radius: {_px(16)}px;
             }}
             QLabel {{
                 background: transparent;
@@ -68,9 +72,9 @@ QCheckBox::indicator:checked:hover {{ background-color: {accent_hover}; border: 
                 background-color: {btn_bg};
                 color: {text};
                 border: none;
-                border-radius: 8px;
-                padding: 10px 20px;
-                font: bold 10pt "Microsoft YaHei UI";
+                border-radius: {_px(8)}px;
+                padding: {_px(10)}px {_px(20)}px;
+                font: bold {_pt(10)}pt "Microsoft YaHei UI";
             }}
             QPushButton:hover {{
                 background-color: {btn_hover};
@@ -97,13 +101,13 @@ QCheckBox::indicator:checked:hover {{ background-color: {accent_hover}; border: 
         
         # 标题
         self.lbl_title = QtWidgets.QLabel(title)
-        self.lbl_title.setStyleSheet(f"font: bold 14pt 'Microsoft YaHei UI'; color: {title_color};")
+        self.lbl_title.setStyleSheet(f"font: bold {_pt(14)}pt 'Microsoft YaHei UI'; color: {title_color};")
         self.lbl_title.setAlignment(QtCore.Qt.AlignLeft | QtCore.Qt.AlignVCenter)
         inner_layout.addWidget(self.lbl_title)
-        
+
         # 内容
         self.lbl_content = QtWidgets.QLabel(content)
-        self.lbl_content.setStyleSheet(f"font: 10pt 'Microsoft YaHei UI'; color: {text}; line-height: 1.5;")
+        self.lbl_content.setStyleSheet(f"font: {_pt(10)}pt 'Microsoft YaHei UI'; color: {text}; line-height: 1.5;")
         self.lbl_content.setWordWrap(True)
         self.lbl_content.setAlignment(QtCore.Qt.AlignLeft | QtCore.Qt.AlignTop)
         inner_layout.addWidget(self.lbl_content)
@@ -127,7 +131,7 @@ QCheckBox::indicator:checked:hover {{ background-color: {accent_hover}; border: 
                 self._input_widget.setStyleSheet(
                     f"QLineEdit {{ background-color: {input_bg}; color: {text};"
                     f" border: 1px solid {border}; border-radius: 6px; padding: 6px 10px;"
-                    f" font: 10pt 'Microsoft YaHei UI'; }}")
+                    f" font: {_pt(10)}pt 'Microsoft YaHei UI'; }}")
                 inner_layout.addWidget(self._input_widget)
 
         # 可选的「记住我的选择」复选框
@@ -175,8 +179,8 @@ QCheckBox::indicator:checked:hover {{ background-color: {accent_hover}; border: 
         
         layout.addWidget(self.container)
         
-        # 根据内容自适应大小，使用调用方指定的最小宽度
-        self.setMinimumWidth(int(min_width))
+        # 根据内容自适应大小，使用调用方指定的最小宽度（按 DPI 缩放）
+        self.setMinimumWidth(_px(int(min_width)))
         
     def _on_btn_clicked(self, index):
         self._result = index
