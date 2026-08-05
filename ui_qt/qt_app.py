@@ -2706,17 +2706,20 @@ class PyQtLauncher(QtWidgets.QMainWindow, process_events.ProcessCallback):
             avail_geo = primary_screen.availableGeometry()
             s_w, s_h = avail_geo.width(), avail_geo.height()
 
-            # 使用固定的窗口初始尺寸（按 DPI 缩放，保证 HiDPI 下内容不挤成一团）
-            base_w = _sp(1350)
-            base_h = _sp(900)
+            # 窗口初始尺寸：以原始 1350x900 为底，HiDPI（scale>1）时放大让放大后的
+            # 内容放得下；scale<1（用户主动选了更小的 UI 缩放）时**不缩小**窗口——
+            # 内容变小只会让同样大小的窗口显得更宽松，不应裁掉首页的快捷目录。
+            # 即窗口「只放大不缩小」：max(原始, 缩放后)。
+            base_w = max(1350, _sp(1350))
+            base_h = max(900, _sp(900))
 
             final_w = min(base_w, s_w - 40)
             final_h = min(base_h, s_h - 80)
 
             # 最小窗口尺寸：防止用户缩到侧边栏 + 内容下限以下导致布局错乱。
-            # 数值也按 scale 缩放（HiDPI 下最小可用面积更大）。
+            # 同样「只放大不缩小」，避免用户选了小 scale 后最小尺寸反而裁内容。
             try:
-                self.setMinimumSize(_sp(960), _sp(640))
+                self.setMinimumSize(max(960, _sp(960)), max(640, _sp(640)))
             except Exception:
                 pass
 

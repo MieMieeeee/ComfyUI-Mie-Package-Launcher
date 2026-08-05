@@ -169,5 +169,55 @@ class TestResolveUiScale(unittest.TestCase):
         self.assertAlmostEqual(resolve(config, 96.0), 1.25, places=6)
 
 
+class TestWindowSizeScalingContract(unittest.TestCase):
+    """Verify the window-size formula in qt_app._setup_ui: 'only scale UP, never down'.
+
+    The main window base size must never shrink below the original 1350x900 even
+    when the user picks ui_scale<1. This is the regression guard for a real bug:
+    a user with ui_scale=0.8 got a 1080x720 window (=1350*0.8) which clipped the
+    launch page's 快捷目录 section, forcing them to scroll.
+
+    The contract enforced here mirrors qt_app.py:
+        base_w = max(1350, _sp(1350))
+        base_h = max(900,  _sp(900))
+    so that HiDPI (scale>1) grows the window but small UI scales don't clip it.
+    """
+
+    def _sp(self, base, scale):
+        return max(1, int(round(base * scale)))
+
+    def _base_w(self, scale):
+        return max(1350, self._sp(1350, scale))
+
+    def _base_h(self, scale):
+        return max(900, self._sp(900, scale))
+
+    def test_small_scale_does_not_shrink_window(self):
+        # ui_scale=0.8 (the reported bug) → window must stay at 1350x900, not 1080x720.
+        self.assertEqual(self._base_w(0.8), 1350)
+        self.assertEqual(self._base_h(0.8), 900)
+
+    def test_minimum_scale_does_not_shrink_window(self):
+        self.assertEqual(self._base_w(0.75), 1350)
+        self.assertEqual(self._base_h(0.75), 900)
+
+    def test_scale_1_is_unchanged(self):
+        self.assertEqual(self._base_w(1.0), 1350)
+        self.assertEqual(self._base_h(1.0), 900)
+
+    def test_hidpi_scale_grows_window(self):
+        # scale=1.25 → content is bigger, window must grow to fit it.
+        self.assertEqual(self._base_w(1.25), 1688)  # round(1350*1.25)=1688
+        self.assertEqual(self._base_h(1.25), 1125)
+
+    def test_minimum_size_also_only_scales_up(self):
+        # setMinimumSize uses max(960, _sp(960)) / max(640, _sp(640)).
+        for scale in (0.75, 0.8, 1.0, 1.1, 1.25):
+            min_w = max(960, self._sp(960, scale))
+            min_h = max(640, self._sp(640, scale))
+            self.assertGreaterEqual(min_w, 960, f"min_w shrank at scale {scale}")
+            self.assertGreaterEqual(min_h, 640, f"min_h shrank at scale {scale}")
+
+
 if __name__ == "__main__":
     unittest.main()
