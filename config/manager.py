@@ -117,6 +117,14 @@ class ConfigManager:
                 "update_timeout": 120,
                 "background_fetch_delay_seconds": 180,
             },
+            # 整合包更新（v1.1.0 新增，plan §7）。manifest 路径在 UI 输入，不在 config 里。
+            "package_update": {
+                "respect_frozen_pkgs": True,  # dependency item 的 torch/numpy 等默认跳过
+                "cache_dir": "launcher/manifests/cache/",  # URL 拉的 manifest 本地缓存
+                "runs_dir": "launcher/manifests/runs/",   # apply 的 report 留痕
+                "cache_ttl_days": 3,   # manifest 缓存短 TTL（用户希望尽快拿新版）
+                "runs_ttl_days": 30,   # report 历史长 TTL（查「上周跑挂的那次」）
+            },
         }
 
     def load_config(self) -> Dict[str, Any]:
@@ -169,6 +177,13 @@ class ConfigManager:
                     ui.setdefault("minimize_to_tray_ask_every_time", True)
                     # UI 缩放字段：老配置补 None（=自动跟随 DPI）。
                     ui.setdefault("ui_scale", None)
+                    # 整合包更新段（v1.1.0）：老配置补默认段，读取处 .get() 兜底。
+                    pu = self.config.setdefault("package_update", {})
+                    pu.setdefault("respect_frozen_pkgs", True)
+                    pu.setdefault("cache_dir", "launcher/manifests/cache/")
+                    pu.setdefault("runs_dir", "launcher/manifests/runs/")
+                    pu.setdefault("cache_ttl_days", 3)
+                    pu.setdefault("runs_ttl_days", 30)
                     # 多环境迁移：老 paths 段 → environments 数组 + active_env_id
                     try:
                         migrate_environments(self.config)

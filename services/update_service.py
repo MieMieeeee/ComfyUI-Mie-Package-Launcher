@@ -4,33 +4,12 @@ import subprocess
 from utils import paths as PATHS
 from utils import pip as PIPUTILS
 from utils import net as NETUTILS
+from services.dependency_policy import FROZEN_PKGS
 import re
 
 
-# 依赖升级黑名单。“同时更新依赖库”的递式安装中跳过这些包，原因各异：
-#
-# - torch / torchvision / torchaudio / triton / xformers
-#   强依赖本地 CUDA 版本与驱动。随手给它们跑 pip install -U 非常容易装到与现有 CUDA
-#   不匹配的新版，轻者引入错误，重者整套 GPU 环境坏掉。ComfyUI Manager 也是先让 pip
-#   装、装完不对再 torch_rollback() 回滚，意图与我们一致。
-#
-# - numpy
-#   大版本跳会影响 opencv / torch 等的 ABI 兼容性，在未验证环境下应避免自动跳。
-#   ComfyUI Manager 改为用 pip_overrides.json 强制 numpy==1.26.4，本启动器走黑名单
-#   跳过更安全（不联网不下载）。
-#
-# 不再冻结 comfyui-frontend-package / comfyui-workflow-templates：它们是 ComfyUI
-# 官方 requirements.txt 里 pin 死的包，ComfyUI Manager 也是直接交给 pip 按 pin 版本
-# 装。启动器 “更新内核” 应该顺带把它们一起同步到 requirements.txt 里要求的版本，
-# 与官方 ComfyUI Manager 行为一致。
-FROZEN_PKGS = frozenset({
-    "torch",
-    "torchvision",
-    "torchaudio",
-    "triton",
-    "xformers",
-    "numpy",
-})
+# 依赖升级黑名单的原因注释见 services/dependency_policy.py（v1.1.0 抽离共享）。
+# UpdateService 仅为向后兼容保留这个名字，实际定义在 dependency_policy 模块。
 
 
 class UpdateService:

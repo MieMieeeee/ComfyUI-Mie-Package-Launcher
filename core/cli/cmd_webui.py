@@ -25,7 +25,13 @@ from __future__ import annotations
 
 from typing import Any
 
-from core.cli.exitcodes import EXIT_OK, EXIT_ERROR
+from core.cli.exitcodes import (
+    EXIT_OK,
+    EXIT_ERROR,
+    EXIT_WEBUI_CORE_NOT_RUNNING,
+    EXIT_WEBUI_NOT_INSTALLED,
+    EXIT_WEBUI_DEPS_MISSING,
+)
 from core.cli.output import format_human, format_json
 
 __all__ = ["run", "WEBUI_ACTIONS"]
@@ -85,7 +91,7 @@ def _do_start(app, args) -> dict:
         return {
             "ok": False, "pid": None, "port": None, "url": None,
             "elapsed_sec": 0.0, "error": "WebUI 路径未安装; 请先 webui install",
-            "exit_code": 7,
+            "exit_code": EXIT_WEBUI_NOT_INSTALLED,
         }
 
     # 2. 依赖检查
@@ -100,7 +106,7 @@ def _do_start(app, args) -> dict:
                 "elapsed_sec": 0.0,
                 "error": "依赖缺失: " + ", ".join(dep["missing"]) + "; 请先 webui setup",
                 "missing": dep["missing"],
-                "exit_code": 8,
+                "exit_code": EXIT_WEBUI_DEPS_MISSING,
             }
 
     # 3. --with-comfyui: 先确认 ComfyUI 在跑 (不强启动)
@@ -111,7 +117,7 @@ def _do_start(app, args) -> dict:
                 "ok": False, "pid": None, "port": None, "url": None,
                 "elapsed_sec": 0.0,
                 "error": "ComfyUI 未运行; --with-comfyui 要求先启 ComfyUI",
-                "exit_code": 6,
+                "exit_code": EXIT_WEBUI_CORE_NOT_RUNNING,
             }
 
     # 4. 启
@@ -282,7 +288,7 @@ def _do_setup(app, args) -> dict:
         return {"ok": False, "error": "webui_path 解析失败", "exit_code": 1}
     target = Path(webui_path)
     if not target.exists():
-        return {"ok": False, "error": "WebUI 目录不存在: " + str(target), "exit_code": 7}
+        return {"ok": False, "error": "WebUI 目录不存在: " + str(target), "exit_code": EXIT_WEBUI_NOT_INSTALLED}
 
     req = target / "requirements.txt"
     if not req.exists():
