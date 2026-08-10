@@ -9,13 +9,15 @@ from services.runtime_service import RuntimeService
 from services.announcement_service import AnnouncementService
 from services.startup_service import StartupService
 from services.model_path_service import ModelPathService
+from services.model_service import ModelService
 from services.launcher_update_service import LauncherUpdateService
 from services.plugin_service import PluginService
+from services.package_update_service import PackageUpdateService
 
 
 class ServiceContainer:
     def __init__(self, process: ProcessService, version: VersionService, config: ConfigService,
-                 update: UpdateService, git: GitService, network: NetworkService, runtime: RuntimeService, announcement: AnnouncementService, startup: StartupService, model_path: ModelPathService, launcher_update: LauncherUpdateService, plugins: PluginService):
+                 update: UpdateService, git: GitService, network: NetworkService, runtime: RuntimeService, announcement: AnnouncementService, startup: StartupService, model_path: ModelPathService, model: ModelService, launcher_update: LauncherUpdateService, plugins: PluginService, package: PackageUpdateService):
         self.process = process
         self.version = version
         self.config = config
@@ -26,8 +28,10 @@ class ServiceContainer:
         self.announcement = announcement
         self.startup = startup
         self.model_path = model_path
+        self.model = model
         self.launcher_update = launcher_update
         self.plugins = plugins
+        self.package = package
 
     @classmethod
     def from_app(cls, app):
@@ -49,6 +53,8 @@ class ServiceContainer:
             announcement=AnnouncementService(app),
             startup=StartupService(app),
             model_path=ModelPathService(app),
+            model=ModelService(app),
             launcher_update=LauncherUpdateService(app),
             plugins=PluginService(app),
+            package=PackageUpdateService(app),
         )

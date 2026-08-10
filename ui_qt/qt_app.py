@@ -43,6 +43,7 @@ from ui_qt.pages.about_me_page import AboutMePage
 from ui_qt.pages.about_comfyui_page import AboutComfyUIPage
 from ui_qt.pages.about_launcher_page import AboutLauncherPage
 from ui_qt.pages.plugins_page import PluginsPage, PluginController
+from ui_qt.pages.package_update_page import PackageUpdatePage
 from ui_qt.pages.system_settings_page import SystemSettingsPage
 from ui_qt.pages.webui_page import WebuiPage
 from ui_qt.widgets.tray_icon import LauncherTray
@@ -2069,6 +2070,7 @@ class PyQtLauncher(QtWidgets.QMainWindow, process_events.ProcessCallback):
             "logs": NavBtn("📋 ComfyUI 实时日志"),
             "plugins": NavBtn("🧩 插件管理"),
             "version": NavBtn("🧬 内核版本管理"),
+            "package": NavBtn("📦 更新中心"),
             "models": NavBtn("📂 外置模型库管理"),
             "tasks": NavBtn("📋 后台任务"),
             "settings": NavBtn("⚙️ 系统设置"),
@@ -2086,6 +2088,8 @@ class PyQtLauncher(QtWidgets.QMainWindow, process_events.ProcessCallback):
         btns["logs"].setProperty("full_text", "📋 ComfyUI 实时日志")
         btns["version"].setToolTip("管理ComfyUI内核版本，切换提交")
         btns["version"].setProperty("full_text", "🧬 内核版本管理")
+        btns["package"].setToolTip("加载整合包更新 manifest，逐项确认后应用")
+        btns["package"].setProperty("full_text", "📦 更新中心")
         btns["models"].setToolTip("管理外置模型库路径配置")
         btns["models"].setProperty("full_text", "📂 外置模型库管理")
         btns["settings"].setToolTip("启动器本体的窗口、托盘等设置")
@@ -2345,6 +2349,8 @@ class PyQtLauncher(QtWidgets.QMainWindow, process_events.ProcessCallback):
         )
         page_plugins = PluginsPage(app=self, theme_manager=self.theme_manager)
         self._plugins_page = page_plugins  # 供 _do_plugin_check_updates 等回推结果用
+        page_package = PackageUpdatePage(app=self, theme_manager=self.theme_manager)
+        self._package_page = page_package
         # 后台任务页：注册表已在 _setup_ui 侧边栏构造时建好（self._bg_task_registry）
         from ui_qt.widgets.background_task_panel import BackgroundTasksPage
         page_tasks = BackgroundTasksPage(
@@ -2360,6 +2366,7 @@ class PyQtLauncher(QtWidgets.QMainWindow, process_events.ProcessCallback):
             "webui": page_webui,
             "logs": page_logs,
             "version": page_version,
+            "package": page_package,
             "models": page_models,
             "settings": page_settings,
             "about": page_about_me,
@@ -2451,6 +2458,7 @@ class PyQtLauncher(QtWidgets.QMainWindow, process_events.ProcessCallback):
         content.addWidget(wrap_in_scroll(page_logs))
         content.addWidget(wrap_in_scroll(page_plugins))
         content.addWidget(wrap_in_scroll(page_version))
+        content.addWidget(wrap_in_scroll(page_package))
         content.addWidget(wrap_in_scroll(page_models))
         content.addWidget(wrap_in_scroll(page_tasks))
         content.addWidget(wrap_in_scroll(page_settings))
@@ -2464,6 +2472,7 @@ class PyQtLauncher(QtWidgets.QMainWindow, process_events.ProcessCallback):
             "logs": page_logs,
             "plugins": page_plugins,
             "version": page_version,
+            "package": page_package,
             "models": page_models,
             "tasks": page_tasks,
             "settings": page_settings,
@@ -3214,6 +3223,14 @@ class PyQtLauncher(QtWidgets.QMainWindow, process_events.ProcessCallback):
             webui_page = pages.get("webui")
             if webui_page is not None and hasattr(webui_page, "refresh_after_env_switch"):
                 webui_page.refresh_after_env_switch()
+        except Exception:
+            pass
+
+        # 7. 更新中心页面: 刷新当前环境展示（plan §5.1 第 3 处）
+        try:
+            package_page = pages.get("package")
+            if package_page is not None and hasattr(package_page, "_refresh_env_display"):
+                package_page._refresh_env_display()
         except Exception:
             pass
 
