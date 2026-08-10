@@ -30,6 +30,7 @@ commands:
   update       更新组件（comfyui 内核 / plugins 全部插件）
   plugins      管理 custom_nodes 插件（list/install/uninstall/disable/enable/check-updates/force-update）
   webui        管理 Comfyui-Workbench-Mie (webui) 服务，与 ComfyUI 平级（详见 `webui --help`）
+  package      加载整合包更新 manifest，show / diff / apply（详见 `package --help`）
   help         打印帮助（无参 = 顶层；带子命令名 = 该子命令的 help）
 ```
 
@@ -293,6 +294,38 @@ ok: true
 log: Already up to date.
 ```
 
+### package
+
+加载 UP 主写的整合包更新 manifest（JSON），展示 / 对照 / 应用 4 类变更（core / plugin /
+model / dependency）。manifest 来源：本地文件路径 或 HTTPS URL（`http://` 拒绝）。
+
+```
+comfyui-launcher package <ACTION> <PATH-OR-URL> [flags]
+```
+
+| action | 用途 |
+|---|---|
+| `show` | 加载 + 校验 manifest，打印摘要 + 与当前 env 对照的 diff |
+| `diff` | 只输出 diff 段（agent 快速判断哪些 item 需要跑） |
+| `apply` | 应用 manifest（串行跑 items） |
+
+| flag | 默认 | 说明 |
+|---|---|---|
+| `--items ID1,ID2,...` | 全部 | apply 时只跑指定 item_id，其它 pending |
+| `--dry-run` | off | apply 时校验 + 模拟跑，不实际改文件 |
+| `--auto-yes` | off | 跳过所有交互确认（含 env 不匹配弹窗），脚本用 |
+| `--manual-yes` | off | model 项视作用户已自行下载 → verify_manual |
+| `--manual-skip` | off | 全部 model 项标 skipped |
+| `--env ENV_ID` | active | 一次性指定 env（不写回 config） |
+| `--json` | off | 单行 JSON 输出 |
+
+**Exit codes**（`package apply`）：0 成功 / 1 通用错 / 5 部分失败 / 9 前置不兼容 /
+10 manifest 无效 / 11 源不可达。详见 §退出码一览。
+
+**apply 典型节奏**：先 `package show <url> --json` 看 diff + current_versions →
+确认要跑 → `package apply <url> --auto-yes` → 失败查 `package apply` 的 `--json` report。
+model 项永远需要用户手动下载（启动器不下载模型，只校验文件存在）；UP 主会在视频描述给链接。
+
 ### help
 
 打印帮助。和 `-h/--help` 等价，但是是可以拼接的：可以看任意子命令的 help。
@@ -338,11 +371,17 @@ $ echo $?
 | 2 | start 拒绝重复 | start |
 | 3 | 未在跑 | status |
 | 4 | 已是最新 | update |
+| 5 | package apply 部分失败（≥1 项 failed） | package |
 | 6 | webui start 时 ComfyUI 未运行（用了 `--with-comfyui`） | webui |
 | 7 | webui 路径未安装（用 `webui install` 拉取） | webui |
 | 8 | webui 依赖缺失（用 `webui setup` 安装） | webui |
+| 9 | package apply 前置不兼容（dirty tree / env 不匹配且未 `--auto-yes`） | package |
+| 10 | package manifest 无效（schema / sha256 / version 超支持范围） | package |
+| 11 | package 源不可达（文件不存在 / URL 失败 / manifest URL 非 HTTPS） | package |
 
-> webui 的退出码仅 `webui` 子命令返回；ComfyUI 主服务只用到 0–4。
+> webui 的退出码（6/7/8）仅 `webui` 子命令返回；package 的退出码（5/9/10/11）仅 `package`
+> 子命令返回。ComfyUI 主服务（start/stop/status/info/logs/update/plugins）只用到 0–4。
+> package 刻意避开 webui 的 6/7/8，让外部监控脚本能按退出码区分子命令来源。
 
 外部脚本（systemd / NSSM / 监控 agent）按这张表判断是否需要重试 / 告警；
 值稳定，请勿随意改。
