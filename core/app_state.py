@@ -12,7 +12,7 @@ class AppState:
     """
     
     compute_mode: str = "cpu"
-    vram_mode: str = "normal"
+    vram_mode: str = ""
     python_path: Optional[Path] = None
     comfyui_path: Optional[Path] = None
     enable_fast_mode: bool = False

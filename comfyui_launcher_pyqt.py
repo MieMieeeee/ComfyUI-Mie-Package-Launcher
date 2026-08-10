@@ -201,6 +201,36 @@ if getattr(sys, 'frozen', False):
             print(f"[ERROR] Failed to pre-load Qt DLLs: {e}")
 
 
+def _configure_qt_highdpi():
+    """在 ``QApplication`` 构造**之前**设置 Qt 高分屏属性。
+
+    三件事，全部幂等、全部用 ``hasattr`` 守老版本 PyQt5：
+      1. ``AA_EnableHighDpiScaling`` —— 让 Qt 自动按系统缩放系数放大坐标。
+      2. ``AA_UseHighDpiPixmaps``    —— 让 QIcon/QPixmap 走物理像素渲染。
+      3. ``setHighDpiScaleFactorRoundingPolicy(PassThrough)`` —— 显式锁定
+         取整策略为 PassThrough。这点很关键：默认策略随 Qt 版本变化
+         （Qt <5.14 不存在该枚举；5.14~5.15 某些构建默认 Floor，会把
+         Windows 150% 缩放截断成 100%），导致同样的代码在不同 PyQt5
+         版本下行为不一致。显式设成 PassThrough + ``hasattr`` 守护，
+         新版本锁行为、老版本优雅跳过。
+
+    原 launch_gui / _show_single_instance_dialog 各写一份重复的 try/setAttribute
+    块（review 标的脆弱重复），收敛到这里一处。
+    """
+    try:
+        if hasattr(QtCore.Qt, 'AA_EnableHighDpiScaling'):
+            QtWidgets.QApplication.setAttribute(QtCore.Qt.AA_EnableHighDpiScaling, True)
+        if hasattr(QtCore.Qt, 'AA_UseHighDpiPixmaps'):
+            QtWidgets.QApplication.setAttribute(QtCore.Qt.AA_UseHighDpiPixmaps, True)
+        # Qt 5.14+ 才有此枚举；hasattr 守护，老版本 PyQt5 直接跳过。
+        if hasattr(QtCore.Qt, 'HighDpiScaleFactorRoundingPolicy'):
+            QtWidgets.QApplication.setHighDpiScaleFactorRoundingPolicy(
+                QtCore.Qt.HighDpiScaleFactorRoundingPolicy.PassThrough
+            )
+    except Exception:
+        pass
+
+
 def _show_single_instance_dialog():
     """显示单实例提示弹窗"""
     try:
@@ -209,13 +239,7 @@ def _show_single_instance_dialog():
         # 设置高分屏支持（必须在 QApplication 创建之前）
         app = QtWidgets.QApplication.instance()
         if app is None:
-            try:
-                if hasattr(QtCore.Qt, 'AA_EnableHighDpiScaling'):
-                    QtWidgets.QApplication.setAttribute(QtCore.Qt.AA_EnableHighDpiScaling, True)
-                if hasattr(QtCore.Qt, 'AA_UseHighDpiPixmaps'):
-                    QtWidgets.QApplication.setAttribute(QtCore.Qt.AA_UseHighDpiPixmaps, True)
-            except Exception:
-                pass
+            _configure_qt_highdpi()
             app = QtWidgets.QApplication(sys.argv)
 
         dialog = CustomConfirmDialog(
@@ -331,13 +355,7 @@ def launch_gui():
 
     try:
         # 设置高分屏支持（必须在 QApplication 创建之前）
-        try:
-            if hasattr(QtCore.Qt, 'AA_EnableHighDpiScaling'):
-                QtWidgets.QApplication.setAttribute(QtCore.Qt.AA_EnableHighDpiScaling, True)
-            if hasattr(QtCore.Qt, 'AA_UseHighDpiPixmaps'):
-                QtWidgets.QApplication.setAttribute(QtCore.Qt.AA_UseHighDpiPixmaps, True)
-        except Exception:
-            pass
+        _configure_qt_highdpi()
 
         # 创建 QApplication
         app = QtWidgets.QApplication(sys.argv)

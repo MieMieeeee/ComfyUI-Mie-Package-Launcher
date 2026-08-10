@@ -205,17 +205,16 @@ class TestMemoryStrategyComboBox:
         expected_options = [
             "由 ComfyUI 决定（推荐）",
             "显存充足 (High)",
-            "中等显存 (Normal)",
             "低显存 (Low)",
             "极低显存 (No)",
         ]
-        
+
         # Find VRAM combo
         vram_combo = None
         for combo in section.findChildren(QComboBox):
             if hasattr(combo, 'currentText'):
                 text = combo.currentText()
-                if "High" in text or "Normal" in text or "决定" in text:
+                if "High" in text or "决定" in text:
                     vram_combo = combo
                     break
         

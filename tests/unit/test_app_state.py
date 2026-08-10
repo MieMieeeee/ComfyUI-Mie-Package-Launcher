@@ -22,7 +22,7 @@ class TestAppState(unittest.TestCase):
 
         state = AppState()
         self.assertEqual(state.compute_mode, "cpu")
-        self.assertEqual(state.vram_mode, "normal")
+        self.assertEqual(state.vram_mode, "")
         self.assertIsNone(state.python_path)
         self.assertIsNone(state.comfyui_path)
         self.assertEqual(state.enable_fast_mode, False)
@@ -119,7 +119,7 @@ class TestAppState(unittest.TestCase):
         from core.app_state import AppState
 
         state = AppState()
-        self.assertEqual(state.vram_mode, "normal")
+        self.assertEqual(state.vram_mode, "")
 
         state.vram_mode = "high"
         self.assertEqual(state.vram_mode, "high")

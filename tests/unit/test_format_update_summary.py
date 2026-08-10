@@ -1,4 +1,14 @@
-"""Tests for ui_qt.qt_app._format_update_summary."""
+"""Tests for core.update_summary.format_update_summary (was ui_qt.qt_app._format_update_summary).
+
+历史上这个函数住在 ``ui_qt/qt_app.py``，但该模块在部分 PyQt5/sip ABI 组合下
+import 时段错误（``PyQtLauncher`` 类定义处），导致本测试文件顶层
+``from ui_qt.qt_app import _format_update_summary`` 在 collection 阶段就把整个
+``tests/unit/`` 套件一起拖崩（exit 139）。函数本身是纯函数（dict in → str out），
+已抽到 ``core.update_summary``；这里改为从纯模块导入，不再触达段错误路径。
+
+``qt_app._format_update_summary`` 仍作为向后兼容别名存在（内部 re-import 本模块），
+所以历史调用方不受影响。
+"""
 
 import os
 import sys
@@ -46,7 +56,9 @@ def teardown_module(module):
         _QT_APP = None
 
 
-from ui_qt.qt_app import _format_update_summary
+# 从纯函数模块导入（不触达会段错误的 ui_qt.qt_app）。保留老名字 _format_update_summary
+# 让下面 18+ 个测试用例不需要改。
+from core.update_summary import format_update_summary as _format_update_summary
 
 
 class TestFormatUpdateSummary:

@@ -1,4 +1,11 @@
-"""Tests for the deps-disabled warning in ui_qt.qt_app._confirm_deps_or_warn."""
+"""Tests for the deps-disabled warning in core.update_summary.confirm_deps_or_warn.
+
+历史上测的是 ``ui_qt.qt_app._confirm_deps_or_warn``，但 ``qt_app`` 在部分
+PyQt5/sip ABI 组合下 import 时段错误（``PyQtLauncher`` 类定义处），导致本测试
+每次跑都崩。函数已抽到 ``core.update_summary``（``DialogHelper`` lazy import），
+这里改为从纯模块导入，不再触达段错误路径。``qt_app._confirm_deps_or_warn`` 仍
+作为向后兼容别名 re-import 本模块。
+"""
 
 import os
 import sys
@@ -16,7 +23,7 @@ class TestConfirmDepsOrWarn(unittest.TestCase):
     """_confirm_deps_or_warn gates the update flow when deps are disabled."""
 
     def test_returns_true_silently_when_deps_enabled(self):
-        from ui_qt.qt_app import _confirm_deps_or_warn
+        from core.update_summary import confirm_deps_or_warn as _confirm_deps_or_warn
 
         var = MagicMock()
         var.get.return_value = True
@@ -30,7 +37,7 @@ class TestConfirmDepsOrWarn(unittest.TestCase):
         mock_confirm.assert_not_called()
 
     def test_returns_false_when_user_cancels(self):
-        from ui_qt.qt_app import _confirm_deps_or_warn
+        from core.update_summary import confirm_deps_or_warn as _confirm_deps_or_warn
 
         var = MagicMock()
         var.get.return_value = False
@@ -49,7 +56,7 @@ class TestConfirmDepsOrWarn(unittest.TestCase):
         self.assertIn("依赖库", args[2])
 
     def test_returns_true_when_user_confirms(self):
-        from ui_qt.qt_app import _confirm_deps_or_warn
+        from core.update_summary import confirm_deps_or_warn as _confirm_deps_or_warn
 
         var = MagicMock()
         var.get.return_value = False
@@ -63,7 +70,7 @@ class TestConfirmDepsOrWarn(unittest.TestCase):
         self.assertTrue(result)
 
     def test_returns_true_when_var_get_raises(self):
-        from ui_qt.qt_app import _confirm_deps_or_warn
+        from core.update_summary import confirm_deps_or_warn as _confirm_deps_or_warn
 
         var = MagicMock()
         var.get.side_effect = Exception("var broken")
@@ -78,7 +85,7 @@ class TestConfirmDepsOrWarn(unittest.TestCase):
         mock_confirm.assert_not_called()
 
     def test_returns_true_when_dialog_helper_import_fails(self):
-        from ui_qt.qt_app import _confirm_deps_or_warn
+        from core.update_summary import confirm_deps_or_warn as _confirm_deps_or_warn
 
         var = MagicMock()
         var.get.return_value = False
@@ -90,7 +97,7 @@ class TestConfirmDepsOrWarn(unittest.TestCase):
         self.assertTrue(result)
 
     def test_uses_confirmation_with_continue_and_cancel_buttons(self):
-        from ui_qt.qt_app import _confirm_deps_or_warn
+        from core.update_summary import confirm_deps_or_warn as _confirm_deps_or_warn
 
         var = MagicMock()
         var.get.return_value = False
@@ -112,11 +119,11 @@ class TestStartUpdateCallsWarningHelper(unittest.TestCase):
 
     def test_helper_is_importable(self):
         # 帮助函数必须从 ui_qt.qt_app 导入，以保证 start_update 能调用
-        from ui_qt.qt_app import _confirm_deps_or_warn
+        from core.update_summary import confirm_deps_or_warn as _confirm_deps_or_warn
         self.assertTrue(callable(_confirm_deps_or_warn))
 
     def test_helper_passes_through_when_deps_enabled(self):
-        from ui_qt.qt_app import _confirm_deps_or_warn
+        from core.update_summary import confirm_deps_or_warn as _confirm_deps_or_warn
         var = MagicMock()
         var.get.return_value = True
         with patch("ui_qt.widgets.dialog_helper.DialogHelper.show_confirmation") as m:

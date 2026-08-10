@@ -5,6 +5,10 @@
 
 from typing import Optional, Dict
 
+# DPI 缩放的 clamp 边界走单一真理源（core.ui_scaling），避免 [0.75,1.25]
+# 在多处硬编码后改一处漏一处。
+from core.ui_scaling import MIN_SCALE, MAX_SCALE
+
 
 class ThemeColors:
     """主题颜色配置"""
@@ -130,10 +134,12 @@ class ThemeStyles:
             v = float(scale)
         except Exception:
             v = 1.0
-        if v < 0.75:
-            v = 0.75
-        if v > 1.25:
-            v = 1.25
+        # clamp 边界走 core.ui_scaling 的单一真理源，避免 [0.75,1.25] 在
+        # 多处硬编码后改一处漏一处（review 标的同步隐患）。
+        if v < MIN_SCALE:
+            v = MIN_SCALE
+        if v > MAX_SCALE:
+            v = MAX_SCALE
         self._scale = v
 
     def _pt(self, base: int) -> int:

@@ -88,6 +88,23 @@ class TestThemeManagerScale(unittest.TestCase):
         tm.set_scale("not a number")
         self.assertAlmostEqual(tm._scale, 1.0, places=6)
 
+    def test_set_scale_invalid_does_not_disturb_nondefault_scale(self):
+        """An invalid set_scale value must not pull a non-1.0 scale back to 1.0.
+
+        Guards a subtle semantic: the old code ``try: v=float(scale);
+        except: return`` (no-op, kept current scale), while the refactored
+        ``_clamp_scale`` returns 1.0 on bad input. If the current scale is
+        e.g. 1.1 and someone passes garbage, the clamp returns 1.0, and the
+        ``abs(1.0 - 1.1) >= 1e-3`` check would WRONGLY apply the change.
+        This test pins that garbage input leaves a non-1.0 scale untouched.
+        """
+        ThemeManager = self._import()
+        tm = ThemeManager(dark=True, scale=1.1)
+        self.assertAlmostEqual(tm._scale, 1.1, places=6)
+        tm.set_scale("not a number")
+        # Must remain 1.1, NOT be reset to 1.0.
+        self.assertAlmostEqual(tm._scale, 1.1, places=6)
+
     def test_set_scale_preserves_dark_state(self):
         """Scale change must not flip the theme."""
         ThemeManager = self._import()
@@ -96,6 +113,36 @@ class TestThemeManagerScale(unittest.TestCase):
         self.assertTrue(tm.is_dark)
         self.assertTrue(tm.colors.dark)
         self.assertTrue(tm.styles.c.dark)
+
+    def test_clamp_bounds_match_central_constants(self):
+        """ThemeManager/ThemeStyles clamp bounds must equal core.ui_scaling's MIN/MAX.
+
+        Review issue: the [0.75, 1.25] clamp was hard-coded in three places
+        (core.ui_scaling, theme_styles, theme_manager). If someone widens the
+        range in one place (e.g. to allow 1.5x for 4K), the others must
+        follow. This test pins that they stay in sync by deriving the bounds
+        from the central constants rather than asserting literal 0.75/1.25.
+        """
+        from core.ui_scaling import MIN_SCALE, MAX_SCALE
+        ThemeManager = self._import()
+        # Construct with out-of-range values; the resulting _scale must equal
+        # the central MIN/MAX (whatever they are), not a local literal.
+        tm_hi = ThemeManager(dark=True, scale=999.0)
+        self.assertAlmostEqual(tm_hi._scale, MAX_SCALE, places=6)
+        tm_lo = ThemeManager(dark=True, scale=-999.0)
+        self.assertAlmostEqual(tm_lo._scale, MIN_SCALE, places=6)
+        # ThemeStyles must clamp to the same central bounds too.
+        from ui_qt.theme_styles import ThemeStyles, ThemeColors
+        ts_hi = ThemeStyles(ThemeColors(dark=True), scale=999.0)
+        self.assertAlmostEqual(ts_hi._scale, MAX_SCALE, places=6)
+        ts_lo = ThemeStyles(ThemeColors(dark=True), scale=-999.0)
+        self.assertAlmostEqual(ts_lo._scale, MIN_SCALE, places=6)
+        # set_scale path must also clamp to central bounds.
+        tm = ThemeManager(dark=True, scale=1.0)
+        tm.set_scale(999.0)
+        self.assertAlmostEqual(tm._scale, MAX_SCALE, places=6)
+        tm.set_scale(-999.0)
+        self.assertAlmostEqual(tm._scale, MIN_SCALE, places=6)
 
 
 if __name__ == "__main__":
