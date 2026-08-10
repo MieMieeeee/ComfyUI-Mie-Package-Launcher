@@ -960,6 +960,91 @@ class VersionService(IVersionService):
                 }
         return self._checkout_commit(commit)
 
+    # ------------------------------------------------------------------
+    # PackageUpdateService 统一入口（v1.1.0 新增，plan §3.2）
+    # ------------------------------------------------------------------
+
+    def list_releases(self, refresh: bool = False) -> List[Dict[str, Any]]:
+        """公开包装 ``_get_releases``，给 GUI「可选版本」下拉 / PackageUpdateService 用。
+
+        与私有 ``_get_releases(force_refresh, mark_failed)`` 的区别：
+        - ``mark_failed=False``：失败不设 ``_api_failed`` 冷却（公开查询不应影响内部
+          版本检查流程的状态机）
+        - 失败时返空 list（不抛），调用方自己判空
+
+        返回 GitHub releases API 的原生 list[dict]（每项含 ``tag_name`` / ``prerelease``
+        等字段）。**未过滤 stable** —— 调用方用 :meth:`is_stable_version` 自行判。
+        """
+        return self._get_releases(force_refresh=refresh, mark_failed=False)
+
+    def checkout_ref(self, mode: str, ref: str) -> Dict[str, Any]:
+        """按 manifest core item 的 ``selection.{mode, ref}`` 统一切到目标版本。
+
+        四种 mode：
+
+        - ``exact``：切到 ``ref`` 指定的 tag（无则报错）
+        - ``commit``：切到 ``ref`` 指定的 commit hash
+        - ``min``：找 ``>= ref`` 的最新 **stable** tag（**必须走 ``_get_releases`` 全量
+          过滤**，不能用 ``get_latest_stable_kernel`` —— 后者只返最新一个 stable，拿不到
+          「>= ref 的候选集」；无候选 → 返 ``skipped`` 标记，调用方据 ``reason`` 标 status）
+        - ``channel``：走 stable / master 二态（保留现有 :meth:`upgrade_latest` 行为）
+
+        返回结构与现有 ``_checkout_tag`` / ``_checkout_commit`` / ``upgrade_latest``
+        一致：``{"component": "core", "updated": bool, [tag], [commit], [error], ...}``。
+        ``min`` 模式无候选时返 ``{"component": "core", "skipped": True, "reason": ...}``
+        （不抛），由 PackageUpdateService 据此把 item 标 ``skipped`` + reason=``no_version_ge_ref``。
+
+        版本比较用 :func:`core.package_manifest.parse_version`（不依赖 packaging 库，
+        与仓库现有 ``_parse_version`` 元组比较思路一致；剥 ``v`` 前缀）。
+        """
+        if mode == "exact":
+            return self._checkout_tag(ref)
+        if mode == "commit":
+            return self._checkout_commit(ref)
+        if mode == "channel":
+            return self.upgrade_latest(stable_only=(ref == "stable"))
+        if mode == "min":
+            return self._checkout_min(ref)
+        return {
+            "component": "core",
+            "error": f"unknown selection mode: {mode!r} "
+                     f"(allowed: exact/min/channel/commit)",
+        }
+
+    def _checkout_min(self, ref: str) -> Dict[str, Any]:
+        """``mode=min`` 的实现：找 ``>= ref`` 的最新 stable tag 并切过去。
+
+        ⚠️ 不能用 ``get_latest_stable_kernel``（只返最新一个 stable，拿不到候选集），
+        必须走 ``_get_releases`` 拿全量再过滤。找不到候选 → 返 skipped 标记（不抛）。
+        """
+        from core.package_manifest import parse_version as _pv  # 避免循环 import
+
+        target_ver = _pv(ref)
+        releases = self._get_releases(force_refresh=True)
+        # 过滤 stable 且 tag 版本 >= ref
+        candidates: list[tuple] = []  # (parsed_ver, tag_name)
+        for rel in releases:
+            tag = rel.get("tag_name")
+            if not tag or rel.get("prerelease"):
+                continue
+            if not self.is_stable_version(tag):
+                continue
+            pv = _pv(tag)
+            if pv >= target_ver:
+                candidates.append((pv, tag))
+        if not candidates:
+            return {
+                "component": "core",
+                "skipped": True,
+                "reason": "no_version_ge_ref",
+                "error": f"no stable version >= {ref}",
+            }
+        # 取版本号最大的（元组比较）
+        candidates.sort(key=lambda x: x[0])
+        chosen_tag = candidates[-1][1]
+        return self._checkout_tag(chosen_tag)
+
+
     def _checkout_commit(self, commit: str) -> Dict[str, Any]:
         try:
             r = self._run_git(

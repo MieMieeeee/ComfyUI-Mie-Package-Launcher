@@ -99,6 +99,7 @@ def install_or_update_package(
     logger: Optional[logging.Logger] = None,
     on_progress=None,
     env: Optional[dict] = None,
+    force_reinstall: bool = False,
 ) -> Dict[str, Any]:
     """Install or upgrade a single package, optionally streaming pip progress.
 
@@ -106,6 +107,11 @@ def install_or_update_package(
     is a human-readable status line and ``percent`` is an optional 0-100
     value (``None`` means indeterminate). When provided, the install runs
     via the streaming helper so pip's per-byte progress reaches the caller.
+
+    ``force_reinstall=True`` adds ``--force-reinstall`` (v1.1.0 新增，供
+    PackageUpdateService 的 dependency item 用：UP 主写 ``"force_reinstall": true``
+    时强制重装，应对「文件损坏 / 需要精确锁定版本」场景)。注意 force_reinstall 隐含
+    重装依赖，比 upgrade 更激进；与 upgrade 可同时为 True（pip 允许 -U --force-reinstall）。
     """
     if logger is None:
         logger = logging.getLogger(__name__)
@@ -127,6 +133,8 @@ def install_or_update_package(
             cmd = [str(python_path), "-m", "pip", "install"]
         if upgrade:
             cmd.append("-U")
+        if force_reinstall:
+            cmd.append("--force-reinstall")
         cmd.append(package_name)
         if index_url:
             cmd.extend(["-i", index_url])

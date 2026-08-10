@@ -160,24 +160,71 @@ class UpdateService:
         return None
 
     def perform_batch_update(self) -> Tuple[List[Dict[str, Any]], str]:
-        results: List[Dict[str, Any]] = []
-        needs_consistency = False
+        """GUI 入口：从 app.*_var 读 selection 后调 _run_batch。
+
+        v1.1.0 重构（plan §3.2）：原方法体（零参数、读 GUI var）抽到 _run_batch，
+        本方法变成薄包装，行为与重构前一致。CLI / PackageUpdateService 用 run_targeted_update。
+        """
         needs_consistency = self._needs_consistency()
-        do_core_first = bool(
-            self.app.update_core_var.get()
-            or (
-                needs_consistency
-                and (
-                    self.app.update_frontend_var.get()
-                    or self.app.update_template_var.get()
-                )
-            )
-        )
+        selection = {
+            "core": bool(self.app.update_core_var.get()),
+            "frontend": bool(self.app.update_frontend_var.get()),
+            "templates": bool(self.app.update_template_var.get()),
+            "requirements_sync": bool(needs_consistency),
+        }
+        components = {"stable_only": self._safe_get_stable_only_flag()}
+        return self._run_batch(selection, components)
+
+    def run_targeted_update(
+        self,
+        selection: dict,
+        components: dict | None = None,
+        on_progress=None,
+    ) -> Tuple[List[Dict[str, Any]], str]:
+        """CLI / PackageUpdateService 入口：直接传 selection，不读 GUI var、不污染默认开关。
+
+        Args:
+            selection: ``{core, frontend, templates, requirements_sync}`` 显式开关
+            components: 可选，目前支持 ``{"stable_only": bool}`` 覆盖；不传则用
+                ``_safe_get_stable_only_flag()`` 兜底（GUI 场景）
+            on_progress: 可选进度回调（当前未深入串联，预留给 PackageUpdateService）
+
+        Returns:
+            与 perform_batch_update 一致的 ``(results_list, summary_text)``
+        """
+        comps = dict(components or {})
+        if "stable_only" not in comps:
+            comps["stable_only"] = self._safe_get_stable_only_flag()
+        return self._run_batch(selection, comps, on_progress=on_progress)
+
+    def _run_batch(
+        self,
+        selection: dict,
+        components: dict,
+        on_progress=None,
+    ) -> Tuple[List[Dict[str, Any]], str]:
+        """实际干活的内核（重构自原 perform_batch_update 的方法体）。
+
+        Args:
+            selection: ``{core: bool, frontend: bool, templates: bool, requirements_sync: bool}``
+            components: ``{stable_only: bool}``
+            on_progress: 可选进度回调（预留）
+
+        与原 perform_batch_update 行为一致：core 先跑（且若 frontend/templates + requirements_sync
+        也隐含 core 先跑以保一致性），core 后跑 requirements 同步，再 frontend / templates。
+        """
+        results: List[Dict[str, Any]] = []
+        needs_consistency = bool(selection.get("requirements_sync"))
+        do_core = bool(selection.get("core"))
+        do_frontend = bool(selection.get("frontend"))
+        do_templates = bool(selection.get("templates"))
+        # 一致性：frontend/templates + requirements_sync 隐含 core 先跑（依赖内核 requirements.txt）
+        do_core_first = do_core or (needs_consistency and (do_frontend or do_templates))
+        stable_only = bool(components.get("stable_only"))
         pre_core = None
         if do_core_first:
             try:
                 pre_core = self._safe_get_current_kernel_version()
-                stable_only = self._safe_get_stable_only_flag()
                 core_res = self.app.services.version.upgrade_latest(
                     stable_only=stable_only
                 )
@@ -207,8 +254,6 @@ class UpdateService:
                     comfy_root = self._resolve_comfy_root()
                     idx = self._resolve_index_url()
                     req_files = self._collect_requirement_files(comfy_root)
-                    from utils import pip as PIPUTILS
-
                     sync_summary = []
                     installed_all = []
                     satisfied_all = []
@@ -240,13 +285,13 @@ class UpdateService:
                     )
             except Exception:
                 results.append({"component": "core", "error": "update failed"})
-        if self.app.update_frontend_var.get():
+        if do_frontend:
             try:
                 fr = self.update_frontend(False)
                 results.append(fr)
             except Exception:
                 results.append({"component": "frontend", "error": "update failed"})
-        if self.app.update_template_var.get():
+        if do_templates:
             try:
                 tp = self.update_templates(False)
                 results.append(tp)
