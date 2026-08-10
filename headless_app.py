@@ -306,7 +306,17 @@ class _NoOpServices:
 
     def __init__(self, app):
         from services.version_service import VersionService
+        from services.update_service import UpdateService
+        from services.plugin_service import PluginService
+        from services.model_path_service import ModelPathService
+        from services.model_service import ModelService
+        from services.package_update_service import PackageUpdateService
         self.version = VersionService(app)
+        self.update = UpdateService(app)
+        self.plugins = PluginService(app)
+        self.model_path = ModelPathService(app)
+        self.model = ModelService(app)
+        self.package = PackageUpdateService(app)
         self.runtime = _NoOpRuntime()
 
 

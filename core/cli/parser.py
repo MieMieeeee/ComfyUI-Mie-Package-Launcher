@@ -29,6 +29,7 @@ SUBCOMMANDS: Final[List[str]] = [
     "update",
     "plugins",
     "webui",
+    "package",
     "help",
 ]
 
@@ -49,6 +50,9 @@ WEBUI_ACTIONS: Final[List[str]] = [
     "start", "stop", "status", "info", "restart",
     "install", "setup", "update",
 ]
+
+# package 子命令的稳定 action 清单（与 cmd_package.py 一致）.
+PACKAGE_ACTIONS: Final[List[str]] = ["show", "diff", "apply"]
 
 
 # 各子命令的 epilog 模板（Exit codes + Output schema）
@@ -252,6 +256,30 @@ Actions:
   setup    仅装依赖 (webui 已 clone 但缺包时)
   update   git pull (webui 已装时)
 """
+
+_PACKAGE_EPILOG = """\
+整合包更新：加载 manifest（本地文件 / HTTPS URL），show / diff / apply。
+
+manifest 来源：http:// / https:// 前缀走 URL（http:// 拒绝，必须 HTTPS）；其它当本地文件。
+
+Actions:
+  show     加载 + 校验 + 打印摘要 + 与当前 env 对照的 diff
+  diff     只输出 diff 段（agent 快速判断用）
+  apply    应用 manifest
+
+Exit codes:
+  0   全部 ok / skipped / not_applicable（无 failed）
+  1   通用错误
+  5   部分失败（≥1 项 failed）—— ok_at_alt_path / not_applicable / manual_required 不算失败
+  9   前置不兼容（dirty tree + clean_untracked=false / env 不匹配且未 --auto-yes）
+  10  manifest 无效（schema / sha256 / manifest_version 超支持范围）
+  11  文件不存在 / URL 不可达 / 解析失败 / manifest URL 非 HTTPS
+
+Output schema (default human / --json):
+  show  -> {manifest, valid, validation_error, diff, current_versions}
+  diff  -> {items_already_satisfied, items_to_apply, items_manual_required, diff_basis}
+  apply -> {manifest_id, run_id, started_at, finished_at, env_id, items[], summary, exit_hint}
+"""
 def _global_parent() -> argparse.ArgumentParser:
     """仅含全局 flag 的 parent parser。
 
@@ -298,7 +326,7 @@ def _make_subparser(sub, name: str, **kwargs) -> argparse.ArgumentParser:
 # 不放进 _global_parent（那是给 --json/-v 这类输出控制 flag 的），而是按需
 # 挂在会读路径的子命令上。stop / status 不挂：它们作用于「当前在跑的那个」，
 # 跟环境选择无关。
-_ENV_SUBCOMMANDS = {"start", "restart", "info", "logs", "update"}
+_ENV_SUBCOMMANDS = {"start", "restart", "info", "logs", "update", "package"}
 
 
 def _add_env_arg(sp: argparse.ArgumentParser) -> None:
@@ -454,6 +482,55 @@ def build_parser() -> argparse.ArgumentParser:
         help="持续跟踪新内容（默认开启，--no-follow 关闭）。",
     )
     _add_env_arg(sp)
+
+    # package（整合包更新，v1.1.0 新增）
+    sp = _make_subparser(
+        sub, "package",
+        help="加载整合包更新 manifest，show / diff / apply",
+        description="加载 UP 主写的 manifest（本地文件 / HTTPS URL），show 看摘要 + diff，"
+                    "apply 执行。manifest 描述 4 类变更：core / plugin / model / dependency。",
+        epilog=_PACKAGE_EPILOG,
+        formatter_class=argparse.RawDescriptionHelpFormatter,
+    )
+    sp.add_argument(
+        "package_action",
+        choices=PACKAGE_ACTIONS,
+        metavar="ACTION",
+        help="show（摘要+diff）/ diff（仅 diff 段）/ apply（执行）。",
+    )
+    sp.add_argument(
+        "source",
+        metavar="PATH-OR-URL",
+        help="manifest 的本地文件路径或 HTTPS URL（http:// 拒绝）。",
+    )
+    _add_env_arg(sp)
+    sp.add_argument(
+        "--items",
+        type=str,
+        default=None,
+        metavar="ID1,ID2,...",
+        help="apply 时只跑指定 item_id，其它 pending。",
+    )
+    sp.add_argument(
+        "--dry-run",
+        action="store_true",
+        help="apply 时校验 + 模拟跑，不实际改文件 / pip / git。",
+    )
+    sp.add_argument(
+        "--auto-yes",
+        action="store_true",
+        help="跳过所有交互确认（含 env 不匹配弹窗），脚本用。",
+    )
+    sp.add_argument(
+        "--manual-yes",
+        action="store_true",
+        help="model 项视作用户已自行下载 → verify_manual。",
+    )
+    sp.add_argument(
+        "--manual-skip",
+        action="store_true",
+        help="全部 model 项标 skipped。",
+    )
 
     # help
     sp = _make_subparser(
