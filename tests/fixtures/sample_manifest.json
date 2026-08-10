@@ -1,0 +1,69 @@
+{
+  "manifest_version": 1,
+  "id": "sample-v9-0-1-to-v9-0-2",
+  "name": "示例：V9.0.1 → V9.0.2 增量更新（合成测试用）",
+  "package_target": {
+    "min_version": "9.0.0",
+    "max_version": "9.0.1",
+    "channel": "v9"
+  },
+  "released_at": "2026-08-15T10:00:00+08:00",
+  "notes_text": "合成 manifest，用于 Phase 4 端到端测试。覆盖 core（min 模式）/ plugin（install）/ dependency（非冻结包）/ model（带 checksum）。",
+  "items": [
+    {
+      "id": "core-bump",
+      "kind": "core",
+      "title": "ComfyUI 内核升级到 v0.27.4",
+      "selection": {
+        "mode": "min",
+        "ref": "v0.27.4"
+      },
+      "components": {
+        "frontend": true,
+        "templates": true,
+        "requirements_sync": true
+      }
+    },
+    {
+      "id": "plugin-sample",
+      "kind": "plugin",
+      "title": "安装示例插件",
+      "action": "install",
+      "spec": "comfyui-sample-plugin@nightly"
+    },
+    {
+      "id": "dep-kornia",
+      "kind": "dependency",
+      "title": "锁定 kornia==0.6.12",
+      "packages": [
+        {
+          "spec": "kornia==0.6.12",
+          "force_reinstall": false
+        }
+      ],
+      "skip_frozen": true
+    },
+    {
+      "id": "model-sample",
+      "kind": "model",
+      "title": "下载示例模型",
+      "links": [
+        {
+          "label": "HuggingFace",
+          "url": "https://huggingface.co/test/model"
+        },
+        {
+          "label": "夸克网盘",
+          "url": "https://pan.quark.cn/s/sample"
+        }
+      ],
+      "dest": {
+        "library_id": "default",
+        "category": "loras",
+        "filename": "sample.safetensors"
+      },
+      "size_hint": "1.2 GB",
+      "skip_if_exists": true
+    }
+  ]
+}

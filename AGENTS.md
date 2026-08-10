@@ -38,6 +38,7 @@ python __main__.py <command> [--json] [-v]
 | 看日志 | `logs comfyui -n 100 --no-follow` | `comfyui` / `launcher` / `webui` 三选一；**务必带 `--no-follow`** |
 | 更新内核 | `update comfyui --dry-run` 然后 `update comfyui` | 先 dry-run 看会做什么 |
 | webui 工作台（非核心，可选服务） | `webui status` / `webui start` / `webui info` | 与 ComfyUI 平级的服务；退出码多了 `6`(ComfyUI 未跑) / `7`(未安装) / `8`(依赖缺失)；详见 `webui --help` |
+| 整合包更新（v1.1.0+） | `package show <path-or-url> --json` → `package apply <path-or-url> --auto-yes` | 加载 UP 主写的 manifest（本地文件/HTTPS URL），show 看 diff，apply 执行；退出码 `5`(部分失败) / `9`(前置不兼容) / `10`(manifest 无效) / `11`(源不可达)；model 项永远需用户手动下载 |
 | 查帮助 | `help` / `help <command>` / `<command> --help` | — |
 
 > **agent 默认不传 `--env`**。`start` / `restart` / `info` / `update` / `logs` 接受可选的 `--env ENV_ID` 覆盖本次调用的环境，仅供跨环境自动化脚本用；`status` / `stop` 不接受 `--env`（作用于「当前在跑的那个」）。切环境是 GUI 的事，agent 不要主动切。
@@ -56,9 +57,13 @@ python __main__.py <command> [--json] [-v]
   | 2 | start 拒绝重复（已在跑） | start |
   | 3 | 未在跑 | status |
   | 4 | 已是最新 | update |
+  | 5 | package apply 部分失败（≥1 项 failed） | package |
   | 6 | webui start 时 ComfyUI 未跑（用了 `--with-comfyui`） | webui |
   | 7 | webui 路径未安装（用 `webui install` 拉取） | webui |
   | 8 | webui 依赖缺失（用 `webui setup` 安装） | webui |
+  | 9 | package apply 前置不兼容（dirty tree / env 不匹配且未 `--auto-yes`） | package |
+  | 10 | package manifest 无效（schema / sha256 / version 超支持范围） | package |
+  | 11 | package 源不可达（文件不存在 / URL 失败 / manifest URL 非 HTTPS） | package |
 
 - 推荐用法：**按退出码分支 + 解析 `--json` 字段**，不要正则匹配人类文案。
 
