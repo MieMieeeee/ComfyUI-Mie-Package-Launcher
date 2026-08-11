@@ -60,12 +60,22 @@ class PackageApplyWorker(QtCore.QObject):
         self._thread = QtCore.QThread()
         self.moveToThread(self._thread)
         self._thread.started.connect(self._run)
+        # 线程跑完自动清理（plan §6.5.1：不在 _run 的 finally 里调 thread.wait，会死锁）。
+        # finished 信号 → quit 事件循环 → 线程真正退出后 deleteLater 释放 worker。
+        self.finished.connect(self._thread.quit)
+        self._thread.finished.connect(self.deleteLater)
 
     def start(self):
         self._thread.start()
 
     @QtCore.pyqtSlot()
     def _run(self):
+        """在工作线程里跑 apply()。
+
+        ⚠️ 不在 finally 里调 self._thread.quit()/wait() —— 那样 QThread 的事件循环会被
+        自己卡死（slot 在自己的线程里跑，wait 等自己退出 = 死锁）。清理由主线程的
+        finished 信号链完成：finished → thread.quit → thread.finished → deleteLater。
+        """
         try:
             report = self._service.apply(
                 self._manifest,
@@ -79,9 +89,6 @@ class PackageApplyWorker(QtCore.QObject):
         except Exception as e:
             self.finished.emit({"error": str(e), "summary": {"failed": 1}, "items": [],
                                 "exit_hint": 1})
-        finally:
-            self._thread.quit()
-            self._thread.wait()
 
 
 class PackageUpdatePage(BasePage):
@@ -479,7 +486,11 @@ class PackageUpdatePage(BasePage):
     def _on_item_progress(self, item_id: str, status: str, payload: dict):
         if self._apply_task_id is not None:
             try:
-                cur = 0
+                # 维护 cursor：每收到一个非 in_progress 事件就推进，进度条才会动。
+                # in_progress 是「开始」，ok/failed/... 是「完成」——只在完成时 +1。
+                if status != "in_progress":
+                    self._progress_cursor = getattr(self, "_progress_cursor", 0) + 1
+                cur = getattr(self, "_progress_cursor", 0)
                 total = len(self._item_checkboxes)
                 self.app._bg_task_registry.update(
                     self._apply_task_id,
@@ -490,6 +501,9 @@ class PackageUpdatePage(BasePage):
                 pass
 
     def _on_apply_done(self, report: dict):
+        # has_failed 从 report 读（plan §4.3：仅 failed 触发，not_applicable/manual_required 不算）
+        summary = report.get("summary", {})
+        has_failed = summary.get("failed", 0) > 0
         # env_token 竞态防护（plan §6.5.2）
         if getattr(self.app, "_env_token", 0) != self._apply_env_token:
             self._persist_report(report)
@@ -497,11 +511,11 @@ class PackageUpdatePage(BasePage):
                 self, "更新已完成",
                 f"manifest {report.get('manifest_id', '?')} 的应用已在后台完成，"
                 f"但你切换了环境，结果未刷新到当前页面。")
-            self._cleanup_worker()
+            self._cleanup_worker(has_failed)
             return
         self._render_report(report)
         self._persist_report(report)
-        self._cleanup_worker()
+        self._cleanup_worker(has_failed)
 
     def _render_report(self, report: dict):
         items = report.get("items", [])
@@ -515,9 +529,14 @@ class PackageUpdatePage(BasePage):
             if it.get("error"):
                 suffix = f" — {it['error'][:60]}"
             lines.append(f"  {marker} {iid}: {status}{suffix}")
+        # 汇总补全 v3.3 加的两个 status（ok_at_alt_path / not_applicable），否则用户看不到
         lines.append(
-            f"汇总: ok={summary.get('ok', 0)} skipped={summary.get('skipped', 0)} "
-            f"failed={summary.get('failed', 0)} manual_required={summary.get('manual_required', 0)}")
+            f"汇总: ok={summary.get('ok', 0)} "
+            f"ok_at_alt_path={summary.get('ok_at_alt_path', 0)} "
+            f"skipped={summary.get('skipped', 0)} "
+            f"not_applicable={summary.get('not_applicable', 0)} "
+            f"failed={summary.get('failed', 0)} "
+            f"manual_required={summary.get('manual_required', 0)}")
         if report.get("error"):
             lines.append(f"错误: {report['error']}")
         self._report_label.setText("\n".join(lines))
@@ -532,18 +551,31 @@ class PackageUpdatePage(BasePage):
             (runs_dir / f"{run_id}.json").write_text(
                 json.dumps(report, ensure_ascii=False, indent=2, default=str),
                 encoding="utf-8")
-        except Exception:
-            pass  # 持久化失败不影响 UI
+        except Exception as e:
+            # 持久化失败不影响 UI，但要留痕（别完全静默，排查时能看到）
+            logger = getattr(self.app, "logger", None)
+            if logger is not None:
+                try:
+                    logger.warning(f"[package] report 持久化失败: {e}")
+                except Exception:
+                    pass
 
-    def _cleanup_worker(self):
+    def _cleanup_worker(self, has_failed: bool = False):
+        """清理后台 task + worker 引用。has_failed 控制 registry.complete 的 error 标记
+        （影响侧栏按钮是否显示警告，plan §6.5.1）。
+
+        ⚠️ has_failed 必须由 caller 从 report['summary']['failed'] 读后传入 ——
+        本方法拿不到 report（_on_apply_done 已渲染完才调这里）。
+        """
         if self._apply_task_id is not None:
             try:
-                has_failed = (self._worker is None or
-                              self._worker is not None)  # report 已在 done 里
-                self.app._bg_task_registry.complete(self._apply_task_id, error=False)
+                self.app._bg_task_registry.complete(self._apply_task_id, error=has_failed)
                 self.app._bg_task_registry.remove(self._apply_task_id)
             except Exception:
                 pass
             self._apply_task_id = None
+        # worker 引用释放交给 thread.finished → deleteLater（见 PackageApplyWorker.__init__）；
+        # 这里只解引用，让 Python 侧不再 hold，Qt 侧 deleteLater 接管。
         self._worker = None
+        self._progress_cursor = 0
         self._btn_apply.setEnabled(True)
