@@ -203,6 +203,42 @@ _SCRIPT = textwrap.dedent(
             result['sp_error'] = repr(e)
         result['expected'] = 125
 
+    elif case == 'display_wake_refreshes_backing_store':
+        # Regression for the "left-top 1/4 + white rest" bug reported after
+        # display sleep/wake on a 4K (150% scaling) monitor running the
+        # compiled exe. Symptom: window physically full-size, but its
+        # content only rendered to the top-left quarter — a classic Qt
+        # backing-store / DPR mismatch after the screen topology changes.
+        #
+        # Contract: _apply_screen_change, after repolishing, MUST trigger a
+        # backing-store refresh so Qt re-renders at the correct DPR. We
+        # track whether such a refresh was issued by spying on the known
+        # refresh mechanisms (windowHandle().create() OR resize by 1px).
+        # Patch them and count.
+        window._compute_current_scale = lambda: 1.25  # force a real repolish
+        refresh_signals = {'create': 0, 'resize': 0}
+        wh = window.windowHandle()
+        if wh is not None:
+            orig_create = wh.create
+            def spy_create(*a, **k):
+                refresh_signals['create'] += 1
+                return orig_create(*a, **k)
+            wh.create = spy_create
+        orig_resize = window.resize
+        def spy_resize(w, h=None):
+            refresh_signals['resize'] += 1
+            if h is None:
+                return orig_resize(w)
+            return orig_resize(w, h)
+        window.resize = spy_resize
+        # Drive a real repolish.
+        window._apply_screen_change()
+        # Accept either mechanism: create() OR resize().
+        result['refresh_issued'] = (refresh_signals['create'] > 0 or
+                                     refresh_signals['resize'] > 0)
+        result['refresh_create'] = refresh_signals['create']
+        result['refresh_resize'] = refresh_signals['resize']
+
     print('SCREEN_TEST_RESULT ' + json.dumps(result))
     """
 )
@@ -314,6 +350,33 @@ def test_sp_reads_live_scale(tmp_path):
     )
 
 
+@pytest.mark.ui
+@_skip_if_gui_unimportable
+def test_display_wake_refreshes_backing_store(tmp_path):
+    """REGRESSION: display sleep/wake caused "left-top 1/4 + white rest" bug.
+
+    User report (Nuitka exe, 4K monitor @ 150% scaling): after putting the
+    display to sleep and waking it, the launcher window was physically
+    full-size but its content only rendered to the top-left quarter — the
+    rest was blank white. Classic Qt backing-store / DPR mismatch after a
+    screen-topology change.
+
+    Contract: ``_apply_screen_change``, after repolishing the theme/scale,
+    MUST trigger a backing-store refresh (via ``windowHandle().create()`` or
+    a 1px resize nudge) so Qt re-renders the window surface at the correct
+    device pixel ratio. Without this, the repolished content can render
+    into a stale backing store sized to the wrong DPR.
+    """
+    r = _run_case("display_wake_refreshes_backing_store", tmp_path)
+    assert r.get("refresh_issued") is True, (
+        "_apply_screen_change did NOT issue a backing-store refresh after "
+        "repolish. On display sleep/wake this leaves Qt rendering into a "
+        "stale-DPR backing store → content only fills top-left 1/4 of the "
+        "window. Expected windowHandle().create() OR a 1px resize() to be "
+        f"called. Full: {r}"
+    )
+
+
 if __name__ == "__main__":
     # Allow running this file directly for quick subprocess debugging.
     import tempfile
@@ -324,6 +387,7 @@ if __name__ == "__main__":
         "same_dpi_noop",
         "fixed_sizes_idempotent",
         "sp_reads_live_scale",
+        "display_wake_refreshes_backing_store",
     ]:
         with tempfile.TemporaryDirectory() as d:
             print(c, "->", _run_case(c, Path(d)))

@@ -4134,35 +4134,62 @@ class PyQtLauncher(QtWidgets.QMainWindow, process_events.ProcessCallback):
             self.logger.info("screenChanged 触发但防抖定时器未就绪，跳过")
 
     def _apply_screen_change(self):
-        """防抖到期后真正执行：重算 scale 并受控地全量 repolish 一次。"""
+        """防抖到期后真正执行：重算 scale 并受控地全量 repolish 一次。
+
+        关键：**backing store 刷新无条件执行**，即使 new_scale 没变。
+        原因是 screenChanged 在显示器电源状态变化（关显示器/开显示器/休眠唤醒，
+        并非真正跨屏移动）时也会触发，这种场景 DPI 不变（同一个屏）→ 旧代码的
+        noop 早退会让 Qt 继续渲染进一个尺寸/DPR 不匹配的旧 backing store，
+        表现为窗口物理尺寸正常但内容只画到左上 1/4、其余白板（用户报告：
+        Nuitka exe + 4K @150% 缩放）。
+        """
         if not getattr(self, "theme_manager", None):
             return
         try:
             new_scale = self._compute_current_scale()
         except Exception:
-            return
-        if abs(new_scale - getattr(self, "_scale", 1.0)) < 1e-3:
-            # 同一档 DPI（或用户锁定了 ui_scale），无需重排。
-            return
-        if getattr(self, "logger", None):
-            self.logger.info(
-                "检测到屏幕 DPI 变化，重算 UI 缩放: %.3f → %.3f",
-                getattr(self, "_scale", 1.0),
-                new_scale,
-            )
-        self._scale = new_scale
-        self.setUpdatesEnabled(False)
+            # scale 算不出来仍要刷 backing store（screenChanged 已发生）。
+            new_scale = getattr(self, "_scale", 1.0)
+
+        need_repolish = abs(new_scale - getattr(self, "_scale", 1.0)) >= 1e-3
+        if need_repolish:
+            if getattr(self, "logger", None):
+                self.logger.info(
+                    "检测到屏幕 DPI 变化，重算 UI 缩放: %.3f → %.3f",
+                    getattr(self, "_scale", 1.0),
+                    new_scale,
+                )
+            self._scale = new_scale
+            self.setUpdatesEnabled(False)
+            try:
+                # set_scale 内部会重建 ThemeStyles 并通知所有 BasePage 监听器
+                # （一次受控全量 repolish，开销与切主题等价）。
+                self.theme_manager.set_scale(new_scale)
+                self._apply_theme(self._theme_value)
+                self._apply_scaled_fixed_sizes()
+            except Exception:
+                if getattr(self, "logger", None):
+                    self.logger.info("应用屏幕变化失败", exc_info=True)
+            finally:
+                self.setUpdatesEnabled(True)
+
+        # 无条件刷新 backing store —— 见上方 docstring。无论 scale 是否变化，
+        # 只要 screenChanged 触发了（包括显示器电源态变化这种「假性切屏」），
+        # Qt 的窗口 surface 都可能按旧 DPR 分配，必须显式重建。
+        #
+        # 机制优先级：windowHandle().create() 是 Qt 官方推荐的「重建窗口
+        # surface」入口；若 windowHandle 不存在（理论上不该发生），退化为
+        # 1px resize nudge（同样能触发 surface 重建）。
         try:
-            # set_scale 内部会重建 ThemeStyles 并通知所有 BasePage 监听器
-            # （一次受控全量 repolish，开销与切主题等价）。
-            self.theme_manager.set_scale(new_scale)
-            self._apply_theme(self._theme_value)
-            self._apply_scaled_fixed_sizes()
+            wh = self.windowHandle()
+            if wh is not None:
+                wh.create()
+            else:
+                self.resize(self.width(), self.height() - 1)
+                self.resize(self.width(), self.height() + 1)
         except Exception:
             if getattr(self, "logger", None):
-                self.logger.info("应用屏幕变化失败", exc_info=True)
-        finally:
-            self.setUpdatesEnabled(True)
+                self.logger.info("backing store 刷新失败", exc_info=True)
 
     def _apply_scaled_fixed_sizes(self):
         """重算主窗口内联的 setFixedWidth 类尺寸（侧边栏宽度等）。
