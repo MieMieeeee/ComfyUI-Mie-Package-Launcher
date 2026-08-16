@@ -19,6 +19,11 @@ Phase 1：仅 update（update_all / update_selected）。
 from __future__ import annotations
 
 import os
+import logging
+import itertools
+import sys
+import threading
+import subprocess
 import concurrent.futures
 from pathlib import Path
 from typing import Any, Optional
@@ -48,6 +53,10 @@ _DEFAULT_TIMEOUT = 3600
 # 返回 log 截断长度（cm-cli 输出是人类文本，可能很长）。
 _LOG_LIMIT = 4000
 
+logger = logging.getLogger("comfyui_launcher")
+# 流式执行 cm-cli 时的日志序号（便于在 launcher.log 检索某次 install 的完整原始输出）
+_stream_counter = itertools.count(1)
+
 
 def _truncate(text: str, limit: int = _LOG_LIMIT) -> str:
     if not text:
@@ -55,6 +64,37 @@ def _truncate(text: str, limit: int = _LOG_LIMIT) -> str:
     if len(text) <= limit:
         return text
     return text[:limit] + f"\n...[truncated {len(text) - limit} chars]"
+
+
+def _cmcli_install_stage(raw: str) -> Optional[str]:
+    """把一行 cm-cli install 输出映射成中文阶段消息。
+
+    重要：cm-cli（ComfyUI-Manager）install 时，git/pip 子进程的原始输出被 Popen
+    capture（stdout=PIPE，不透传），所以这里匹配的是 **cm-cli 自己用 print 输出
+    的阶段文案**（见 manager_core.gitclone_install / try_install_script），而非
+    git/pip 的原始行（那些拿不到）。无匹配返回 None（调用方据此决定是否更新 UI，
+    避免刷屏）。
+    """
+    if not raw:
+        return None
+    line = raw.rstrip("\r\n")
+    low = line.lower()
+
+    # cm-cli 自己 print 的阶段（manager_core.gitclone_install / try_install_script）
+    if line.startswith("Download: git clone") or line.startswith("CLONE into"):
+        return "正在克隆 git 仓库..."
+    if line == "Installation was successful.":
+        return "克隆完成，准备安装依赖..."
+    if "install: pip packages" in low:
+        return "正在安装 Python 依赖..."
+    if line.startswith("Try fixing:") or line.startswith("Attempt to fixing"):
+        return "正在修复依赖..."
+    if line.startswith("STASH:"):
+        return "正在处理本地改动..."
+    # "Install: <url>" —— 开始（放最后，避免和 "Install: pip packages" 冲突）
+    if line.startswith("Install: "):
+        return "开始安装..."
+    return None
 
 
 class PluginService:
@@ -317,6 +357,173 @@ class PluginService:
         except Exception:
             return {}
 
+    # ---- 插件搜索（CNR registry 缓存 + legacy custom-node-list 刷新）----
+    def list_registry_plugins(self) -> list[dict]:
+        """读 CM 的 CNR registry 缓存（*_nodes.json），返回完整插件列表供搜索。
+
+        缓存不存在/解析失败返回 []（搜索降级到刷新的 custom-node-list 或空）。
+        """
+        try:
+            cache_dir = self._comfyui_dir() / "user" / "__manager" / "cache"
+            if not cache_dir.exists():
+                return []
+            candidates = sorted(cache_dir.glob("*_nodes.json"),
+                                key=lambda p: p.stat().st_mtime, reverse=True)
+            if not candidates:
+                return []
+            import json
+            data = json.loads(candidates[0].read_text(encoding="utf-8"))
+            nodes = data.get("nodes", []) if isinstance(data, dict) else []
+            result = []
+            for n in nodes:
+                if not isinstance(n, dict):
+                    continue
+                repo = (n.get("repository") or "").strip()
+                if not repo:
+                    continue
+                result.append({
+                    "id": n.get("id") or "",
+                    "name": n.get("name") or repo.rstrip("/").split("/")[-1],
+                    "description": n.get("description") or "",
+                    "author": n.get("author") or "",
+                    "repository": repo,
+                    "category": n.get("category") or "",
+                    "tags": n.get("tags") or [],
+                    "downloads": n.get("downloads") or 0,
+                    "stars": n.get("github_stars") or 0,
+                    "source": "cnr",
+                })
+            return result
+        except Exception:
+            return []
+
+    @staticmethod
+    def _normalize_repo(url: str) -> str:
+        """归一化 git url 用于去重：去空白/去 .git 后缀/去尾部 //小写。"""
+        u = (url or "").strip().lower()
+        if u.endswith(".git"):
+            u = u[:-4]
+        return u.rstrip("/")
+
+    def _plugin_cache_path(self) -> Path:
+        """启动器自己的插件索引缓存：launcher/plugins/cache/custom-node-list.json（不入 git）。"""
+        return Path("launcher/plugins/cache/custom-node-list.json")
+
+    def _load_refreshed_custom_list(self) -> list[dict]:
+        """读启动器缓存的 custom-node-list.json（用户点过「刷新索引」才有）。"""
+        try:
+            p = self._plugin_cache_path()
+            if not p.exists():
+                return []
+            import json
+            data = json.loads(p.read_text(encoding="utf-8"))
+            items = data.get("custom_nodes", []) if isinstance(data, dict) else []
+            result = []
+            for it in items:
+                if not isinstance(it, dict):
+                    continue
+                    # custom-node-list 的 reference 可能是 git url 字符串或 [git_url] 列表
+                ref = it.get("reference") or it.get("reference_git") or ""
+                if isinstance(ref, list):
+                    ref = ref[0] if ref else ""
+                ref = str(ref).strip()
+                if not ref:
+                    continue
+                title = it.get("title") or it.get("name") or ref.rstrip("/").split("/")[-1]
+                result.append({
+                    "id": "",  # legacy 列表没有 CNR id
+                    "name": title,
+                    "description": it.get("description") or "",
+                    "author": it.get("author") or "",
+                    "repository": ref,
+                    "category": it.get("category") or "",
+                    "tags": [],
+                    "downloads": 0,
+                    "stars": 0,
+                    "source": "legacy",
+                })
+            return result
+        except Exception:
+            return []
+
+    def search_plugins(self, keyword: str, limit: int = 60) -> list[dict]:
+        """搜索可安装插件（合并 CNR 缓存 + 刷新的 legacy 列表，按 repository 去重）。
+
+        空关键字 → 按 downloads/stars 排序的热门列表。
+        有关键字 → 大小写不敏感匹配 name/id/author/tags/description，按命中率打分排序。
+        返回统一结构（每项含 name/description/author/repository/id/source）。
+        """
+        # 合并：CNR 主源优先，legacy 补充
+        merged = {}
+        for p in self.list_registry_plugins():
+            key = self._normalize_repo(p["repository"])
+            if key and key not in merged:
+                merged[key] = p
+        for p in self._load_refreshed_custom_list():
+            key = self._normalize_repo(p["repository"])
+            if key and key not in merged:
+                merged[key] = p
+        plugins = list(merged.values())
+
+        kw = (keyword or "").strip().lower()
+        if not kw:
+            plugins.sort(key=lambda p: (p.get("downloads", 0) + p.get("stars", 0)), reverse=True)
+            return plugins[:limit]
+
+        def _score(p):
+            name = (p.get("name") or "").lower()
+            pid = (p.get("id") or "").lower()
+            author = (p.get("author") or "").lower()
+            tags = " ".join(p.get("tags") or []).lower()
+            desc = (p.get("description") or "").lower()
+            s = 0
+            if kw == name:
+                s += 500
+            elif name.startswith(kw):
+                s += 200
+            elif kw in name:
+                s += 100
+            if kw in pid:
+                s += 150
+            if kw in author:
+                s += 40
+            if kw in tags:
+                s += 30
+            if kw in desc:
+                s += 10
+            return s
+
+        scored = [(p, _score(p)) for p in plugins]
+        scored = [(p, s) for p, s in scored if s > 0]
+        scored.sort(key=lambda x: x[1], reverse=True)
+        return [p for p, _ in scored[:limit]]
+
+    def refresh_registry_index(self) -> dict:
+        """远程拉 ComfyUI-Manager 的 custom-node-list.json，存启动器缓存。
+
+        URL 套 config.proxy_settings 的 gh-proxy（国内访问）。返回 {ok, error, count}。
+        失败（网络/解析）不抛，返回 ok=False + error（UI 给友好提示）。
+        """
+        import urllib.request
+        from utils import net as NET
+        base = "https://raw.githubusercontent.com/ltdrdata/ComfyUI-Manager/main/custom-node-list.json"
+        try:
+            proxy_settings = (getattr(self.app, "config", None) or {}).get("proxy_settings", {})
+            url = NET.apply_git_proxy_to_url(base, proxy_settings)
+            cache_path = self._plugin_cache_path()
+            cache_path.parent.mkdir(parents=True, exist_ok=True)
+            req = urllib.request.Request(url, headers={"User-Agent": "ComfyUI-Launcher"})
+            with urllib.request.urlopen(req, timeout=30) as resp:
+                data = resp.read()
+            text = data.decode("utf-8-sig", errors="replace")
+            import json
+            parsed = json.loads(text)  # 校验是合法 JSON
+            count = len(parsed.get("custom_nodes", []) if isinstance(parsed, dict) else [])
+            cache_path.write_text(text, encoding="utf-8")
+            return {"ok": True, "error": None, "count": count}
+        except Exception as e:
+            return {"ok": False, "error": str(e), "count": 0}
+
     def outdated_plugins(self, names: list[str], on_progress=None) -> list[str]:
         """返回 names 中「有可用更新」的子集，支持 git 和 CNR 两类插件。
 
@@ -444,6 +651,93 @@ class PluginService:
         except Exception as e:
             return {"returncode": -1, "stdout": "", "stderr": "", "error": str(e)}
 
+    def _run_cmcli_streaming(self, args: list[str], on_output=None,
+                             cancel_event=None, timeout: int = _DEFAULT_TIMEOUT) -> dict[str, Any]:
+        """跑一个 cm-cli 子命令，逐行流式回调输出。返回 {returncode, stdout, stderr, error}。
+
+        与 _run_cmcli 同契约，但用 Popen + stderr 合并到 stdout 单流逐行读，
+        每行调 on_output(line)（实时反馈给 UI）。合并单流避免双流死锁。
+        整体超时用读线程 + join(timeout) 保证（cm-cli 卡死不输出时也能兜底 kill）。
+        cancel_event（threading.Event）：若外部 set，读循环检测到后 kill cm-cli 进程
+        并立即返回（error="用户取消"），供 install 的「取消」按钮真正中断子进程。
+        """
+        py = self._python_exec()
+        cm = self._cm_cli_path()
+        if not py or not cm or not Path(py).exists():
+            return {"returncode": -1, "stdout": "", "stderr": "",
+                    "error": "ComfyUI-Manager 或 ComfyUI 内置 python 未找到"}
+        cmd = [py, str(cm), *args]
+        env = os.environ.copy()
+        env["COMFYUI_PATH"] = str(self._comfyui_dir())
+        # 强制 cm-cli（python 子进程）stdout 无缓冲：默认非 tty(PIPE) 下 Python 是
+        # 块缓冲，print 会积压到进程结束才 flush，导致流式阶段进度读不到（全程无更新）。
+        env["PYTHONUNBUFFERED"] = "1"
+
+        popen_kwargs = {
+            "env": env, "cwd": str(cm.parent),
+            "stdin": subprocess.DEVNULL,
+            "stdout": subprocess.PIPE,
+            "stderr": subprocess.STDOUT,  # 合并到 stdout，单流逐行读（git 在 stderr）
+            "text": True, "encoding": "utf-8", "errors": "replace",
+            "bufsize": 1,  # 行缓冲（text 模式生效），保证逐行拿到
+        }
+        if sys.platform.startswith("win"):
+            si = subprocess.STARTUPINFO()
+            si.dwFlags |= subprocess.STARTF_USESHOWWINDOW
+            popen_kwargs["startupinfo"] = si
+            popen_kwargs["creationflags"] = subprocess.CREATE_NO_WINDOW
+
+        cmd_id = next(_stream_counter)
+        logger.info("cmcli_stream[%s]: start args=%r", cmd_id, args)
+        try:
+            proc = subprocess.Popen(cmd, **popen_kwargs)
+        except Exception as e:
+            return {"returncode": -1, "stdout": "", "stderr": "", "error": str(e)}
+
+        out_parts: list[str] = []
+
+        def _reader():
+            try:
+                assert proc.stdout is not None
+                for line in proc.stdout:
+                    out_parts.append(line)
+                    # 记录 cm-cli 的每一行原始输出（便于在 launcher.log 核对 cm-cli
+                    # 实际打印了什么，调整 _cmcli_install_stage 的匹配）
+                    logger.info("cmcli_stream[%s]: %r", cmd_id, line.rstrip("\r\n"))
+                    if on_output:
+                        try:
+                            on_output(line.rstrip("\r\n"))
+                        except Exception:
+                            pass
+                    # 用户取消 → kill cm-cli 子进程，让循环尽快结束
+                    if cancel_event is not None and cancel_event.is_set():
+                        try:
+                            proc.kill()
+                        except Exception:
+                            pass
+                        break
+            except Exception:
+                logger.exception("cmcli_stream[%s]: reader error", cmd_id)
+
+        t = threading.Thread(target=_reader, daemon=True)
+        t.start()
+        t.join(timeout=timeout)
+        if t.is_alive():
+            # 读线程仍在跑 = 超时：kill 进程，给 reader 一点时间收尾
+            proc.kill()
+            t.join(timeout=5)
+            return {"returncode": -1, "stdout": "".join(out_parts), "stderr": "",
+                    "error": f"cm-cli 超时（{timeout}s）"}
+        try:
+            proc.wait(timeout=10)
+        except Exception:
+            pass
+        if cancel_event is not None and cancel_event.is_set():
+            return {"returncode": -1, "stdout": "".join(out_parts), "stderr": "",
+                    "error": "用户取消"}
+        return {"returncode": proc.returncode, "stdout": "".join(out_parts),
+                "stderr": "", "error": None}
+
     # ---- 更新操作 ----
     def update_all(self) -> dict[str, Any]:
         """更新全部插件（cm-cli update all，含 pip 依赖修复）。
@@ -474,6 +768,33 @@ class PluginService:
     def install(self, node_spec):
         """安装插件（cm-cli install <CNR id | git url>）。"""
         return self._lifecycle("install", node_spec)
+
+    def install_streaming(self, node_spec, on_stage=None, cancel_event=None) -> dict[str, Any]:
+        """安装插件（流式）：cm-cli install <spec>，逐阶段回调。
+
+        与 install 同返回契约 {ok, log, error}，但内部用 _run_cmcli_streaming
+        实时读 cm-cli（git clone + pip install）输出，用 _cmcli_install_stage 映射成
+        阶段文案，非 None 时回调 on_stage(stage)（供 UI 更新进度文字）。cancel_event
+        透传给 _run_cmcli_streaming，用户取消时 kill cm-cli 进程。CLI 路径继续用
+        install（_lifecycle，非流式）。
+        """
+        def _on_output(raw):
+            if on_stage:
+                stage = _cmcli_install_stage(raw)
+                if stage:
+                    try:
+                        on_stage(stage)
+                    except Exception:
+                        pass
+
+        res = self._run_cmcli_streaming(["install", str(node_spec)],
+                                        on_output=_on_output, cancel_event=cancel_event)
+        if res["error"]:
+            return {"ok": False, "log": "", "error": res["error"]}
+        log = _truncate((res["stdout"] or res["stderr"]).strip())
+        rc = res["returncode"]
+        return {"ok": rc == 0, "log": log,
+                "error": None if rc == 0 else f"cm-cli install 退出码 {rc}"}
 
     def _lifecycle(self, op: str, target) -> dict[str, Any]:
         """uninstall/disable/enable/install 共用：跑 cm-cli <op> <target>。"""

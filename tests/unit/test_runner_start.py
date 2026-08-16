@@ -133,7 +133,7 @@ class TestStartFunction:
     def test_failure_path_calls_on_start_failed(
         self, mock_app, mock_pm, mock_popen, mock_thread, monkeypatch
     ):
-        """Process exit calls on_start_failed with '进程退出'."""
+        """Process exit calls on_start_failed with '进程意外退出'."""
         monkeypatch.setattr(os, "name", "posix")
         mock_process = MagicMock()
         mock_process.poll.return_value = 1
@@ -149,7 +149,7 @@ class TestStartFunction:
         mock_app.ui_post.assert_called_once()
         callback = mock_app.ui_post.call_args[0][0]
         callback()
-        mock_pm.on_start_failed.assert_called_once_with("进程退出")
+        mock_pm.on_start_failed.assert_called_once_with("进程意外退出")
 
     def test_exception_path_calls_on_start_failed(
         self, mock_app, mock_pm, mock_popen, mock_thread, monkeypatch
@@ -485,3 +485,34 @@ class TestStartPassesLogPath:
                     assert mock_spawn.called
                     kwargs = mock_spawn.call_args.kwargs
                     assert kwargs.get("log_path") == log
+
+
+class TestTailScriptEncoding:
+    """issue #94: PS 窗口读 UTF-8 日志的编码声明，防中文 Windows 下 mojibake。
+
+    注意：这是结构性测试，只验证生成的脚本字符串包含必要的编码声明。
+    它【不证明】真机(中文 Windows + PS 5.1)上 mojibake 被实际修复——
+    那需要真实 PS host + UTF-8 fixture 日志 + mojibake 检测，对 CI 太脆，
+    不在本测试范围。真机验证靠人工启动 ComfyUI 检查 banner 显示。
+    """
+
+    def test_script_forces_utf8_codepage(self):
+        from core.runner_start import _build_tail_script
+        script = _build_tail_script()
+        # 控制台码页切到 UTF-8(中文 Windows 默认 cp936 会 mojibake)，且抑制 banner
+        assert "chcp 65001" in script
+        assert "chcp 65001 > $null" in script
+        # 控制台输出编码设 UTF-8
+        assert "[Console]::OutputEncoding = [System.Text.Encoding]::UTF8" in script
+        # Get-Content 显式按 UTF-8 读(PS 5.1 默认对无 BOM 文件用系统 ANSI)
+        assert "-Encoding UTF8" in script
+        # 原有行为不丢:窗口标题 + -Wait tail
+        assert "$host.UI.RawUI.WindowTitle = 'ComfyUI'" in script
+        assert "Get-Content" in script and "-Wait" in script
+
+    def test_script_is_ascii_only(self):
+        """脚本内容必须纯 ASCII：PS 5.1 对无 BOM 脚本按系统 ANSI 解析，
+        含非 ASCII(如中文)会在非中文 Windows 上解析失败。"""
+        from core.runner_start import _build_tail_script
+        script = _build_tail_script()
+        script.encode("ascii")  # 抛 UnicodeEncodeError 即失败

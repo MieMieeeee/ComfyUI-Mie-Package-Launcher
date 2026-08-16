@@ -24,15 +24,25 @@ class EnvironmentSection(QtWidgets.QWidget):
         super().__init__(parent)
         self.app = app_context
         self.theme_manager = theme_manager
-        # DPI 缩放 helper（theme_manager 缺失时退化为 1.0）
-        _styles = theme_manager.styles if theme_manager else None
-        self._px = _styles._px if _styles else (lambda b: b)
-        self._pt = _styles._pt if _styles else (lambda b: b)
         self._setup_ui()
 
         # 注册主题监听
         if self.theme_manager:
             self.theme_manager.register_listener(self._on_theme_changed)
+
+    # DPI 缩放 helper —— 每次调用读 self.theme_manager.styles 的【当前】实例。
+    # set_scale 会新建 ThemeStyles 替换 self.styles（theme_manager.py）；若像旧
+    # 代码那样在 __init__ 把 self._px 绑定到当时实例的 _px 方法，DPI 变化后
+    # self._px 永远停在首次 scale（与 qt_app.self._sp 同族 bug，见
+    # test_sp_reads_live_scale）。改成方法后所有 self._px(x)/self._pt(x)
+    # 调用点零改动（属性→方法，调用语法一致）。
+    def _px(self, base):
+        styles = getattr(self.theme_manager, "styles", None) if self.theme_manager else None
+        return styles._px(base) if styles else base
+
+    def _pt(self, base):
+        styles = getattr(self.theme_manager, "styles", None) if self.theme_manager else None
+        return styles._pt(base) if styles else base
 
     def _setup_ui(self):
         """设置 UI"""
@@ -54,15 +64,9 @@ class EnvironmentSection(QtWidgets.QWidget):
 
         main_layout.addWidget(form_group)
 
-        # 添加阴影效果
-        try:
-            shadow1 = QtWidgets.QGraphicsDropShadowEffect(self)
-            shadow1.setBlurRadius(18)
-            shadow1.setOffset(0, 4)
-            shadow1.setColor(QtGui.QColor(0, 0, 0, 30))
-            form_group.setGraphicsEffect(shadow1)
-        except Exception:
-            pass
+        # 阴影效果：DPI 变化时需重建（见 _apply_shadow / update_theme）。
+        self._form_group = form_group
+        self._apply_shadow()
 
         # ============== HF 镜像 ==============
         env_hf_combo = NoWheelComboBox()
@@ -280,6 +284,13 @@ class EnvironmentSection(QtWidgets.QWidget):
         # 现在由顶部环境栏（EnvironmentSelector）的路径摘要 + 管理弹窗统一展示和编辑，
         # 不再在此重复。代理设置（HF/GitHub/PyPI）保留。
 
+        # DPI 相关尺寸：DPI 变化时需重算（见 _reapply_dpi_sizes / update_theme）。
+        self._dpi_sized_widgets = [
+            (env_hf_combo, "min", 120), (env_gh_combo, "min", 120), (env_pypi_combo, "min", 120),
+            (env_hf_entry, "min", 520), (env_gh_entry, "min", 520), (env_pypi_entry, "min", 520),
+            (hf_label, "fixed", 100), (gh_label, "fixed", 100), (pypi_label, "fixed", 100),
+        ]
+
     def _get_label_color(self):
         """获取标签颜色"""
         try:
@@ -470,6 +481,39 @@ class EnvironmentSection(QtWidgets.QWidget):
         """主题变更回调"""
         self.update_theme(theme_styles)
 
+    def _apply_shadow(self):
+        """给 form_group 重建阴影 effect。
+
+        QGraphicsDropShadowEffect 在 Qt5 下会把源 widget 渲染进内部缓存；
+        DPI 变化 / backing store 重建（见 qt_app._apply_screen_change 的
+        wh.create()）后，缓存按旧 DPR/旧尺寸的渲染会残留在画面上，表现为
+        QGroupBox 边缘外的「黑条」且切回原 DPI 也无法恢复。重建 effect 能
+        强制缓存按当前 DPR 重新分配，消除残影。
+        """
+        fg = getattr(self, "_form_group", None)
+        if fg is None:
+            return
+        try:
+            fg.setGraphicsEffect(None)  # 拆掉旧 effect（连同它的缓存）
+            shadow = QtWidgets.QGraphicsDropShadowEffect(self)
+            shadow.setBlurRadius(18)
+            shadow.setOffset(0, 4)
+            shadow.setColor(QtGui.QColor(0, 0, 0, 30))
+            fg.setGraphicsEffect(shadow)
+        except Exception:
+            pass
+
+    def _reapply_dpi_sizes(self):
+        """重算所有用 _px() 设定的 DPI 相关尺寸（DPI 变化时调用）。"""
+        for w, kind, base in getattr(self, "_dpi_sized_widgets", []):
+            try:
+                if kind == "min":
+                    w.setMinimumWidth(self._px(base))
+                elif kind == "fixed":
+                    w.setFixedWidth(self._px(base))
+            except Exception:
+                pass
+
     def update_theme(self, theme_styles=None):
         """更新主题"""
         # 重新设置标签样式
@@ -498,3 +542,7 @@ class EnvironmentSection(QtWidgets.QWidget):
                 btn.setStyleSheet(primary_style)
             except Exception:
                 pass
+
+        # DPI 变化时重算尺寸 + 重建阴影（消除 QGraphicsDropShadowEffect 缓存残影）
+        self._reapply_dpi_sizes()
+        self._apply_shadow()

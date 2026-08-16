@@ -392,6 +392,86 @@ def test_controller_request_install_calls_service_install_then_refreshes(qt_app)
     svc.list_installed.assert_called_once()
 
 
+# ---- run_install / run_uninstall / run_disable：带反馈版本（接收 service 返回值）----
+# 回归保护：旧 request_install/apply_uninstall 丢弃 {ok,log,error} → 无反馈；
+# 新 run_* 必须把结果通过 on_done(ok, message) 派回。
+
+def test_controller_run_install_reports_success(qt_app):
+    from ui_qt.pages.plugins_page import PluginsPage, PluginController
+
+    page = PluginsPage(theme_manager=_stub_theme())
+    svc = MagicMock()
+    svc.list_installed.return_value = []
+    svc.install_streaming.return_value = {"ok": True, "log": "installed", "error": None}
+    run_bg, post_ui = _sync_runner()
+    ctrl = PluginController(page, svc, run_bg, post_ui)
+
+    got = []
+    ctrl.run_install("https://github.com/x/Y",
+                     on_done=lambda ok, msg: got.append((ok, msg)))
+    assert svc.install_streaming.call_count == 1
+    assert svc.install_streaming.call_args[0][0] == "https://github.com/x/Y"
+    assert got and got[0][0] is True            # 成功
+    assert "完成" in got[0][1]
+
+
+def test_controller_run_install_reports_failure(qt_app):
+    from ui_qt.pages.plugins_page import PluginsPage, PluginController
+
+    page = PluginsPage(theme_manager=_stub_theme())
+    svc = MagicMock()
+    svc.list_installed.return_value = []
+    svc.install_streaming.return_value = {"ok": False, "log": "", "error": "boom"}
+    run_bg, post_ui = _sync_runner()
+    ctrl = PluginController(page, svc, run_bg, post_ui)
+
+    got = []
+    ctrl.run_install("https://github.com/x/Y",
+                     on_done=lambda ok, msg: got.append((ok, msg)))
+    assert svc.install_streaming.call_count == 1
+    assert svc.install_streaming.call_args[0][0] == "https://github.com/x/Y"
+    assert got and got[0][0] is False           # 失败也要回报（旧路径静默吞掉）
+    assert "boom" in got[0][1]                  # cm-cli 原因透传给用户
+
+
+def test_controller_run_uninstall_aggregates_partial_failure(qt_app):
+    from ui_qt.pages.plugins_page import PluginsPage, PluginController
+
+    page = PluginsPage(theme_manager=_stub_theme())
+    svc = MagicMock()
+    svc.list_installed.return_value = []
+    # A 成功、B 失败
+    svc.uninstall.side_effect = [{"ok": True, "error": None}, {"ok": False, "error": "denied"}]
+    run_bg, post_ui = _sync_runner()
+    ctrl = PluginController(page, svc, run_bg, post_ui)
+
+    statuses, got = [], []
+    ctrl.run_uninstall(["A", "B"],
+                       on_status=lambda s: statuses.append(s),
+                       on_done=lambda ok, msg: got.append((ok, msg)))
+    assert svc.uninstall.call_count == 2
+    assert len(statuses) == 2                   # 逐项进度：每个插件一次
+    assert got and got[0][0] is False           # 有失败 → 整体不成功
+    assert "1/2" in got[0][1]                   # 汇总部分失败
+    assert "denied" in got[0][1]
+
+
+def test_controller_run_disable_calls_service_disable(qt_app):
+    from ui_qt.pages.plugins_page import PluginsPage, PluginController
+
+    page = PluginsPage(theme_manager=_stub_theme())
+    svc = MagicMock()
+    svc.list_installed.return_value = []
+    svc.disable.return_value = {"ok": True, "error": None}
+    run_bg, post_ui = _sync_runner()
+    ctrl = PluginController(page, svc, run_bg, post_ui)
+
+    got = []
+    ctrl.run_disable(["MieNodes"], on_done=lambda ok, msg: got.append((ok, msg)))
+    svc.disable.assert_called_once_with("MieNodes")   # op 路由到 svc.disable
+    assert got and got[0][0] is True
+
+
 def test_controller_check_updates_emits_outdated_reported(qt_app):
     from ui_qt.pages.plugins_page import PluginsPage, PluginController
 

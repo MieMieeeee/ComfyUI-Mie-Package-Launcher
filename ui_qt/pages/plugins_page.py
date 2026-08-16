@@ -412,7 +412,8 @@ class PluginsPage(BasePage):
     disable_selected_requested = QtCore.pyqtSignal(list)
     enable_selected_requested = QtCore.pyqtSignal(list)
     uninstall_selected_requested = QtCore.pyqtSignal(list)  # 由 qt_app 弹确认框
-    install_requested = QtCore.pyqtSignal(str)              # git URL / CNR id
+    install_requested = QtCore.pyqtSignal(str)              # git URL / CNR id（保留，URL 安装旧路径）
+    search_install_requested = QtCore.pyqtSignal()          # 打开搜索安装弹窗
     check_updates_requested = QtCore.pyqtSignal()           # 批量 ls-remote
     outdated_reported = QtCore.pyqtSignal(list, dict)        # 控制器回推：(落后 dir_name 列表, {dir_name: 远端日期})
 
@@ -477,22 +478,26 @@ class PluginsPage(BasePage):
         toolbar.setSpacing(8)
         self.refresh_btn = QtWidgets.QPushButton("刷新列表")
         self.install_btn = QtWidgets.QPushButton("安装插件")
+        self.search_install_btn = QtWidgets.QPushButton("搜索安装")
         self.check_updates_btn = QtWidgets.QPushButton("检查更新")
         self.update_all_btn = QtWidgets.QPushButton("更新全部")
         try:
             self.refresh_btn.setStyleSheet(s.secondary_button_style())
             self.install_btn.setStyleSheet(s.secondary_button_style())
+            self.search_install_btn.setStyleSheet(s.secondary_button_style())
             self.check_updates_btn.setStyleSheet(s.primary_button_style())
             self.update_all_btn.setStyleSheet(s.primary_button_style())
         except Exception:
             pass
         self.refresh_btn.clicked.connect(self.refresh_requested.emit)
         # install_btn.clicked 不在 page 内连 —— qt_app 直接连它弹输入框（install 需要用户输入 URL）。
+        self.search_install_btn.clicked.connect(self.search_install_requested.emit)
         self.check_updates_btn.clicked.connect(self.check_updates_requested.emit)
         self.update_all_btn.clicked.connect(self.update_all_requested.emit)
-        # 左：刷新 / 安装；右：检查更新 / 更新全部
+        # 左：刷新 / 安装插件 / 搜索安装；右：检查更新 / 更新全部
         toolbar.addWidget(self.refresh_btn)
         toolbar.addWidget(self.install_btn)
+        toolbar.addWidget(self.search_install_btn)
         toolbar.addStretch()
         toolbar.addWidget(self.check_updates_btn)
         toolbar.addWidget(self.update_all_btn)
@@ -871,6 +876,90 @@ class PluginController:
     def _install_work(self, spec):
         self.svc.install(spec)
         self._populate_from_service()
+
+    # ---- 带反馈版本（qt_app 编排用）：接收 service 返回值，回调 (ok, message) ----
+    # 旧 request_install/apply_uninstall/_on_disable_selected/_on_enable_selected 丢弃了
+    # service 的 {ok, log, error} 返回值且无 UI 反馈；这些 run_* 把结果组装成
+    # (ok, message) 派回 UI 线程，让 qt_app 弹成功/失败提示（仿 run_update_selected）。
+    def run_install(self, spec, on_status=None, on_progress=None, on_done=None,
+                    cancel_event=None):
+        """qt_app 触发：带进度回调的安装。
+
+        on_status(str): 起始状态，派回 UI 线程。
+        on_progress(str): cm-cli 输出映射出的阶段文案（克隆/收集依赖/下载/安装/完成），派回 UI 线程。
+        on_done(ok, message): 完成回调，派回 UI 线程。
+        cancel_event(threading.Event): 透传给 install_streaming，用户取消时 kill cm-cli。
+        """
+        def work():
+            res = {"ok": False, "error": "未执行", "log": ""}
+            try:
+                if on_status:
+                    self._post_to_ui(lambda: on_status(f"正在安装 {spec}（cm-cli install，可能需要几分钟）..."))
+
+                def _on_stage(stage):
+                    if on_progress:
+                        self._post_to_ui(lambda s=stage: on_progress(s))
+
+                res = self.svc.install_streaming(spec, on_stage=_on_stage,
+                                                 cancel_event=cancel_event)
+            except Exception as e:
+                res = {"ok": False, "error": str(e), "log": ""}
+            finally:
+                try:
+                    self._populate_from_service()
+                except Exception:
+                    pass
+                if on_done:
+                    ok = bool(res.get("ok"))
+                    err = res.get("error")
+                    if ok:
+                        msg = f"插件安装完成：{spec}"
+                    else:
+                        msg = f"插件安装失败：{spec}" + (f"\n{err}" if err else "")
+                    self._post_to_ui(lambda: on_done(ok, msg))
+        self._run_in_background(work)
+
+    def run_uninstall(self, dir_names, on_status=None, on_done=None):
+        """qt_app 触发：带进度回调的卸载（批量逐项）。on_status(str)/on_done(ok, message) 派回 UI 线程。"""
+        self._run_batch_with_feedback("uninstall", "卸载", dir_names, on_status, on_done)
+
+    def run_disable(self, dir_names, on_status=None, on_done=None):
+        """qt_app 触发：带进度回调的禁用（批量逐项）。on_status(str)/on_done(ok, message) 派回 UI 线程。"""
+        self._run_batch_with_feedback("disable", "禁用", dir_names, on_status, on_done)
+
+    def run_enable(self, dir_names, on_status=None, on_done=None):
+        """qt_app 触发：带进度回调的启用（批量逐项）。on_status(str)/on_done(ok, message) 派回 UI 线程。"""
+        self._run_batch_with_feedback("enable", "启用", dir_names, on_status, on_done)
+
+    def _run_batch_with_feedback(self, op, op_label, dir_names, on_status, on_done):
+        """uninstall/disable/enable 共用：逐项执行 service.<op> + 逐项进度 + 结果汇总。"""
+        def work():
+            results = []
+            try:
+                for i, dn in enumerate(dir_names, 1):
+                    if on_status:
+                        self._post_to_ui(lambda i=i, dn=dn: on_status(
+                            f"正在{op_label} ({i}/{len(dir_names)}) {dn}..."))
+                    try:
+                        r = getattr(self.svc, op)(dn)
+                    except Exception as e:
+                        r = {"ok": False, "error": str(e)}
+                    results.append((dn, r))
+            finally:
+                try:
+                    self._populate_from_service()
+                except Exception:
+                    pass
+                if on_done:
+                    failed = [(dn, r) for dn, r in results if not r.get("ok")]
+                    ok = len(failed) == 0 and len(results) == len(dir_names)
+                    if ok:
+                        msg = f"已{op_label} {len(dir_names)} 个插件"
+                    else:
+                        detail = "; ".join(f"{dn}: {r.get('error', '?')}" for dn, r in failed)
+                        msg = f"{op_label}完成，{len(failed)}/{len(dir_names)} 失败：{detail}"
+                    self._post_to_ui(lambda: on_done(ok, msg))
+        self._run_in_background(work)
 
     # ---- 检查更新（批量 ls-remote，结果回推页面标记）----
     def _on_check_updates(self):

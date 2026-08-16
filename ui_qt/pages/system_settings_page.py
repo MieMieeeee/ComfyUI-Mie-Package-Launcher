@@ -425,13 +425,29 @@ class SystemSettingsPage(BasePage):
             #    这与切主题等价开销，用户已接受。app 上的 _scale / 侧边栏固定尺寸也同步更新。
             self.setUpdatesEnabled(False)
             try:
+                old_scale = getattr(self.app, "_scale", effective)
                 if hasattr(self.app, "_scale"):
                     self.app._scale = effective
                 if hasattr(self.app, "theme_manager") and self.app.theme_manager:
                     self.app.theme_manager.set_scale(effective)
+                # 重应用全局 QSS：_apply_theme 重新生成 _content_widget 的样式表，
+                # 里面 QLabel/QGroupBox 等的 _pt 字号固化在 QSS 字符串里，只有重新
+                # setStyleSheet 才会按新 scale 重算。与 _apply_screen_change 路径保持
+                # 一致（那里 set_scale 后也紧接着调 _apply_theme）。
+                if hasattr(self.app, "_apply_theme") and hasattr(self.app, "_theme_value"):
+                    try:
+                        self.app._apply_theme(self.app._theme_value)
+                    except Exception:
+                        pass
                 # 主窗口内联的固定尺寸（侧边栏宽度等）需要单独重算
                 if hasattr(self.app, "_apply_scaled_fixed_sizes"):
                     self.app._apply_scaled_fixed_sizes()
+                # 窗口跟随 scale 同比缩放（反转「只放大不缩小」，消除小 scale 留白）
+                if hasattr(self.app, "_resize_for_scale"):
+                    try:
+                        self.app._resize_for_scale(effective, old_scale)
+                    except Exception:
+                        pass
             finally:
                 self.setUpdatesEnabled(True)
             # 4) 刷新本行的「当前 X%」文案（自动模式下显示推断值）

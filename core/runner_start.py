@@ -48,15 +48,41 @@ def _start_log_pump(pm, source, target):
     pm._log_pump_thread = thread
 
 
-def _start_console_log_window(pm, log_path):
-    """打开独立 CMD，持续显示与实时日志页相同的日志文件。"""
-    script = Path(os.environ.get("TEMP", ".")) / "comfyui_launcher_tail.ps1"
-    script.write_text(
+def _build_tail_script() -> str:
+    """生成 tail 日志文件的 PowerShell 脚本（纯 ASCII 内容）。
+
+    编码声明三件套（PS 5.1 UTF-8 标准姿势，修 issue #94 中文 Windows mojibake）：
+    - chcp 65001：切控制台 host 码页，box-drawing 字符(ComfyUI banner 的 ─ │ ╭ ╰)
+      才能正确渲染。中文 Windows 默认 cp936，不切则 UTF-8 字节 mojibake。
+      重定向到 $null，避免 "Active code page: 65001" 污染窗口首行。
+    - [Console]::OutputEncoding = UTF8：控制台输出编码，影响 Get-Content 管道输出
+      往 host 的字节流。
+    - Get-Content -Encoding UTF8：覆盖 PS 5.1「无 BOM ⇒ 系统 ANSI」的默认读法，
+      显式按 UTF-8 解码（comfyui.log 是无 BOM UTF-8）。
+      附带好处：也让 -Wait 的流式读取在 UTF-8 多字节序列上正确切边界——
+      pump 每次 flush 几 KB，若按 cp936 双字节切可能切在 UTF-8 码点中间，
+      偶发损坏单行内容；显式 UTF-8 解码消除这个隐患。
+
+    注：脚本内容是纯 ASCII，write_text(encoding="utf-8") 无 BOM 即可；
+    若日后加入非 ASCII（如中文注释），需改用 BOM 或 Default 编码写，
+    否则 PS 5.1 会按系统 ANSI 解析脚本本身。
+
+    $OutputEncoding 是防御性的（只在管道传给外部程序时生效，本场景无害）。
+    """
+    return (
         "param([string]$LogPath)\n"
         "$host.UI.RawUI.WindowTitle = 'ComfyUI'\n"
-        "Get-Content -LiteralPath $LogPath -Wait -Tail 80\n",
-        encoding="utf-8",
+        "chcp 65001 > $null\n"
+        "[Console]::OutputEncoding = [System.Text.Encoding]::UTF8\n"
+        "$OutputEncoding = [System.Text.Encoding]::UTF8\n"
+        "Get-Content -LiteralPath $LogPath -Wait -Tail 80 -Encoding UTF8\n"
     )
+
+
+def _start_console_log_window(pm, log_path):
+    """打开独立 PowerShell 窗口，持续显示与实时日志页相同的日志文件。"""
+    script = Path(os.environ.get("TEMP", ".")) / "comfyui_launcher_tail.ps1"
+    script.write_text(_build_tail_script(), encoding="utf-8")
     flags = getattr(subprocess, "CREATE_NEW_CONSOLE", 0)
     pm._console_log_process = subprocess.Popen(
         ["powershell.exe", "-NoProfile", "-ExecutionPolicy", "Bypass",

@@ -136,11 +136,11 @@ class PackageUpdatePage(BasePage):
 
         # 加载入口
         load_box = QtWidgets.QHBoxLayout()
-        self._btn_file = SecondaryButton("选择本地文件...")
+        self._btn_file = SecondaryButton("选择本地文件...", self.theme_manager.styles)
         self._btn_file.clicked.connect(self._on_load_file)
-        self._btn_url = SecondaryButton("从 URL 加载...")
+        self._btn_url = SecondaryButton("从 URL 加载...", self.theme_manager.styles)
         self._btn_url.clicked.connect(self._on_load_url)
-        self._btn_paste = SecondaryButton("粘贴 JSON")
+        self._btn_paste = SecondaryButton("粘贴 JSON", self.theme_manager.styles)
         self._btn_paste.clicked.connect(self._on_load_paste)
         load_box.addWidget(self._btn_file)
         load_box.addWidget(self._btn_url)
@@ -165,11 +165,11 @@ class PackageUpdatePage(BasePage):
 
         # 底部按钮
         bottom = QtWidgets.QHBoxLayout()
-        self._btn_select_all = SecondaryButton("全选")
+        self._btn_select_all = SecondaryButton("全选", self.theme_manager.styles)
         self._btn_select_all.clicked.connect(self._on_select_all)
-        self._btn_select_none = SecondaryButton("全不选")
+        self._btn_select_none = SecondaryButton("全不选", self.theme_manager.styles)
         self._btn_select_none.clicked.connect(self._on_select_none)
-        self._btn_apply = PrimaryButton("▶ 开始应用")
+        self._btn_apply = PrimaryButton("▶ 开始应用", self.theme_manager.styles)
         self._btn_apply.clicked.connect(self._on_apply)
         bottom.addWidget(self._btn_select_all)
         bottom.addWidget(self._btn_select_none)
@@ -392,7 +392,7 @@ class PackageUpdatePage(BasePage):
         # 打开链接按钮
         links = item.get("links", [])
         if links:
-            btn_link = SecondaryButton("打开链接")
+            btn_link = SecondaryButton("打开链接", self.theme_manager.styles)
             btn_link.clicked.connect(lambda _, ls=links: self._open_first_link(ls))
             row.addWidget(btn_link)
         row.addStretch()

@@ -2537,6 +2537,8 @@ class PyQtLauncher(QtWidgets.QMainWindow, process_events.ProcessCallback):
             page_plugins.uninstall_selected_requested.connect(self._prompt_plugin_uninstall)
             # 安装按钮 → 弹输入框拿 git URL / CNR id
             page_plugins.install_btn.clicked.connect(self._prompt_plugin_install)
+            # 搜索安装按钮 → 打开搜索弹窗（page 按钮发 search_install_requested 信号）
+            page_plugins.search_install_requested.connect(self._open_plugin_search)
             # 检查更新结果回推 → 页面标记 🔄（page 自身消费，但信号是 page 拥有，故在此显式连）
             page_plugins.outdated_reported.connect(page_plugins.mark_outdated)
             # 检查更新 / 更新全部 / 更新选中: 断开 page / controller 默认的 signal 连接, 改走带进度弹窗的版本.
@@ -2551,6 +2553,18 @@ class PyQtLauncher(QtWidgets.QMainWindow, process_events.ProcessCallback):
                 except Exception:
                     pass
                 page_plugins.update_selected_requested.connect(self._do_plugin_update_selected)
+                # disable/enable: 同样断开 controller 默认连接（_on_disable/_on_enable_selected
+                # 裸跑无反馈），改走带进度弹窗的版本。
+                try:
+                    page_plugins.disable_selected_requested.disconnect()
+                except Exception:
+                    pass
+                page_plugins.disable_selected_requested.connect(self._do_plugin_disable_selected)
+                try:
+                    page_plugins.enable_selected_requested.disconnect()
+                except Exception:
+                    pass
+                page_plugins.enable_selected_requested.connect(self._do_plugin_enable_selected)
             except Exception:
                 pass
             # 启动后兜底扫描已装列表：延迟 15s，让窗口出现 + 版本检测 + 用户点启动等
@@ -2611,20 +2625,18 @@ class PyQtLauncher(QtWidgets.QMainWindow, process_events.ProcessCallback):
             avail_geo = primary_screen.availableGeometry()
             s_w, s_h = avail_geo.width(), avail_geo.height()
 
-            # 窗口初始尺寸：以原始 1350x900 为底，HiDPI（scale>1）时放大让放大后的
-            # 内容放得下；scale<1（用户主动选了更小的 UI 缩放）时**不缩小**窗口——
-            # 内容变小只会让同样大小的窗口显得更宽松，不应裁掉首页的快捷目录。
-            # 即窗口「只放大不缩小」：max(原始, 缩放后)。
-            base_w = max(1350, _sp(1350))
-            base_h = max(900, _sp(900))
+            # 窗口初始尺寸：跟随 ui_scale 同比缩放（1350×900 为 100% 基准）。
+            # 历史「只放大不缩小」决策已反转：scale<1 时窗口也缩小，让内容和
+            # 容器同步缩，避免小 scale 下右侧大块留白（环境配置区「黑条比文本框长」）。
+            base_w = _sp(1350)
+            base_h = _sp(900)
 
             final_w = min(base_w, s_w - 40)
             final_h = min(base_h, s_h - 80)
 
-            # 最小窗口尺寸：防止用户缩到侧边栏 + 内容下限以下导致布局错乱。
-            # 同样「只放大不缩小」，避免用户选了小 scale 后最小尺寸反而裁内容。
+            # 最小窗口尺寸：跟随 scale，防止缩到侧边栏 + 内容下限以下布局错乱。
             try:
-                self.setMinimumSize(max(960, _sp(960)), max(640, _sp(640)))
+                self.setMinimumSize(_sp(960), _sp(640))
             except Exception:
                 pass
 
@@ -4151,12 +4163,13 @@ class PyQtLauncher(QtWidgets.QMainWindow, process_events.ProcessCallback):
             # scale 算不出来仍要刷 backing store（screenChanged 已发生）。
             new_scale = getattr(self, "_scale", 1.0)
 
-        need_repolish = abs(new_scale - getattr(self, "_scale", 1.0)) >= 1e-3
+        old_scale = getattr(self, "_scale", 1.0)
+        need_repolish = abs(new_scale - old_scale) >= 1e-3
         if need_repolish:
             if getattr(self, "logger", None):
                 self.logger.info(
                     "检测到屏幕 DPI 变化，重算 UI 缩放: %.3f → %.3f",
-                    getattr(self, "_scale", 1.0),
+                    old_scale,
                     new_scale,
                 )
             self._scale = new_scale
@@ -4167,6 +4180,8 @@ class PyQtLauncher(QtWidgets.QMainWindow, process_events.ProcessCallback):
                 self.theme_manager.set_scale(new_scale)
                 self._apply_theme(self._theme_value)
                 self._apply_scaled_fixed_sizes()
+                # 窗口跟随 scale 同比缩放（见 _resize_for_scale docstring）。
+                self._resize_for_scale(new_scale, old_scale)
             except Exception:
                 if getattr(self, "logger", None):
                     self.logger.info("应用屏幕变化失败", exc_info=True)
@@ -4221,6 +4236,43 @@ class PyQtLauncher(QtWidgets.QMainWindow, process_events.ProcessCallback):
                     btn.setFixedSize(styles._px(12), styles._px(60))
                 except Exception:
                     pass
+        # 主窗口最小尺寸跟随 scale（切 scale 时重设，配合 _resize_for_scale
+        # 让窗口能同比缩小，不再「只放大不缩小」）。
+        try:
+            self.setMinimumSize(styles._px(960), styles._px(640))
+        except Exception:
+            pass
+
+    def _resize_for_scale(self, new_scale, old_scale):
+        """ui_scale / 系统 DPI 变化时，主窗口按 new/old 比例缩放。
+
+        反转历史上「窗口只放大不缩小」的决策：scale<1 时窗口也同比缩小，
+        这样内容（控件/字号随 _px/_pt 缩）和容器（窗口/GroupBox）同步缩，
+        避免小 scale 下内容缩了但窗口没缩、缩出来的空间全变成右侧留白
+        （用户反馈环境配置区「黑条比文本框长」）。
+
+        用 new/old 比例而非固定基准：保留用户手动调过的窗口大小偏好
+        （1500 宽 @100% → 1125 @75%），无需额外持久化基准尺寸。
+        """
+        try:
+            if not old_scale or old_scale <= 0 or new_scale <= 0:
+                return
+            ratio = new_scale / old_scale
+            if abs(ratio - 1.0) < 1e-3:
+                return
+            min_w = max(1, self.minimumSize().width())
+            min_h = max(1, self.minimumSize().height())
+            new_w = max(min_w, round(self.width() * ratio))
+            new_h = max(min_h, round(self.height() * ratio))
+            screen = QtWidgets.QApplication.primaryScreen()
+            if screen is not None:
+                avail = screen.availableGeometry()
+                new_w = min(new_w, avail.width() - 40)
+                new_h = min(new_h, avail.height() - 80)
+            self.resize(new_w, new_h)
+        except Exception:
+            if getattr(self, "logger", None):
+                self.logger.info("_resize_for_scale 失败", exc_info=True)
 
     def closeEvent(self, event):
         """主窗口关闭事件。
@@ -4519,9 +4571,7 @@ class PyQtLauncher(QtWidgets.QMainWindow, process_events.ProcessCallback):
                 theme_manager=getattr(self, "theme_manager", None),
             )
             if dlg.exec_() == QtWidgets.QDialog.Accepted and (dlg.get_result() or 0) == 1:
-                ctrl = getattr(self, "_plugin_controller", None)
-                if ctrl is not None:
-                    ctrl.apply_uninstall(list(dir_names))
+                self._do_plugin_uninstall(list(dir_names))
         except Exception:
             try:
                 if getattr(self, "logger", None):
@@ -4554,13 +4604,36 @@ class PyQtLauncher(QtWidgets.QMainWindow, process_events.ProcessCallback):
             if dlg.exec_() == QtWidgets.QDialog.Accepted and (dlg.get_result() or 0) == 1:
                 spec = dlg.get_input_value()
                 if spec:
-                    ctrl = getattr(self, "_plugin_controller", None)
-                    if ctrl is not None:
-                        ctrl.request_install(spec)
+                    self._do_plugin_install(spec)
         except Exception:
             try:
                 if getattr(self, "logger", None):
                     self.logger.warning("插件安装输入弹窗失败", exc_info=True)
+            except Exception:
+                pass
+
+    def _open_plugin_search(self):
+        """打开插件搜索弹窗：从 CNR 缓存搜索，选中后走标准安装链（_do_plugin_install）。"""
+        try:
+            from ui_qt.widgets.plugin_search_dialog import PluginSearchDialog
+            ctrl = getattr(self, "_plugin_controller", None)
+            run_in_background = getattr(ctrl, "_run_in_background", None) if ctrl else None
+            post_to_ui = getattr(ctrl, "_post_to_ui", None) if ctrl else None
+            dlg = PluginSearchDialog(
+                self,
+                theme_manager=getattr(self, "theme_manager", None),
+                svc=self.services.plugins,
+                run_in_background=run_in_background,
+                post_to_ui=post_to_ui,
+            )
+            if dlg.exec_() == QtWidgets.QDialog.Accepted:
+                spec = dlg.get_selected_spec()
+                if spec:
+                    self._do_plugin_install(spec)   # 复用标准安装链（进度/取消/完成提示）
+        except Exception:
+            try:
+                if getattr(self, "logger", None):
+                    self.logger.warning("插件搜索弹窗失败", exc_info=True)
             except Exception:
                 pass
 
@@ -4603,7 +4676,7 @@ class PyQtLauncher(QtWidgets.QMainWindow, process_events.ProcessCallback):
 
             def on_done(outdated, remote_dates):
                 try:
-                    page = self._find_plugins_page()
+                    page = getattr(self, "_plugins_page", None)
                     if page is not None:
                         # 结果无论取消/后台都回填列表（用户能看到标记）
                         page.mark_outdated(outdated, remote_dates)
@@ -4690,7 +4763,6 @@ class PyQtLauncher(QtWidgets.QMainWindow, process_events.ProcessCallback):
 
             def on_done():
                 try:
-                    page = self._find_plugins_page()  # 列表刷新在 controller._populate_from_service 里
                     done_msg = "插件更新完成"
                     # 同步弹窗到完成态（后台模式下 on_progress 跳过了弹窗 UI，这里统一更新；
                     # mark_complete 还会隐藏取消按钮——已完成的任务不该再有取消选项）
@@ -4811,6 +4883,153 @@ class PyQtLauncher(QtWidgets.QMainWindow, process_events.ProcessCallback):
                     self.logger.warning("插件更新选中弹窗失败", exc_info=True)
             except Exception:
                 pass
+
+    # ---- install / uninstall / disable / enable：共用进度弹窗编排 ----
+    # 仿 _do_plugin_update_selected，但 on_done 带结果 (success, message)，
+    # 据此弹成功/失败提示（旧路径丢弃 service 返回值 → 完全无反馈）。
+    def _plugin_op_with_progress(self, *, title, task_title, status_init, run_fn,
+                                 cancel_event=None):
+        """install/uninstall/disable/enable 共用的进度弹窗 + 后台任务编排。
+
+        run_fn(on_status, on_done, on_progress, cancel_event) 由调用方提供，内部调
+        controller.run_xxx；controller 通过 on_done(success: bool, message: str) 回报结果。
+        on_progress 与 on_status 同款处理（更新 registry + set_status），install 用它接收
+        cm-cli 流式阶段文案，其他操作忽略。cancel_event（threading.Event）仅 install 传：
+        用户点取消时 set，service 层 kill cm-cli 进程；其他操作不传（run_hidden 不可取消）。
+        """
+        try:
+            from ui_qt.widgets.progress_dialog import ProgressDialog
+            registry = getattr(self, "_bg_task_registry", None)
+            task_id = registry.register(task_title) if registry else None
+            pd = ProgressDialog(self, title=title, theme_manager=getattr(self, "theme_manager", None),
+                                show_cancel=True, show_background=True)
+            if registry and task_id:
+                registry.set_dialog(task_id, pd)
+                registry.update(task_id, status=status_init)
+            pd.set_status(status_init)
+            pd.set_progress(0, maximum=0)  # 脉冲（批量操作的逐项进度走 on_status 文字）
+            pd.show()
+            QtWidgets.QApplication.processEvents()
+            # 取消回调：用户点取消 → set cancel_event → service 层 kill cm-cli 进程
+            if cancel_event is not None:
+                pd.set_cancel_callback(lambda: cancel_event.set())
+
+            def on_status(text):
+                if registry and task_id:
+                    registry.update(task_id, status=text)
+                if pd.is_cancelled() or pd.is_backgrounded():
+                    return
+                try:
+                    pd.set_status(text)
+                except Exception:
+                    pass
+
+            def on_done(success, message):
+                try:
+                    try:
+                        pd.mark_complete(message + " ✓" if success else message)
+                    except Exception:
+                        pass
+                    if registry and task_id:
+                        registry.complete(task_id, error=not success)
+                        registry.update(task_id, status=message)
+                    # 失败且非取消 → 额外弹错误对话框（取消是用户主动行为，不弹错误）
+                    if not success and not pd.is_cancelled():
+                        try:
+                            DialogHelper.show_error(self, title, message)
+                        except Exception:
+                            pass
+                    if pd.is_cancelled():
+                        try:
+                            pd.close()
+                        except Exception:
+                            pass
+                        return
+                    if pd.is_backgrounded():
+                        # 后台：弹窗已更新到完成态，状态栏提示。不自动 remove（保留历史）
+                        self._notify_plugins_result(message)
+                        return
+                    # 前台：已显示结果，延迟关闭（保留历史，不 remove）
+                    def _close():
+                        try:
+                            pd.close()
+                        except Exception:
+                            pass
+                    QtCore.QTimer.singleShot(1500, _close)
+                except Exception:
+                    try:
+                        pd.close()
+                    except Exception:
+                        pass
+                    if registry and task_id:
+                        registry.remove(task_id)
+
+            # on_progress 复用 on_status 的处理（更新 registry + set_status）；
+            # install 用它接收 cm-cli 流式阶段文案，其他操作忽略。
+            run_fn(on_status, on_done, on_status, cancel_event)
+        except Exception:
+            try:
+                if getattr(self, "logger", None):
+                    self.logger.warning(f"{title}弹窗失败", exc_info=True)
+            except Exception:
+                pass
+
+    def _do_plugin_install(self, spec):
+        """安装插件：带进度弹窗 + 后台运行（cm-cli install 可能跑几分钟，可取消 kill 进程）。"""
+        import threading
+        ctrl = getattr(self, "_plugin_controller", None)
+        if ctrl is None or not spec:
+            return
+        cancel_event = threading.Event()
+        short = str(spec).rstrip("/").split("/")[-1] or str(spec)
+        self._plugin_op_with_progress(
+            title="安装插件",
+            task_title=f"安装 {short}",
+            status_init=f"正在安装 {short}（cm-cli install，可能需要几分钟）...",
+            cancel_event=cancel_event,
+            run_fn=lambda on_status, on_done, on_progress, ce: ctrl.run_install(
+                spec, on_status=on_status, on_done=on_done,
+                on_progress=on_progress, cancel_event=ce),
+        )
+
+    def _do_plugin_uninstall(self, dir_names):
+        """卸载插件（批量）：带逐项进度 + 后台运行。二次确认由 _prompt_plugin_uninstall 负责。"""
+        ctrl = getattr(self, "_plugin_controller", None)
+        if ctrl is None or not dir_names:
+            return
+        self._plugin_op_with_progress(
+            title="卸载插件",
+            task_title=f"卸载 ({len(dir_names)} 个)",
+            status_init=f"正在卸载 {len(dir_names)} 个插件...",
+            run_fn=lambda on_status, on_done, _on_progress, _ce: ctrl.run_uninstall(
+                list(dir_names), on_status=on_status, on_done=on_done),
+        )
+
+    def _do_plugin_disable_selected(self, dir_names):
+        """禁用插件（批量）：带逐项进度 + 后台运行（仿 _do_plugin_update_selected）。"""
+        ctrl = getattr(self, "_plugin_controller", None)
+        if ctrl is None or not dir_names:
+            return
+        self._plugin_op_with_progress(
+            title="禁用插件",
+            task_title=f"禁用 ({len(dir_names)} 个)",
+            status_init=f"正在禁用 {len(dir_names)} 个插件...",
+            run_fn=lambda on_status, on_done, _on_progress, _ce: ctrl.run_disable(
+                list(dir_names), on_status=on_status, on_done=on_done),
+        )
+
+    def _do_plugin_enable_selected(self, dir_names):
+        """启用插件（批量）：带逐项进度 + 后台运行（仿 _do_plugin_update_selected）。"""
+        ctrl = getattr(self, "_plugin_controller", None)
+        if ctrl is None or not dir_names:
+            return
+        self._plugin_op_with_progress(
+            title="启用插件",
+            task_title=f"启用 ({len(dir_names)} 个)",
+            status_init=f"正在启用 {len(dir_names)} 个插件...",
+            run_fn=lambda on_status, on_done, _on_progress, _ce: ctrl.run_enable(
+                list(dir_names), on_status=on_status, on_done=on_done),
+        )
 
     def _notify_plugins_result(self, message):
         """后台运行完成时的轻量提示（statusBar 短暂显示，不抢焦点）。"""

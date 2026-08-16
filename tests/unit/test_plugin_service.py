@@ -5,7 +5,48 @@
 from pathlib import Path
 from unittest.mock import patch, MagicMock
 
-from services.plugin_service import PluginService
+from services.plugin_service import PluginService, _cmcli_install_stage
+
+
+# ---- _cmcli_install_stage（cm-cli install 流式输出 → 阶段文案）----
+# cm-cli 把 git/pip 子进程输出 capture（拿不到原始行），自己用 print 输出阶段文案；
+# 这里锁住对 cm-cli 原生 print 的匹配（见 manager_core.gitclone_install）。
+
+def test_cmcli_install_stage_cmcli_clone_prints():
+    assert _cmcli_install_stage("Download: git clone 'https://github.com/x/y.git'") == "正在克隆 git 仓库..."
+    assert _cmcli_install_stage("CLONE into 'custom_nodes/ComfyUI-Foo'") == "正在克隆 git 仓库..."
+
+
+def test_cmcli_install_stage_clone_success_then_deps():
+    assert _cmcli_install_stage("Installation was successful.") == "克隆完成，准备安装依赖..."
+    assert _cmcli_install_stage("Install: pip packages") == "正在安装 Python 依赖..."
+
+
+def test_cmcli_install_stage_install_start_url():
+    # "Install: <url>" —— 开始（不能误匹配 "Install: pip packages"）
+    assert _cmcli_install_stage("Install: https://github.com/x/y.git") == "开始安装..."
+
+
+def test_cmcli_install_stage_fix_and_stash():
+    assert _cmcli_install_stage("Try fixing: requirements.txt") == "正在修复依赖..."
+    assert _cmcli_install_stage("Attempt to fixing 'requirements.txt' is done.") == "正在修复依赖..."
+    assert _cmcli_install_stage("STASH: 'ComfyUI-Foo' is dirty.") == "正在处理本地改动..."
+
+
+def test_cmcli_install_stage_git_pip_raw_output_not_matched():
+    # git/pip 子进程的原始输出被 cm-cli capture（正常拿不到），即便漏过来也不该误匹配
+    assert _cmcli_install_stage("Cloning into 'ComfyUI-Foo'...") is None
+    assert _cmcli_install_stage("Collecting torch>=2.0") is None
+    assert _cmcli_install_stage("Successfully installed torch") is None
+
+
+def test_cmcli_install_stage_unrelated_and_empty():
+    assert _cmcli_install_stage("some random cm-cli output") is None
+    assert _cmcli_install_stage("") is None
+
+
+def test_cmcli_install_stage_strips_crlf():
+    assert _cmcli_install_stage("CLONE into 'X'\r\n") == "正在克隆 git 仓库..."
 
 
 def _app():
@@ -14,6 +55,103 @@ def _app():
                             "python_path": "python_embeded/python.exe"}}
     app.git_path = "git"
     return app
+
+
+# ---- 搜索安装：list_registry_plugins / search_plugins / refresh_registry_index ----
+
+def _svc_with_cnr_cache(tmp_path, nodes):
+    """造 PluginService，_comfyui_dir 指向 tmp_path，里面放一个 *_nodes.json。"""
+    import json as _json
+    svc = PluginService(_app())
+    cache = tmp_path / "user" / "__manager" / "cache"
+    cache.mkdir(parents=True, exist_ok=True)
+    (cache / "881334633_nodes.json").write_text(_json.dumps({"nodes": nodes}), encoding="utf-8")
+    svc._comfyui_dir = lambda: tmp_path
+    return svc
+
+
+def test_list_registry_plugins_reads_cnr_cache(tmp_path):
+    nodes = [
+        {"id": "comfyui-foo", "name": "ComfyUI-Foo", "repository": "https://github.com/a/foo",
+         "description": "foo plugin", "author": "A", "downloads": 100, "github_stars": 10},
+        {"id": "comfyui-bar", "name": "ComfyUI-Bar", "repository": "https://github.com/b/bar",
+         "description": "", "author": "B"},
+        {"id": "", "repository": ""},  # 无 repo，跳过
+    ]
+    plugins = _svc_with_cnr_cache(tmp_path, nodes).list_registry_plugins()
+    assert len(plugins) == 2
+    assert plugins[0]["name"] == "ComfyUI-Foo"
+    assert plugins[0]["downloads"] == 100
+    assert plugins[0]["source"] == "cnr"
+
+
+def test_search_plugins_empty_keyword_returns_popular(tmp_path):
+    nodes = [
+        {"id": "a", "name": "A", "repository": "https://github.com/x/a", "downloads": 5},
+        {"id": "b", "name": "B", "repository": "https://github.com/x/b",
+         "downloads": 100, "github_stars": 50},
+    ]
+    result = _svc_with_cnr_cache(tmp_path, nodes).search_plugins("", limit=10)
+    assert result[0]["id"] == "b"   # downloads+stars 高的排前
+
+
+def test_search_plugins_keyword_filter(tmp_path):
+    nodes = [
+        {"id": "comfyui-foo", "name": "ComfyUI-Foo", "repository": "https://github.com/a/foo",
+         "description": "does foo things", "author": "Alice"},
+        {"id": "comfyui-bar", "name": "ComfyUI-Bar", "repository": "https://github.com/b/bar",
+         "description": "unrelated", "author": "Bob"},
+    ]
+    result = _svc_with_cnr_cache(tmp_path, nodes).search_plugins("foo", limit=10)
+    assert len(result) == 1
+    assert result[0]["id"] == "comfyui-foo"
+
+
+def test_search_plugins_merge_dedup_cnr_priority(tmp_path):
+    # CNR 与 legacy 同一 repository → 去重，CNR 优先
+    svc = _svc_with_cnr_cache(tmp_path, [
+        {"id": "cnr-foo", "name": "Foo-CNR", "repository": "https://github.com/x/foo.git"},
+    ])
+    svc._load_refreshed_custom_list = lambda: [{
+        "id": "", "name": "Foo-Legacy", "repository": "https://github.com/x/foo",
+        "description": "", "author": "", "source": "legacy",
+    }]
+    result = svc.search_plugins("foo", limit=10)
+    assert len(result) == 1                # 去重（.git/尾部/ 大小写归一化）
+    assert result[0]["id"] == "cnr-foo"    # CNR 优先
+
+
+def test_normalize_repo():
+    assert PluginService._normalize_repo("https://github.com/X/Foo.git") == "https://github.com/x/foo"
+    assert PluginService._normalize_repo("https://github.com/X/Foo/") == "https://github.com/x/foo"
+    assert PluginService._normalize_repo("") == ""
+
+
+def test_refresh_registry_index_applies_ghproxy_and_writes_cache(tmp_path, monkeypatch):
+    import urllib.request
+    app = _app()
+    app.config["proxy_settings"] = {"git_proxy_mode": "gh-proxy"}
+    svc = PluginService(app)
+    cache_path = tmp_path / "custom-node-list.json"
+    svc._plugin_cache_path = lambda: cache_path
+
+    captured = {}
+
+    class _Resp:
+        def __enter__(self): return self
+        def __exit__(self, *a): pass
+        def read(self): return b'{"custom_nodes": [{"title": "X", "reference": "https://github.com/a/x"}]}'
+
+    def _fake_urlopen(req, timeout=30):
+        captured["url"] = req.full_url
+        return _Resp()
+
+    monkeypatch.setattr(urllib.request, "urlopen", _fake_urlopen)
+    res = svc.refresh_registry_index()
+    assert res["ok"] is True
+    assert res["count"] == 1
+    assert captured["url"].startswith("https://gh-proxy.com/")   # 套了 gh-proxy
+    assert cache_path.exists()                                   # 落缓存
 
 
 # ---- is_available ----
