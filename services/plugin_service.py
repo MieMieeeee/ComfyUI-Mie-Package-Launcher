@@ -23,6 +23,7 @@ import logging
 import itertools
 import sys
 import threading
+import time
 import subprocess
 import concurrent.futures
 from pathlib import Path
@@ -102,6 +103,47 @@ class PluginService:
 
     def __init__(self, app):
         self.app = app
+        # P1-3 meta-review：_fill_git_info 的 per-plugin git info 5 分钟 TTL 缓存
+        # key: str(plugin_dir)，value: {"ts": monotonic秒, "version":..., "remote_url":..., "local_date":...}
+        # 写操作（更新/安装/卸载/启用禁用）必须主动 evict，别让老版本号留在缓存里。
+        self._git_info_cache: dict[str, dict[str, Any]] = {}
+        self._git_info_ttl: float = 5 * 60.0  # 5 分钟
+        # P2-2 meta-review：list_registry_plugins 的单条文件 mtime 缓存。
+        # key: (str(path), mtime_ns)，value: parsed list[dict]
+        # 每次调用先找最文件，mtime 同则直接返回上次解析结果，避免每次搜索重扫 2MB JSON。
+        self._reg_cache: tuple = (None, None, None)  # (path_str, mtime_ns, result)
+
+    # ---- 缓存辅助（P1-3 meta-review）----
+    def _evict_git_info_cache(self, target: Any = None) -> None:
+        """失效 git info 缓存。
+
+        target 取值：
+        - None              → 清空全部（安装新插件 / 不确定改了哪些时用）
+        - str(plugin_name)  → 按插件名 evict（对应 custom_nodes/<name>）
+        - Path(plugin_dir)  → 按插件目录 evict
+        - list[str] / list[Path] → 批量 evict
+        """
+        try:
+            c = self._git_info_cache
+            if target is None:
+                c.clear()
+                return
+            tgts = target if isinstance(target, (list, tuple)) else [target]
+            cn_dir = PATHS.plugins_dir(self._comfyui_dir())
+            for t in tgts:
+                try:
+                    if isinstance(t, Path):
+                        c.pop(str(t), None)
+                    elif isinstance(t, str):
+                        # 传目录直接 pop；传插件名拼 custom_nodes/<name> 再 pop
+                        if t in c:
+                            c.pop(t, None)
+                        else:
+                            c.pop(str(cn_dir / t), None)
+                except Exception:
+                    pass
+        except Exception:
+            pass
 
     # ---- 路径解析（全部复用 utils.paths，无新配置）----
     def _comfyui_dir(self) -> Path:
@@ -213,6 +255,10 @@ class PluginService:
     ) -> None:
         """对 pending_git 里的每个 git 仓库并行跑 rev-parse/remote/log，回填到 results。
 
+        P1-3 meta-review：加 5 分钟 per-plugin_dir TTL 缓存。命中缓存的直接回填，
+        只对新增/过期的项跑 git 命令，避免「点一下更新全部」触发 250+ git 子进程的
+        问题（过去每次进入页面或刷新一次就 250 个，10 秒就是好几千）。
+
         线程池并行（max_workers=4，与 core/version_service 同款）。任一仓库的 git 调用
         失败只影响该仓库（_git_out 返回空串，不抛）。线程池整体异常则回退串行保底。
         线程安全：每个 task 只写 results 自己的下标，无共享写。
@@ -220,28 +266,65 @@ class PluginService:
         if not pending_git:
             return
 
-        def _one(item: tuple[int, Path]) -> tuple[int, str, str, str]:
-            idx, d = item
-            return idx, self._git_short(d), self._git_remote(d), self._git_date(d)
+        now_ts = time.monotonic()
+        cache = self._git_info_cache
+        ttl = self._git_info_ttl
+        cache_hit: list[tuple[int, Path, dict[str, Any]]] = []  # idx, d, info
+        cache_miss: list[tuple[int, Path]] = []
+        for idx, d in pending_git:
+            key = str(d)
+            entry = cache.get(key)
+            if entry and (now_ts - entry.get("ts", 0.0)) < ttl:
+                cache_hit.append((idx, d, entry))
+            else:
+                cache_miss.append((idx, d))
 
+        # --- 命中缓存：直接回填 ---
+        for idx, d, entry in cache_hit:
+            rec = results[idx]
+            if not rec["version"]:
+                rec["version"] = entry.get("version", "") or ""
+            if not rec["remote_url"]:
+                rec["remote_url"] = entry.get("remote_url", "") or ""
+            rec["local_date"] = entry.get("local_date", "") or ""
+
+        # --- 未命中：并行跑 git 命令，回填并写缓存 ---
+        if not cache_miss:
+            return
+
+        def _one(item: tuple[int, Path]) -> tuple[int, Path, str, str, str]:
+            idx, d = item
+            return idx, d, self._git_short(d), self._git_remote(d), self._git_date(d)
+
+        just_computed: list[tuple[int, Path, str, str, str]] = []
         try:
             with concurrent.futures.ThreadPoolExecutor(max_workers=4) as ex:
-                for idx, ver, rem, date in ex.map(_one, pending_git):
-                    rec = results[idx]
-                    if not rec["version"]:
-                        rec["version"] = ver
-                    if not rec["remote_url"]:
-                        rec["remote_url"] = rem
-                    rec["local_date"] = date
+                for idx, d, ver, rem, date in ex.map(_one, cache_miss):
+                    just_computed.append((idx, d, ver, rem, date))
         except Exception:
             # 并行调度整体失败（极罕见）→ 回退串行，保证返回结构完整
-            for idx, d in pending_git:
-                rec = results[idx]
-                if not rec["version"]:
-                    rec["version"] = self._git_short(d)
-                if not rec["remote_url"]:
-                    rec["remote_url"] = self._git_remote(d)
-                rec["local_date"] = self._git_date(d)
+            for idx, d in cache_miss:
+                just_computed.append((idx, d, self._git_short(d), self._git_remote(d),
+                                       self._git_date(d)))
+
+        now_write = time.monotonic()
+        for idx, d, ver, rem, date in just_computed:
+            rec = results[idx]
+            if not rec["version"]:
+                rec["version"] = ver
+            if not rec["remote_url"]:
+                rec["remote_url"] = rem
+            rec["local_date"] = date
+            # 写入 TTL 缓存
+            try:
+                cache[str(d)] = {
+                    "ts": now_write,
+                    "version": ver,
+                    "remote_url": rem,
+                    "local_date": date,
+                }
+            except Exception:
+                pass
 
     def _read_pyproject(self, plugin_dir: Path) -> dict[str, str]:
         """读插件根目录的 pyproject.toml，取 version 和 project.urls.Repository。
@@ -361,6 +444,8 @@ class PluginService:
     def list_registry_plugins(self) -> list[dict]:
         """读 CM 的 CNR registry 缓存（*_nodes.json），返回完整插件列表供搜索。
 
+        P2-2 meta-review：加单条文件 mtime 缓存。同一文件（相同 path + mtime_ns）不重复解析，
+        避免搜索（打字 N 次 / 搜索框每敲一个键）都重新读 2MB JSON。
         缓存不存在/解析失败返回 []（搜索降级到刷新的 custom-node-list 或空）。
         """
         try:
@@ -371,8 +456,18 @@ class PluginService:
                                 key=lambda p: p.stat().st_mtime, reverse=True)
             if not candidates:
                 return []
+            first_path = candidates[0]
+            try:
+                mtime_ns = first_path.stat().st_mtime_ns
+            except Exception:
+                mtime_ns = None
+            # 命中缓存：文件没变（path + mtime_ns 均同）直接返回上次解析结果
+            cached_path, cached_mtime, cached_result = self._reg_cache
+            if (cached_path == str(first_path) and cached_mtime == mtime_ns
+                    and cached_result is not None):
+                return list(cached_result)
             import json
-            data = json.loads(candidates[0].read_text(encoding="utf-8"))
+            data = json.loads(first_path.read_text(encoding="utf-8"))
             nodes = data.get("nodes", []) if isinstance(data, dict) else []
             result = []
             for n in nodes:
@@ -393,6 +488,7 @@ class PluginService:
                     "stars": n.get("github_stars") or 0,
                     "source": "cnr",
                 })
+            self._reg_cache = (str(first_path), mtime_ns, list(result))
             return result
         except Exception:
             return []
@@ -467,7 +563,15 @@ class PluginService:
 
         kw = (keyword or "").strip().lower()
         if not kw:
-            plugins.sort(key=lambda p: (p.get("downloads", 0) + p.get("stars", 0)), reverse=True)
+            # B9 CR：原 deep-review P2-1 明确「同分按 downloads+stars 大的在前」，上次改成了
+            # name 升序，和 review 建议相悖。改回：
+            # 主序：-(downloads+stars)（热门在前）
+            # 二级 tie-break：仍然 name/repo 升序，保证确定性（完全同分不乱跳）
+            plugins.sort(key=lambda p: (
+                -(p.get("downloads", 0) + p.get("stars", 0)),
+                (p.get("name") or "").lower(),
+                self._normalize_repo(p.get("repository", "")),
+            ))
             return plugins[:limit]
 
         def _score(p):
@@ -495,7 +599,14 @@ class PluginService:
 
         scored = [(p, _score(p)) for p in plugins]
         scored = [(p, s) for p, s in scored if s > 0]
-        scored.sort(key=lambda x: x[1], reverse=True)
+        # B9 CR：和空关键字模式对齐 —— score 降序 → downloads+stars 降序 → name/repo 升序。
+        # 同 score 时热门插件优先，和 deep-review P2-1 的验证 checklist 一致。
+        scored.sort(key=lambda x: (
+            -x[1],
+            -(x[0].get("downloads", 0) + x[0].get("stars", 0)),
+            (x[0].get("name") or "").lower(),
+            self._normalize_repo(x[0].get("repository", "")),
+        ))
         return [p for p, _ in scored[:limit]]
 
     def refresh_registry_index(self) -> dict:
@@ -651,6 +762,50 @@ class PluginService:
         except Exception as e:
             return {"returncode": -1, "stdout": "", "stderr": "", "error": str(e)}
 
+    # ---- 进程树 kill（P1-1 meta-review）----
+    # Windows 上 Popen.kill() = TerminateProcess，只杀直接子进程（cm-cli 的 python.exe），
+    # 它拉起的 git.exe / pip.exe（另一个 python.exe）孙进程不会被清理。这里用 taskkill /PID <pid> /T /F
+    # B3 CR：杀整棵进程树。非 Windows 分支原先 killpg 会杀启动器自己（Popen 没开 start_new_session），
+    # 修：只杀目标 pid（SIGTERM → 超时 SIGKILL），不波及进程组；Windows 继续 taskkill /PID /T /F（带 /T 含孙进程）。
+    @staticmethod
+    def _tree_kill_pid(pid: int):
+        try:
+            if pid <= 0:
+                return
+            if sys.platform.startswith("win"):
+                import subprocess as _sp
+                si = _sp.STARTUPINFO()
+                si.dwFlags |= _sp.STARTF_USESHOWWINDOW
+                _sp.run(
+                    ["taskkill", "/PID", str(pid), "/T", "/F"],
+                    capture_output=True, timeout=8,
+                    startupinfo=si, creationflags=_sp.CREATE_NO_WINDOW,
+                )
+            else:
+                import os as _os
+                import signal as _sig
+                import time as _t
+                # 先 SIGTERM 给 1.2s 优雅退出；还在跑就 SIGKILL 硬杀。
+                try:
+                    _os.kill(pid, _sig.SIGTERM)
+                except (ProcessLookupError, PermissionError):
+                    return
+                deadline = _t.monotonic() + 1.2
+                while _t.monotonic() < deadline:
+                    try:
+                        _os.kill(pid, 0)
+                    except ProcessLookupError:
+                        return
+                    except PermissionError:
+                        return
+                    _t.sleep(0.08)
+                try:
+                    _os.kill(pid, _sig.SIGKILL)
+                except Exception:
+                    pass
+        except Exception:
+            pass
+
     def _run_cmcli_streaming(self, args: list[str], on_output=None,
                              cancel_event=None, timeout: int = _DEFAULT_TIMEOUT) -> dict[str, Any]:
         """跑一个 cm-cli 子命令，逐行流式回调输出。返回 {returncode, stdout, stderr, error}。
@@ -658,8 +813,11 @@ class PluginService:
         与 _run_cmcli 同契约，但用 Popen + stderr 合并到 stdout 单流逐行读，
         每行调 on_output(line)（实时反馈给 UI）。合并单流避免双流死锁。
         整体超时用读线程 + join(timeout) 保证（cm-cli 卡死不输出时也能兜底 kill）。
-        cancel_event（threading.Event）：若外部 set，读循环检测到后 kill cm-cli 进程
-        并立即返回（error="用户取消"），供 install 的「取消」按钮真正中断子进程。
+        cancel_event（threading.Event）：若外部 set，读循环检测到后 tree-kill 整棵 cm-cli 进程
+        并立即返回（error="用户取消"）。
+        为了避免「readline 阻塞期间 cancel_event.set() 不生效」，上层应在 set_event 之后
+        立刻再次调用 _tree_kill_pid(proc.pid)（见 install_streaming 的 cancel_wrapper），
+        不等 readline 下一行返回。
         """
         py = self._python_exec()
         cm = self._cm_cli_path()
@@ -686,6 +844,10 @@ class PluginService:
             si.dwFlags |= subprocess.STARTF_USESHOWWINDOW
             popen_kwargs["startupinfo"] = si
             popen_kwargs["creationflags"] = subprocess.CREATE_NO_WINDOW
+        else:
+            # B3 CR：POSIX 上开新 session，避免未来改回 killpg 时误杀父进程组（当前不用 killpg，
+            # 这里只做保险，避免子进程自 fork 回启动器进程组的 corner case）。
+            popen_kwargs["start_new_session"] = True
 
         cmd_id = next(_stream_counter)
         logger.info("cmcli_stream[%s]: start args=%r", cmd_id, args)
@@ -694,9 +856,21 @@ class PluginService:
         except Exception as e:
             return {"returncode": -1, "stdout": "", "stderr": "", "error": str(e)}
 
+        # B2 CR：注册到活跃映射 + 按 cancel_event.id() 归属，避免 install_streaming wrapper
+        #  杀错（后台安装 A + 前台安装 B，取消 B 不该误杀 A）。
+        if not hasattr(self, "_active_streaming_procs"):
+            self._active_streaming_procs: dict[Any, Any] = {}
+        self._active_streaming_procs[cmd_id] = proc
+        if cancel_event is not None:
+            if not hasattr(self, "_stream_owner_map"):
+                self._stream_owner_map: dict[int, set[Any]] = {}
+            self._stream_owner_map.setdefault(id(cancel_event), set()).add(cmd_id)
+
         out_parts: list[str] = []
+        user_cancelled = False
 
         def _reader():
+            nonlocal user_cancelled
             try:
                 assert proc.stdout is not None
                 for line in proc.stdout:
@@ -709,12 +883,10 @@ class PluginService:
                             on_output(line.rstrip("\r\n"))
                         except Exception:
                             pass
-                    # 用户取消 → kill cm-cli 子进程，让循环尽快结束
+                    # 用户取消 → kill 整棵 cm-cli 进程树（含 git/pip 孙进程）
                     if cancel_event is not None and cancel_event.is_set():
-                        try:
-                            proc.kill()
-                        except Exception:
-                            pass
+                        user_cancelled = True
+                        PluginService._tree_kill_pid(proc.pid)
                         break
             except Exception:
                 logger.exception("cmcli_stream[%s]: reader error", cmd_id)
@@ -723,19 +895,27 @@ class PluginService:
         t.start()
         t.join(timeout=timeout)
         if t.is_alive():
-            # 读线程仍在跑 = 超时：kill 进程，给 reader 一点时间收尾
-            proc.kill()
+            # 读线程仍在跑 = 超时：tree-kill 进程树，给 reader 一点时间收尾
+            PluginService._tree_kill_pid(proc.pid)
             t.join(timeout=5)
+            active_procs.pop(cmd_id, None)
             return {"returncode": -1, "stdout": "".join(out_parts), "stderr": "",
                     "error": f"cm-cli 超时（{timeout}s）"}
         try:
             proc.wait(timeout=10)
         except Exception:
             pass
-        if cancel_event is not None and cancel_event.is_set():
+        # reader 内如果已经判断过 cancel，再确认一下外层状态。
+        if (cancel_event is not None and cancel_event.is_set()) or user_cancelled:
+            # 保险：如果 reader 命中 cancel 但 kill 还没成功，再 tree-kill 一次
+            if proc.poll() is None:
+                PluginService._tree_kill_pid(proc.pid)
+            active_procs.pop(cmd_id, None)
             return {"returncode": -1, "stdout": "".join(out_parts), "stderr": "",
                     "error": "用户取消"}
+        active_procs.pop(cmd_id, None)
         return {"returncode": proc.returncode, "stdout": "".join(out_parts),
+                # 契约说明：stderr 并入 stdout 流式返回，这里返回空串。所有文本都能在 stdout 拿到。
                 "stderr": "", "error": None}
 
     # ---- 更新操作 ----
@@ -777,7 +957,41 @@ class PluginService:
         阶段文案，非 None 时回调 on_stage(stage)（供 UI 更新进度文字）。cancel_event
         透传给 _run_cmcli_streaming，用户取消时 kill cm-cli 进程。CLI 路径继续用
         install（_lifecycle，非流式）。
+
+        B2 CR：取消按 cancel_event id() 归属，不误杀其它并行安装（后台挂 A + 前台开 B，
+        取消 B 只杀 B 的流，不杀 A 的）。先从 owner_map 找到本 event 的所有 cmd_ids
+        再对应杀；若 owner_map 还没注册（极端时序 race），兜底只杀自己 cmd_id 注册到
+        _active_streaming_procs 的最后一个（避免空扫）。
         """
+        # cancel_event 包装：set 时立刻 tree-kill 自己 event 归属的 cmd_id 对应 proc，不等 readline
+        if cancel_event is not None:
+            _orig_set = cancel_event.set
+
+            def _cancel_and_kill():
+                try:
+                    owner_map = getattr(self, "_stream_owner_map", None)
+                    procs = getattr(self, "_active_streaming_procs", {})
+                    target_ids: set[Any] = set()
+                    eid = id(cancel_event)
+                    if isinstance(owner_map, dict):
+                        s = owner_map.get(eid)
+                        if isinstance(s, set):
+                            target_ids.update(s)
+                    # B2：逐个 cmd_id 取 proc，不遍历 procs.values()（那会把其它 event 的
+                    # 安装也杀掉）。
+                    for cid in target_ids:
+                        try:
+                            p = procs.get(cid)
+                            if p and p.poll() is None:
+                                PluginService._tree_kill_pid(p.pid)
+                        except Exception:
+                            pass
+                except Exception:
+                    pass
+                _orig_set()
+
+            cancel_event.set = _cancel_and_kill
+
         def _on_output(raw):
             if on_stage:
                 stage = _cmcli_install_stage(raw)
@@ -793,6 +1007,12 @@ class PluginService:
             return {"ok": False, "log": "", "error": res["error"]}
         log = _truncate((res["stdout"] or res["stderr"]).strip())
         rc = res["returncode"]
+        # P1-3：install 成功 → 清全部 git info 缓存（新增插件目录名未知，保险全清）
+        if rc == 0:
+            try:
+                self._evict_git_info_cache(None)
+            except Exception:
+                pass
         return {"ok": rc == 0, "log": log,
                 "error": None if rc == 0 else f"cm-cli install 退出码 {rc}"}
 
@@ -803,8 +1023,20 @@ class PluginService:
             return {"ok": False, "log": "", "error": res["error"]}
         log = _truncate((res["stdout"] or res["stderr"]).strip())
         rc = res["returncode"]
-        return {"ok": rc == 0, "log": log,
-                "error": None if rc == 0 else f"cm-cli {op} 退出码 {rc}"}
+        result = {"ok": rc == 0, "log": log,
+                  "error": None if rc == 0 else f"cm-cli {op} 退出码 {rc}"}
+        # P1-3 meta-review：写操作后 evict git 缓存（插件可能被装/删/改名，目录会动）
+        if rc == 0:
+            try:
+                if op == "install":
+                    # install 结果目录名不确定（CNR id / github url 的目录命名不同）→ 清全部
+                    self._evict_git_info_cache(None)
+                else:
+                    # uninstall/disable/enable 用 target（插件名）evict 就行
+                    self._evict_git_info_cache(str(target))
+            except Exception:
+                pass
+        return result
 
     def force_update_selected(self, names: list[str]) -> list[dict[str, Any]]:
         """强制更新选中的插件：确认是 git 仓库则 git stash + git pull --ff-only。
@@ -812,7 +1044,13 @@ class PluginService:
         绕过 cm-cli（dirty 树会被它拒），直接对每个 git 插件 stash 本地改动后强拉。
         返回每插件结果 [{name, ok, skipped, detail}]。
         """
-        return [self._force_update_one(str(n)) for n in names]
+        results = [self._force_update_one(str(n)) for n in names]
+        # P1-3：统一 evict 被跑过强制更新的插件（无论成败，HEAD/stash 可能已变）
+        try:
+            self._evict_git_info_cache([r["name"] for r in results])
+        except Exception:
+            pass
+        return results
 
     def _force_update_one(self, name: str) -> dict[str, Any]:
         cn_dir = PATHS.plugins_dir(self._comfyui_dir())
@@ -821,15 +1059,50 @@ class PluginService:
             return {"name": name, "ok": False, "skipped": True, "detail": "目录不存在"}
         if not (plugin_dir / ".git").exists():
             return {"name": name, "ok": False, "skipped": True, "detail": "非 git 仓库，跳过强制更新"}
-        # 尽力 stash 本地改动（无改动也返回 0，忽略结果）
-        self._git_run(["stash"], plugin_dir)
+        # B6 CR：pull 失败也 pop stash，避免反复强制更新堆 10+ 个 entry。
+        # --ff-only 是全有或全无：pull 失败后工作树一定是干净的（没应用任何提交），pop 是安全的，
+        # 还能还原用户改动；pop 若冲突 → 仍然 drop 栈避免泄漏，detail 写告警并保留冲突标记。
+        stash_info = self._git_run(["stash"], plugin_dir)
+        did_stash = (stash_info["rc"] == 0 and not stash_info["stdout"].lower().startswith("no local changes")
+                     and "no local changes" not in (stash_info["stdout"] or "").lower())
+        warnings: list[str] = []
         pull = self._git_run(["pull", "--ff-only"], plugin_dir)
         if pull["rc"] == 0:
             detail = (pull["stdout"] or "已是最新").strip()
-            return {"name": name, "ok": True, "skipped": False, "detail": detail[:200]}
+            if did_stash:
+                pop = self._git_run(["stash", "pop"], plugin_dir)
+                if pop["rc"] != 0:
+                    try:
+                        self._git_run(["stash", "drop"], plugin_dir)
+                    except Exception:
+                        pass
+                    warnings.append(
+                        "强制更新后 stash pop 有冲突：本地改动已应用但有冲突标记，"
+                        "请在 IDE 打开工作树手动解决；stash entry 已 drop 避免重复应用"
+                    )
+            if warnings:
+                detail = (detail + "\n" + "\n".join("[警告] " + w for w in warnings))[:400]
+            return {"name": name, "ok": True, "skipped": False, "detail": detail[:400]}
+        # pull 失败路径（rc != 0）。B6 CR：did_stash 时仍 pop stash（还原用户改动），
+        # 防止「反复强制更新堆 10+ 个 stash entry」的老问题重现。
         err = (pull["stderr"] or pull["stdout"] or "").strip()
-        return {"name": name, "ok": False, "skipped": False,
-                "detail": f"pull 失败 (rc={pull['rc']}): {err[:200]}"}
+        detail = f"pull 失败 (rc={pull['rc']}): {err[:300]}"
+        if did_stash:
+            pop = self._git_run(["stash", "pop"], plugin_dir)
+            if pop["rc"] != 0:
+                try:
+                    self._git_run(["stash", "drop"], plugin_dir)
+                except Exception:
+                    pass
+                warnings.append(
+                    "pull 失败后还原 stash 时又冲突：工作树可能含混合状态，"
+                    "建议 git status 检查；stash entry 已 drop 避免栈泄漏"
+                )
+            else:
+                warnings.append("pull 失败，已用 stash pop 还原用户本地改动（未丢弃）")
+        if warnings:
+            detail = (detail + "\n" + "\n".join("[警告] " + w for w in warnings))[:400]
+        return {"name": name, "ok": False, "skipped": False, "detail": detail[:400]}
 
     def _do_update(self, nodes: list[str]) -> dict[str, Any]:
         if not self.is_available():
@@ -845,6 +1118,14 @@ class PluginService:
         if rc != 0:
             return {"updated": False, "up_to_date": False, "log": log,
                     "error": f"cm-cli update 退出码 {rc}"}
+        # P1-3：写操作后 evict。all → 全部清；指定名 → 只 evict 那几个
+        try:
+            if "all" in nodes:
+                self._evict_git_info_cache(None)
+            else:
+                self._evict_git_info_cache(list(nodes))
+        except Exception:
+            pass
         # cm-cli update 成功（rc=0）。其输出是人类文本，难以可靠区分「真更新了」与「本就最新」，
         # 保守按「跑过更新流程」报 updated=True；细节见 log。
         return {"updated": True, "up_to_date": False, "log": log, "error": None}

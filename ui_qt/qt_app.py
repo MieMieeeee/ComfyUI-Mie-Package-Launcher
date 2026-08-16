@@ -4516,9 +4516,9 @@ class PyQtLauncher(QtWidgets.QMainWindow, process_events.ProcessCallback):
                 theme_manager=getattr(self, "theme_manager", None),
             )
             if dlg.exec_() == QtWidgets.QDialog.Accepted and (dlg.get_result() or 0) == 1:
-                ctrl = getattr(self, "_plugin_controller", None)
-                if ctrl is not None:
-                    ctrl.apply_force_update(list(names))
+                # 漏 1 meta-review：不再调 apply_force_update（静默跑完无反馈），调 _do_plugin_force_update
+                # 走共用编排器：有进度弹窗 + 后台任务 + 成功失败提示，失败会弹 show_error。
+                self._do_plugin_force_update(list(names))
         except Exception:
             try:
                 if getattr(self, "logger", None):
@@ -4761,18 +4761,28 @@ class PyQtLauncher(QtWidgets.QMainWindow, process_events.ProcessCallback):
                 except Exception:
                     pass
 
-            def on_done():
+            def on_done(success, message):
+                # success/message 对齐 _plugin_op_with_progress 契约：
+                # success = True 走完成 ✓ 文案，False 额外弹 show_error（非取消）
                 try:
-                    done_msg = "插件更新完成"
+                    done_msg = message or "插件更新完成"
                     # 同步弹窗到完成态（后台模式下 on_progress 跳过了弹窗 UI，这里统一更新；
                     # mark_complete 还会隐藏取消按钮——已完成的任务不该再有取消选项）
+                    # B1 CR：success=False 分支原代码 done_msg + done_msg 会重复两次错误文案，
+                    # 修：成功才拼 "✓（列表已刷新）"，失败直接 done_msg。
                     try:
-                        pd.mark_complete(done_msg + " ✓（列表已刷新）")
+                        pd.mark_complete(done_msg + (" ✓（列表已刷新）" if success else ""))
                     except Exception:
                         pass
                     if registry and task_id:
-                        registry.complete(task_id)
+                        registry.complete(task_id, error=not success)
                         registry.update(task_id, status=done_msg)
+                    # 失败且非取消 → 额外弹错误对话框（取消是用户主动行为，不弹）
+                    if not success and not pd.is_cancelled():
+                        try:
+                            DialogHelper.show_error(self, "更新全部", done_msg)
+                        except Exception:
+                            pass
                     if pd.is_cancelled():
                         try:
                             pd.close()
@@ -4839,18 +4849,25 @@ class PyQtLauncher(QtWidgets.QMainWindow, process_events.ProcessCallback):
                 except Exception:
                     pass
 
-            def on_done():
+            def on_done(success, message):
                 try:
-                    done_msg = f"选中插件更新完成 ({len(names)} 个)"
+                    done_msg = message or f"选中插件更新完成 ({len(names)} 个)"
                     # 同步弹窗到完成态 (后台模式下 on_status 跳过弹窗 UI, 这里统一更新;
                     # mark_complete 还会隐藏取消按钮——已完成的任务不该再有取消选项)
+                    # B1 CR：success=False 分支原代码 done_msg + done_msg 会重复错误文案，修：只在成功才拼 ✓
                     try:
-                        pd.mark_complete(done_msg + " ✓（列表已刷新）")
+                        pd.mark_complete(done_msg + (" ✓（列表已刷新）" if success else ""))
                     except Exception:
                         pass
                     if registry and task_id:
-                        registry.complete(task_id)
+                        registry.complete(task_id, error=not success)
                         registry.update(task_id, status=done_msg)
+                    # 失败且非取消 → 额外弹错误对话框（取消是用户主动行为，不弹）
+                    if not success and not pd.is_cancelled():
+                        try:
+                            DialogHelper.show_error(self, "更新选中", done_msg)
+                        except Exception:
+                            pass
                     if pd.is_cancelled():
                         try:
                             pd.close()
@@ -4883,6 +4900,36 @@ class PyQtLauncher(QtWidgets.QMainWindow, process_events.ProcessCallback):
                     self.logger.warning("插件更新选中弹窗失败", exc_info=True)
             except Exception:
                 pass
+
+    # ---- 漏 1 meta-review：强制更新共用 _plugin_op_with_progress 编排器，
+    # 有进度弹窗 + 后台任务 + 成功失败反馈，不再丢弃 detail。
+    def _do_plugin_force_update(self, names):
+        """强制更新选中（二次确认后）: 带进度 + 后台运行 + 成功失败反馈。
+
+        与 update_selected 不同：这里直接走共用的 _plugin_op_with_progress，
+        on_done 带 (ok, summary)，有失败会弹 DialogHelper.show_error，不再
+        ctrl.apply_force_update 后台跑完没消息。
+        """
+        ctrl = getattr(self, "_plugin_controller", None)
+        if ctrl is None or not names:
+            return
+
+        def _run(on_status, on_done, on_progress, cancel_event):
+            # run_force_update 的 on_done 是 (ok, summary, per_plugin)，
+            # 这里把 per_plugin 吞掉（detail 留给以后展开，弹窗先拿人类 summary）
+            def _adapted_done(ok, summary, per_plugin):
+                try:
+                    on_done(bool(ok), str(summary))
+                except Exception:
+                    pass
+            ctrl.run_force_update(list(names), on_status=on_status, on_done=_adapted_done)
+
+        self._plugin_op_with_progress(
+            title="强制更新插件",
+            task_title=f"强制更新 ({len(names)} 个)",
+            status_init=f"正在强制更新 {len(names)} 个插件（git stash + pull --ff-only）...",
+            run_fn=_run,
+        )
 
     # ---- install / uninstall / disable / enable：共用进度弹窗编排 ----
     # 仿 _do_plugin_update_selected，但 on_done 带结果 (success, message)，

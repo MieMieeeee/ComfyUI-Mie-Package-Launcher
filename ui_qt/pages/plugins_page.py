@@ -16,6 +16,9 @@
 - enabled:  是否启用（据 dir_name 是否以 .disabled 结尾判断）
 - is_git/version/remote_url: git 元信息
 """
+from typing import Any  # B8 CR：run_force_update 里用了局部注解 `Any`，不跑运行时求值但
+                         # 一旦移到模块级或加 from __future__ import annotations 前就会
+                         # NameError，提前 import 消除隐患。
 from PyQt5 import QtCore, QtGui, QtWidgets
 
 from .base_page import BasePage
@@ -83,8 +86,47 @@ class PluginItemDelegate(QtWidgets.QStyledItemDelegate):
     def __init__(self, theme_manager, parent=None):
         super().__init__(parent)
         self.theme_manager = theme_manager
-        self._px = lambda v: theme_manager.styles._px(v)
-        self._pt = lambda v: theme_manager.styles._pt(v)
+        # P0-1 同源 bug（与 PluginsPage/plugin_search_dialog 同款）：
+        # __init__ 期 theme_manager.styles 是当时的实例，set_scale 会创建新 ThemeStyles，
+        # 这里改实例方法每次读 live styles。与 P0-1 修法一致。
+        # P2-3：5 个 QFont 不再每次 paint new，_build_fonts 预建，set_scale 后重调。
+        self._font_cache = {}
+        self._cb_hit_last_press = False  # P1-2：最近一次 Press 是否命中 checkbox（Release/DblClick 判断消费）
+
+    def _px(self, v):
+        return self.theme_manager.styles._px(v)
+
+    def _pt(self, v):
+        return self.theme_manager.styles._pt(v)
+
+    def _build_fonts(self):
+        """P2-3 meta-review：paint 里每次 new QFont 是轻量对象但一屏 50 行 = 250 次构造，
+        也会造成 GC 压力。预建 4 档（原 deep-review 是 7 档，实际 paint 只用了 icon/name/small/
+        small_bold 四个，删掉 ver/date/badge 三个死键，保持整洁）。
+        B7 CR：name/small_bold 两处字重改回 DemiBold（63），不是 Bold（75）—— 原代码是
+        setWeight(QtGui.QFont.DemiBold)，改成 setBold(True) 会让 名称/徽章/类型/状态 四列更粗，
+        非有意变更。"""
+        try:
+            DemiBold = QtGui.QFont.DemiBold
+            self._font_cache = {
+                "icon": QtGui.QFont("Microsoft YaHei UI"),
+                "name": QtGui.QFont("Microsoft YaHei UI"),
+                "small": QtGui.QFont("Microsoft YaHei UI"),
+                "small_bold": QtGui.QFont("Microsoft YaHei UI"),
+            }
+            f = self._font_cache
+            f["icon"].setPointSize(self._pt(11))
+            f["name"].setPointSize(self._pt(10))
+            f["name"].setWeight(DemiBold)
+            f["small"].setPointSize(self._pt(8))
+            f["small_bold"].setPointSize(self._pt(8))
+            f["small_bold"].setWeight(DemiBold)
+        except Exception:
+            pass
+
+    def update_theme(self, theme_styles=None):
+        """P2-3: theme/DPI 变化时重建字体（字号会变）。"""
+        self._build_fonts()
 
     def _colors(self):
         return self.theme_manager.colors
@@ -93,6 +135,22 @@ class PluginItemDelegate(QtWidgets.QStyledItemDelegate):
         c = self._colors()
         painter.save()
         painter.setRenderHint(QtGui.QPainter.Antialiasing, True)
+        # P2-3: 字体缓存。若 cache 没构建好（update_theme 未调过）就临时 new，保证 paint 不崩
+        fc = self._font_cache
+        if not fc:
+            try:
+                self._build_fonts()
+                fc = self._font_cache or {}
+            except Exception:
+                fc = {}
+        def _font(k, pt, bold=False):
+            f = fc.get(k)
+            if f is not None:
+                return f
+            f = QtGui.QFont("Microsoft YaHei UI", pt)
+            if bold:
+                f.setBold(True)
+            return f
 
         rect = option.rect
         selected = bool(option.state & QtWidgets.QStyle.State_Selected)
@@ -143,7 +201,7 @@ class PluginItemDelegate(QtWidgets.QStyledItemDelegate):
 
         # ---- 4. 🧩 图标（紧跟复选框）----
         icon_x = rect.left() + g["icon_x"]
-        painter.setFont(QtGui.QFont("Microsoft YaHei UI", self._pt(11)))
+        painter.setFont(_font("icon", self._pt(11)))
         painter.setPen(QtGui.QColor(c.get("label_muted", "#9CA3AF")))
         painter.drawText(QtCore.QRect(icon_x, rect.top(), g["icon_w"], rect.height()),
                          QtCore.Qt.AlignCenter, "🧩")
@@ -151,8 +209,7 @@ class PluginItemDelegate(QtWidgets.QStyledItemDelegate):
         # ---- 5. 名称（粗体；禁用态灰。「可更新」标记移到独立列，名称区不加前缀）----
         name_x = rect.left() + g["name_x"]
         name_right = rect.left() + g["name_right"]
-        name_font = QtGui.QFont("Microsoft YaHei UI", self._pt(10))
-        name_font.setWeight(QtGui.QFont.DemiBold)
+        name_font = _font("name", self._pt(10), True)
         painter.setFont(name_font)
         if not enabled:
             painter.setPen(QtGui.QColor(c.get("label_dim", "#6B7280")))
@@ -166,8 +223,7 @@ class PluginItemDelegate(QtWidgets.QStyledItemDelegate):
         # ---- 6. 可更新列（四态：有更新/无更新/无法检查/未检查）----
         update_rect = QtCore.QRect(rect.left() + g["update_x"], rect.top(),
                                    g["update_w"], rect.height())
-        uf = QtGui.QFont("Microsoft YaHei UI", self._pt(8))
-        uf.setWeight(QtGui.QFont.DemiBold)
+        uf = _font("small_bold", self._pt(8), True)
         painter.setFont(uf)
         px_margin = self._px(2)
         pill_h = self._px(20)
@@ -203,8 +259,7 @@ class PluginItemDelegate(QtWidgets.QStyledItemDelegate):
             painter.drawText(update_rect, QtCore.Qt.AlignVCenter | QtCore.Qt.AlignCenter, "—")
 
         # ---- 7. 版本列（优先 pyproject 版本号；无则 git 日期；都没有 —）----
-        date_font = QtGui.QFont("Microsoft YaHei UI", self._pt(8))
-        painter.setFont(date_font)
+        painter.setFont(_font("small", self._pt(8)))
         local_rect = QtCore.QRect(rect.left() + g["local_x"], rect.top(), g["local_w"], rect.height())
         if version:
             painter.setPen(QtGui.QColor(c.get("label_muted", "#9CA3AF")))
@@ -225,9 +280,8 @@ class PluginItemDelegate(QtWidgets.QStyledItemDelegate):
 
         # ---- 9. 类型列（Git / CNR / 本地，三态纯文字）----
         type_rect = QtCore.QRect(rect.left() + g["type_x"], rect.top(), g["type_w"], rect.height())
-        type_font = QtGui.QFont("Microsoft YaHei UI", self._pt(8))
-        type_font.setWeight(QtGui.QFont.DemiBold)
-        painter.setFont(type_font)
+        tf = _font("small_bold", self._pt(8), True)
+        painter.setFont(tf)
         # git=紫（可 pull 更新）/ cnr=蓝（registry 发布版）/ local=灰（无更新源）
         if kind == "git":
             type_text, type_color = "Git", QtGui.QColor(c.get("btn_primary_hover", "#9E77ED"))
@@ -241,9 +295,8 @@ class PluginItemDelegate(QtWidgets.QStyledItemDelegate):
         # ---- 10. 状态列（胶囊+圆点：启用=绿，禁用=灰）----
         status_rect = QtCore.QRect(rect.left() + g["status_x"], rect.top(),
                                    g["status_w"], rect.height())
-        status_font = QtGui.QFont("Microsoft YaHei UI", self._pt(8))
-        status_font.setWeight(QtGui.QFont.DemiBold)
-        painter.setFont(status_font)
+        sf = _font("small_bold", self._pt(8), True)
+        painter.setFont(sf)
         # 胶囊尺寸：居中于 status_rect
         pill_w, pill_h = self._px(54), self._px(20)
         pill_x = status_rect.center().x() - pill_w // 2
@@ -286,22 +339,46 @@ class PluginItemDelegate(QtWidgets.QStyledItemDelegate):
         关键坑：QStyledItemDelegate 基类的 editorEvent 在 MouseButtonRelease 时会
         对 checkable item 再 toggle 一次。若我们只在 Press 处理、Release fallthrough
         到 super()，就会「Press toggle + Release toggle = 抵消」，用户看到没反应。
-        所以 Press 命中 checkbox → toggle；**Release 一律返回 True 消费掉**，阻断基类。
 
-        点击落在 checkbox 矩形内才 toggle，点名称/日期区不响应。
+        P1-2 meta-review：原实现 Release 一律返回 True（消费）= 点行非 checkbox 区也
+        不会触发行选中；且双击时 Press + DblClick → 两个 Press（各 toggle 一次）抵消，
+        用户看到没反应。修法：
+        - Press 命中 checkbox → 记 _cb_hit_last_press=True，执行 toggle。
+        - Release 只在 _cb_hit_last_press 时返回 True（消费），否则 False（让基类执行
+          行选中）。
+        - DblClick（双击）命中 checkbox 时也消费（避免基类再 toggle），否则 False。
         """
         etype = event.type()
-        if etype == QtCore.QEvent.MouseButtonRelease:
-            return True  # 阻断基类在 Release 时重复 toggle（无论是否命中 checkbox）
-        if etype == QtCore.QEvent.MouseButtonPress and event.button() == QtCore.Qt.LeftButton:
+        # 计算 checkbox 命中矩形（共用）
+        def _hit_cb():
             g = _column_geometry(option.rect.width(), self._px)
             cb_rect = QtCore.QRect(option.rect.left() + g["cb_x"],
                                    option.rect.center().y() - self._px(8),
                                    g["cb_w"], self._px(16))
-            if cb_rect.contains(event.pos()):
+            return cb_rect.contains(event.pos())
+
+        if etype == QtCore.QEvent.MouseButtonPress and event.button() == QtCore.Qt.LeftButton:
+            if _hit_cb():
+                self._cb_hit_last_press = True
                 checked = (index.data(QtCore.Qt.CheckStateRole) == QtCore.Qt.Checked)
                 model.setData(index, QtCore.Qt.Unchecked if checked else QtCore.Qt.Checked,
                               QtCore.Qt.CheckStateRole)
+                return True
+            self._cb_hit_last_press = False
+            return super().editorEvent(event, model, option, index)
+
+        if etype == QtCore.QEvent.MouseButtonRelease:
+            # Release 只在最近一次 Press 命中 checkbox 时消费，否则给基类处理行选中
+            hit = getattr(self, "_cb_hit_last_press", False)
+            self._cb_hit_last_press = False
+            return True if hit else super().editorEvent(event, model, option, index)
+
+        if etype == QtCore.QEvent.MouseButtonDblClick and event.button() == QtCore.Qt.LeftButton:
+            if _hit_cb():
+                # 命中 checkbox：消费双击，避免基类再 toggle。Press 已经在第一次时 toggled 过了。
+                return True
+            return super().editorEvent(event, model, option, index)
+
         return super().editorEvent(event, model, option, index)
 
 
@@ -312,6 +389,9 @@ class _PluginListHeader(QtWidgets.QWidget):
     持有 list_widget 引用，paint 时直接读 item 的实际绘制 rect（option.rect）宽度，
     保证表头和内容用「同一份宽度」算列位，杜绝错位。
     不在 QListWidget 内部（那样会被当成一行），而是固定在列表上方。
+
+    注意：这是裸 QWidget（不是 BasePage），所以需要自己显式 register_listener，
+    不要与 PluginsPage（BasePage 子类）搞混。
     """
 
     def __init__(self, theme_manager, list_widget=None, parent=None):
@@ -319,17 +399,48 @@ class _PluginListHeader(QtWidgets.QWidget):
         self.theme_manager = theme_manager
         self._list_widget = list_widget  # 弱引用，paint 时读它的 item rect 宽度
         self.setAttribute(QtCore.Qt.WA_StyledBackground, True)
-        c = theme_manager.colors
-        self.setStyleSheet(f"""
-            _PluginListHeader {{
-                background-color: {c.get('group_bg', 'rgba(0,0,0,0.2)')};
-                border: 1px solid {c.get('input_border', '#4B5563')};
-                border-bottom: 1px solid {c.get('divider', '#374151')};
-                border-top-left-radius: 6px;
-                border-top-right-radius: 6px;
-            }}
-        """)
-        self.setFixedHeight(theme_manager.styles._px(30))
+        # 与 PluginsPage 同款：_px/_pt 每次重读 live styles，set_scale 换新 ThemeStyles 也正确
+        # （见 PluginsPage._px 的注释，同源 bug）
+        self.update_theme()
+        # BasePage 没注册过，这里必须自己显式注册
+        if self.theme_manager:
+            self.theme_manager.register_listener(lambda _s: self.update_theme())
+
+    # DPI helper（与 PluginsPage._px 同款）
+    def _px(self, base):
+        styles = getattr(self.theme_manager, "styles", None) if self.theme_manager else None
+        return styles._px(base) if styles else base
+
+    def _pt(self, base):
+        styles = getattr(self.theme_manager, "styles", None) if self.theme_manager else None
+        return styles._pt(base) if styles else base
+
+    def _build_header_qss(self):
+        c = getattr(self.theme_manager, "colors", {}) if self.theme_manager else {}
+        px = self._px
+        return (f"_PluginListHeader {{"
+                f" background-color: {c.get('group_bg', 'rgba(0,0,0,0.2)')};"
+                f" border: 1px solid {c.get('input_border', '#4B5563')};"
+                f" border-bottom: 1px solid {c.get('divider', '#374151')};"
+                f" border-top-left-radius: {px(6)}px;"
+                f" border-top-right-radius: {px(6)}px;"
+                f"}}")
+
+    def update_theme(self, _theme_styles=None):
+        """主题 / DPI 变化：重建 QSS + 重算固定高度。"""
+        try:
+            self.setStyleSheet(self._build_header_qss())
+        except Exception:
+            pass
+        try:
+            self.setFixedHeight(self._px(30))
+        except Exception:
+            pass
+        # paintEvent 内部的 px/pt 每次动态取，不需要刷新缓存；但 repaint 一下保险
+        try:
+            self.update()
+        except Exception:
+            pass
 
     def _content_width(self):
         """取与 delegate 完全一致的列内容区宽度：读 list_widget 第一个 item 的 rect.width()。
@@ -420,13 +531,39 @@ class PluginsPage(BasePage):
     def __init__(self, app=None, theme_manager=None, parent=None):
         super().__init__(theme_manager, parent)
         self.app = app
-        # DPI 缩放 helper（BasePage 已存 self.theme_manager）
-        _styles = theme_manager.styles if theme_manager else None
-        self._px = _styles._px if _styles else (lambda b: b)
-        self._pt = _styles._pt if _styles else (lambda b: b)
         self._outdated_dir_names = set()  # 当前标记为「有更新」的 dir_name（populate 时清空）
         self._loader = None  # 由 PluginController.set_loader 注入；showEvent 据它触发首次加载
         self._setup_ui()
+
+    # DPI 缩放 helper —— 每次调用读 theme_manager.styles 的【当前】实例。
+    # set_scale 会新建 ThemeStyles 替换 .styles（见 theme_manager.py）；
+    # 若在 __init__ 把 _px/_pt 绑到当时实例的 bound method，DPI 变化后永远停在首建 scale
+    # （与 plugin_search_dialog / 三个 launch section 的旧代码同族 bug）。
+    def _px(self, base):
+        styles = getattr(self.theme_manager, "styles", None) if self.theme_manager else None
+        return styles._px(base) if styles else base
+
+    def _pt(self, base):
+        styles = getattr(self.theme_manager, "styles", None) if self.theme_manager else None
+        return styles._pt(base) if styles else base
+
+    def _get_colors(self):
+        """按当前 theme_manager.colors 取色（兜底默认值）。每次 update_theme 重走。"""
+        c = getattr(self.theme_manager, "colors", {}) if self.theme_manager else {}
+        return {
+            "label": c.get("label", "#E5E7EB"),
+            "label_muted": c.get("label_muted", "#9CA3AF"),
+            "label_dim": c.get("label_dim", "#6B7280"),
+            "group_bg": c.get("group_bg", "rgba(0,0,0,0.2)"),
+            "input_bg": c.get("input_bg", "#111827"),
+            "input_border": c.get("input_border", "#4B5563"),
+            "text": c.get("text", "#E5E7EB"),
+            "btn_primary_bg": c.get("btn_primary_bg", "#6366F1"),
+            "btn_primary_hover": c.get("btn_primary_hover", "#818CF8"),
+            "scroll_handle": c.get("scroll_handle", "#6366F1"),
+            "scroll_handle_hover": c.get("scroll_handle_hover", "#5258CF"),
+            "divider": c.get("divider", "#374151"),
+        }
 
     def set_loader(self, loader):
         """PluginController 构造时注入 BackgroundLoader，供 showEvent 触发首次加载。"""
@@ -458,24 +595,26 @@ class PluginsPage(BasePage):
             pass
 
     def _setup_ui(self):
-        c = self.theme_manager.colors
-        s = self.theme_manager.styles
+        c = self._get_colors()
+        s = self.theme_manager.styles if self.theme_manager else None
+        _px, _pt = self._px, self._pt
         layout = QtWidgets.QVBoxLayout(self)
-        layout.setContentsMargins(25, 25, 25, 25)
-        layout.setSpacing(12)
+        layout.setContentsMargins(_px(25), _px(25), _px(25), _px(25))
+        layout.setSpacing(_px(12))
 
         title = QtWidgets.QLabel("插件管理")
         title.setStyleSheet(f"""
-            font: bold {self._pt(16)}pt "Microsoft YaHei UI";
-            color: {c.get('label')};
-            margin-bottom: 2px;
+            font: bold {_pt(16)}pt "Microsoft YaHei UI";
+            color: {c['label']};
+            margin-bottom: {_px(2)}px;
         """)
+        self._title_label = title
         layout.addWidget(title)
 
         # 一级按钮区（单行）：刷新(ghost)  安装插件(ghost)  ←stretch→  检查更新(primary) 更新全部(primary)
         # 三级视觉权重：ghost 弱、primary 强。依赖勾选的操作收纳到下方 ActionBar。
         toolbar = QtWidgets.QHBoxLayout()
-        toolbar.setSpacing(8)
+        toolbar.setSpacing(_px(8))
         self.refresh_btn = QtWidgets.QPushButton("刷新列表")
         self.install_btn = QtWidgets.QPushButton("安装插件")
         self.search_install_btn = QtWidgets.QPushButton("搜索安装")
@@ -510,25 +649,26 @@ class PluginsPage(BasePage):
         self._action_bar.setObjectName("PluginActionBar")
         self._action_bar.setStyleSheet(f"""
             QWidget#PluginActionBar {{
-                background-color: {c.get('group_bg', 'rgba(0,0,0,0.2)')};
-                border: 1px solid {c.get('input_border', '#4B5563')};
-                border-radius: 6px;
+                background-color: {c['group_bg']};
+                border: 1px solid {c['input_border']};
+                border-radius: {_px(6)}px;
             }}
         """)
-        self._action_bar.setFixedHeight(self._px(44))  # 固定高度，杜绝表格抖动
+        self._action_bar.setFixedHeight(_px(44))  # 固定高度，杜绝表格抖动
         ab_layout = QtWidgets.QHBoxLayout(self._action_bar)
-        ab_layout.setContentsMargins(10, 6, 10, 6)
-        ab_layout.setSpacing(8)
+        ab_layout.setContentsMargins(_px(10), _px(6), _px(10), _px(6))
+        ab_layout.setSpacing(_px(8))
         # 未勾选时的提示文字（默认显示）
         self._ab_hint_label = QtWidgets.QLabel("勾选插件以显示批量操作")
         self._ab_hint_label.setStyleSheet(
-            f"color: {c.get('label_dim', '#6B7280')}; font: {self._pt(9)}pt 'Microsoft YaHei UI';")
+            f"color: {c['label_dim']}; font: {_pt(9)}pt 'Microsoft YaHei UI';")
         # 勾选时的标签 + 计数
         ab_label = QtWidgets.QLabel("已选中：")
-        ab_label.setStyleSheet(f"color: {c.get('label_muted', '#9CA3AF')}; font: {self._pt(9)}pt 'Microsoft YaHei UI';")
+        ab_label.setStyleSheet(f"color: {c['label_muted']}; font: {_pt(9)}pt 'Microsoft YaHei UI';")
+        self._ab_label = ab_label
         self._ab_count_label = QtWidgets.QLabel("0")
         self._ab_count_label.setStyleSheet(
-            f"color: {c.get('btn_primary_hover', '#9E77ED')}; font: bold {self._pt(9)}pt 'Microsoft YaHei UI';")
+            f"color: {c['btn_primary_hover']}; font: bold {_pt(9)}pt 'Microsoft YaHei UI';")
         self.update_selected_btn = QtWidgets.QPushButton("更新选中")
         self.enable_btn = QtWidgets.QPushButton("启用选中")
         self.disable_btn = QtWidgets.QPushButton("禁用选中")
@@ -550,7 +690,7 @@ class PluginsPage(BasePage):
         ab_layout.addWidget(ab_label)
         ab_label.hide()
         ab_layout.addWidget(self._ab_count_label)
-        ab_layout.addSpacing(12)
+        ab_layout.addSpacing(_px(12))
         for b in (self.update_selected_btn, self.enable_btn, self.disable_btn, self.uninstall_btn):
             ab_layout.addWidget(b)
             b.hide()
@@ -559,6 +699,7 @@ class PluginsPage(BasePage):
         self._ab_active_widgets = [ab_label, self._ab_count_label,
                                    self.update_selected_btn, self.enable_btn,
                                    self.disable_btn, self.uninstall_btn]
+        self._ab_layout = ab_layout
         layout.addWidget(self._action_bar)
 
         # 表头 + 列表包进同一容器（spacing=0），消除两者间的视觉断层。
@@ -573,37 +714,174 @@ class PluginsPage(BasePage):
         list_container.addWidget(self.list_header)
         # QSS 只保留外层背景 + 滚动条（item/indicator/选中态全由 delegate 绘制）。
         # 顶部 border 去掉（表头压在上面接管顶部），底部保留圆角，形成「表头 + 列表」一体的容器观感。
-        self.list_widget.setStyleSheet(f"""
-            QListWidget {{
-                background-color: {c.get('input_bg')};
-                color: {c.get('text')};
-                border: 1px solid {c.get('input_border')};
-                border-top: none;
-                border-bottom-left-radius: 6px;
-                border-bottom-right-radius: 6px;
-                padding: 4px;
-                font: {self._pt(10)}pt "Microsoft YaHei UI";
-                outline: none;
-            }}
-            /* 列表内部滚动条：紫色半透明 handle（外层 wrap_in_scroll 的 QSS 不继承进来，故单设） */
-            QScrollBar:vertical {{
-                background: transparent; width: 8px; margin: 2px;
-                border: none; border-radius: 4px;
-            }}
-            QScrollBar::handle:vertical {{
-                background-color: {c.get('scroll_handle', '#6366F1')};
-                border-radius: 4px; min-height: 30px;
-            }}
-            QScrollBar::handle:vertical:hover {{
-                background-color: {c.get('scroll_handle_hover', '#5258CF')};
-            }}
-            QScrollBar::add-line:vertical, QScrollBar::sub-line:vertical {{ height: 0px; }}
-            QScrollBar::add-page:vertical, QScrollBar::sub-page:vertical {{ background: transparent; }}
-        """)
+        self.list_widget.setStyleSheet(self._build_list_qss(c))
         list_container.addWidget(self.list_widget)
         # 勾选状态变化 → 刷新 ActionBar 显隐 + 选中计数
         self.list_widget.itemChanged.connect(lambda _item: self._refresh_action_bar())
         layout.addLayout(list_container)
+        self._root_layout = layout
+
+        # DPI 尺寸清单：DPI / 主题变化时由 _reapply_dpi_sizes 重算
+        self._dpi_sized_widgets = [
+            (self.refresh_btn, "min_text", "刷新列表"),
+            (self.install_btn, "min_text", "安装插件"),
+            (self.search_install_btn, "min_text", "搜索安装"),
+            (self.check_updates_btn, "min_text", "检查更新"),
+            (self.update_all_btn, "min_text", "更新全部"),
+            (self.update_selected_btn, "min_text", "更新选中"),
+            (self.enable_btn, "min_text", "启用选中"),
+            (self.disable_btn, "min_text", "禁用选中"),
+            (self.uninstall_btn, "min_text", "卸载选中"),
+        ]
+        self._reapply_dpi_sizes()
+
+    # ---- 主题 QSS 构造（与 P0-2 update_theme 共享）----
+    def _build_title_qss(self, c):
+        return (f"font: bold {self._pt(16)}pt 'Microsoft YaHei UI';"
+                f" color: {c['label']}; margin-bottom: {self._px(2)}px;")
+
+    def _build_actionbar_qss(self, c):
+        return (f"QWidget#PluginActionBar {{"
+                f" background-color: {c['group_bg']};"
+                f" border: 1px solid {c['input_border']};"
+                f" border-radius: {self._px(6)}px;"
+                f"}}")
+
+    def _build_list_qss(self, c):
+        _px, _pt = self._px, self._pt
+        return f"""
+            QListWidget {{
+                background-color: {c['input_bg']};
+                color: {c['text']};
+                border: 1px solid {c['input_border']};
+                border-top: none;
+                border-bottom-left-radius: {_px(6)}px;
+                border-bottom-right-radius: {_px(6)}px;
+                padding: {_px(4)}px;
+                font: {_pt(10)}pt "Microsoft YaHei UI";
+                outline: none;
+            }}
+            QScrollBar:vertical {{
+                background: transparent; width: {_px(8)}px; margin: {_px(2)}px;
+                border: none; border-radius: {_px(4)}px;
+            }}
+            QScrollBar::handle:vertical {{
+                background-color: {c['scroll_handle']};
+                border-radius: {_px(4)}px; min-height: {_px(30)}px;
+            }}
+            QScrollBar::handle:vertical:hover {{
+                background-color: {c['scroll_handle_hover']};
+            }}
+            QScrollBar::add-line:vertical, QScrollBar::sub-line:vertical {{ height: 0px; }}
+            QScrollBar::add-page:vertical, QScrollBar::sub-page:vertical {{ background: transparent; }}
+        """
+
+    def _reapply_dpi_sizes(self):
+        """DPI / UI scale 变化时重算尺寸。"""
+        _px = self._px
+        # 根 layout 边距 & 间距
+        try:
+            self._root_layout.setContentsMargins(
+                _px(25), _px(25), _px(25), _px(25))
+        except Exception:
+            pass
+        try:
+            self._root_layout.setSpacing(_px(12))
+        except Exception:
+            pass
+        # ActionBar: 固定高度 + 内部 layout margins/spacing/addSpacing(12)
+        try:
+            self._action_bar.setFixedHeight(_px(44))
+        except Exception:
+            pass
+        try:
+            self._ab_layout.setContentsMargins(
+                _px(10), _px(6), _px(10), _px(6))
+        except Exception:
+            pass
+        try:
+            self._ab_layout.setSpacing(_px(8))
+        except Exception:
+            pass
+        # ActionBar 中间的 addSpacing(12) 不好改（已经插入 index）；忽略（间距相对次要）
+        # 每个按钮 minWidth：测当前文本和 "最长状态文本" 两者 sizeHint，取大的
+        for w, kind, aux in getattr(self, "_dpi_sized_widgets", []):
+            try:
+                if kind == "min_text":
+                    cur = w.text()
+                    w1 = w.sizeHint().width()
+                    w.setText(aux)
+                    w2 = w.sizeHint().width()
+                    w.setText(cur)
+                    w.setMinimumWidth(max(w1, w2))
+            except Exception:
+                pass
+
+    # ---- 主题 & DPI 变化：重取颜色 token + 重建 QSS + 重算尺寸 ----
+    # 注意：BasePage.__init__ 已经 register_listener(self._on_theme_changed)，
+    # 这里**不要**再次注册！否则会双监听、双次调用。
+    def _on_theme_changed(self, theme_styles):
+        self.update_theme(theme_styles)
+
+    def update_theme(self, theme_styles=None):
+        """BasePage 的 update_theme 只重应用基础 content_style；这里补子控件的内联 QSS。"""
+        # 1. BasePage 重应用 content_style
+        try:
+            super().update_theme(theme_styles)
+        except Exception:
+            pass
+        # 2. 重取颜色 token + 重建 QSS
+        try:
+            c = self._get_colors()
+            # 标题
+            try:
+                self._title_label.setStyleSheet(self._build_title_qss(c))
+            except Exception:
+                pass
+            # ActionBar 容器
+            try:
+                self._action_bar.setStyleSheet(self._build_actionbar_qss(c))
+            except Exception:
+                pass
+            # ActionBar 内三个标签（颜色 + pt 字号）
+            try:
+                self._ab_hint_label.setStyleSheet(
+                    f"color: {c['label_dim']}; font: {self._pt(9)}pt 'Microsoft YaHei UI';")
+            except Exception:
+                pass
+            try:
+                self._ab_label.setStyleSheet(
+                    f"color: {c['label_muted']}; font: {self._pt(9)}pt 'Microsoft YaHei UI';")
+            except Exception:
+                pass
+            try:
+                self._ab_count_label.setStyleSheet(
+                    f"color: {c['btn_primary_hover']}; font: bold {self._pt(9)}pt 'Microsoft YaHei UI';")
+            except Exception:
+                pass
+            # List + scrollbar
+            try:
+                self.list_widget.setStyleSheet(self._build_list_qss(c))
+            except Exception:
+                pass
+            # 3. DPI 尺寸重算（margin/spacing/高度/按钮 minWidth）
+            self._reapply_dpi_sizes()
+            # 4. 通知子 delegate / 子控件各自 update_theme
+            #   - delegate：QAbstractItemDelegate（PluginItemDelegate）
+            #   - 表头：_PluginListHeader（裸 QWidget，额外保险再调一次）
+            try:
+                dlg = self.list_widget.itemDelegate()
+                upd = getattr(dlg, "update_theme", None)
+                if callable(upd):
+                    upd(theme_styles)
+            except Exception:
+                pass
+            try:
+                self.list_header.update_theme(theme_styles)
+            except Exception:
+                pass
+        except Exception:
+            pass
 
     def _refresh_action_bar(self):
         """勾选状态变化 → 切换 ActionBar 内容（提示文字 ↔ 操作按钮），ActionBar 本身始终占位。
@@ -699,24 +977,30 @@ class PluginsPage(BasePage):
     def _reorder_outdated_first(self):
         """把 outdated 项移到列表顶部，其余按原顺序跟在后面。
 
-        用 takeItem/insertItem 物理重排，保留每个 item 的所有 data/状态。
-        不重排时（无 outdated 或全部 outdated）直接返回。
+        P2-4 meta-review：强制用 [takeItem(0) for _ in range(n)] 从头摘干净，
+        再按新序逐个 addItem。**绝对不用 list_widget.clear()**（clear 会释放
+        item 对象，与 QListWidgetItem 外部引用或测试 fixture 冲突时直接崩溃）。
+        摘出过程 row 单调不变，避免边走边删导致 row 错位。
         """
         lw = self.list_widget
-        if not self._outdated_dir_names:
+        n = lw.count()
+        if not self._outdated_dir_names or n < 2:
             return
+        # 先确定每个 item 的新位置（在原始引用还能定位时先拿）
         outdated_items = []
         other_items = []
-        for i in range(lw.count()):
+        for i in range(n):
             item = lw.item(i)
             dn = item.data(QtCore.Qt.UserRole + 1)
             (outdated_items if dn in self._outdated_dir_names else other_items).append(item)
-        if not outdated_items or len(outdated_items) == lw.count():
+        if not outdated_items or len(outdated_items) == n:
             return
-        # 全部 take 出来再按新顺序插回（保留选中/勾选态）
-        for item in outdated_items + other_items:
-            lw.takeItem(lw.row(item))
-        for item in outdated_items + other_items:
+        # 从头连续摘出：takeItem(0) 执行 n 次，稳定清空列表但不释放 items
+        _ = [lw.takeItem(0) for _ in range(n)]
+        # 按新顺序逐个插回（先 outdated 再 other，各自保留原相对顺序）
+        for item in outdated_items:
+            lw.addItem(item)
+        for item in other_items:
             lw.addItem(item)
 
     def plugin_names(self):
@@ -795,29 +1079,81 @@ class PluginController:
         self._run_in_background(self._update_all_work)
 
     def run_update_all(self, on_status=None, on_done=None):
-        """qt_app 触发：带进度回调的「更新全部」。on_status(str)/on_done() 派回 UI 线程。"""
+        """qt_app 触发：带进度回调的「更新全部」。on_status(str)/on_done(success, message) 派回 UI 线程。"""
         def work():
+            failed = []
             try:
                 if on_status:
                     self._post_to_ui(lambda: on_status("正在更新全部插件（cm-cli update all，含 pip 依赖修复）..."))
                 self.svc.update_all()
+                # P1-4 meta-review：update_selected 会再跑 outdated_plugins 检测 cm-cli 没更新的
+                # 插件（脏树/冲突）并发 force_update_suggested；update_all 缺这一步，漏网
+                # 插件永远不被提出来。现在对齐 selected 的行为。
+                names = [p["dir_name"] for p in self.svc.list_installed()]
+                # B4 CR：P1-3 TTL 缓存并不覆盖这里的 list_installed —— update_all() 内部
+                # 已经整表 evict 过缓存（必须的，HEAD 动了），所以 list_installed() 是全量
+                # cache miss，照常跑 ~150 个 git 进程；最终 populate() 吃到这次的热缓存，
+                # 实际净增量 +~100 git 子进程，可接受但不是 0。注释别误导后来者。
+                failed = self.svc.outdated_plugins(names)
+                if failed:
+                    self._post_to_ui(lambda f=list(failed): self.page.force_update_suggested.emit(f))
+                msg = "插件更新全部完成" + (f"（{len(failed)} 个建议强制更新）" if failed else "")
+                ok = True
+            except Exception as e:
+                ok = False
+                msg = f"更新全部失败：{e}"
             finally:
                 self._populate_from_service()
                 if on_done:
-                    self._post_to_ui(on_done)
+                    # 兼容旧 on_done() 零参数 / 新 on_done(ok, message) 两参数签名。
+                    # meta-review 前的测试用 lambda: done_called.append(True)（零参），
+                    # 改漏 2 后加了两参数，直接调用会 TypeError。先试两参失败再兜底。
+                    def _safe_on_done(o=bool(ok), m=msg):
+                        try:
+                            on_done(o, m)
+                        except TypeError:
+                            try:
+                                on_done()
+                            except Exception:
+                                pass
+                        except Exception:
+                            pass
+                    self._post_to_ui(_safe_on_done)
         self._run_in_background(work)
 
     def _update_all_work(self):
         self.svc.update_all()
-        self._populate_from_service()
+        # P1-4 meta-review：页面内「更新全部」按钮也做二次检测（与 run_update_all 同模式），
+        # 脏树/冲突的插件被提出来，用户能直接看到「有 N 个需要强制更新」提示。
+        plugins_list = None
+        try:
+            plugins_list = self.svc.list_installed()
+            names = [p["dir_name"] for p in plugins_list]
+            failed = self.svc.outdated_plugins(names)
+            if failed:
+                self._post_to_ui(lambda f=list(failed): self.page.force_update_suggested.emit(f))
+        except Exception:
+            pass
+        # 刷新列表：二次检测已经拿到过最新 plugins_list，直接用它 populate，
+        # 避免 loader.load() 再调一次 svc.list_installed（P1-4 新二次检测导致双重调用）。
+        if plugins_list is not None:
+            snapshot = list(plugins_list)
+            self._post_to_ui(lambda: self.page.populate(snapshot))
+        else:
+            self._populate_from_service()
 
     def run_update_selected(self, names, on_status=None, on_done=None):
         """qt_app 触发: 带进度回调的「更新选中」。
 
         on_status(str): 任务起始时回调一次, 派回 UI 线程.
-        on_done(): 任务收尾 (包括异常路径) 都会调, 让 qt_app 收尾弹窗 + 注册表.
+        on_done(success, message): 任务收尾 (包括异常路径) 都会调, 派回 UI 线程.
+          - success: 本次 svc 调用未抛异常（不代表每个插件都成功，已逐个调用 cm-cli）
+          - message: 一行人类文案（含建议强制更新数 / 失败异常）
         """
         def work():
+            failed = []
+            msg = f"选中插件更新完成 ({len(names)} 个)"
+            ok = True
             try:
                 if on_status:
                     label = f"正在更新选中插件 ({len(names)} 个)"
@@ -825,13 +1161,28 @@ class PluginController:
                 self.svc.update_selected(names)
                 failed = self.svc.outdated_plugins(names)
                 if failed:
-                    self._post_to_ui(lambda: self.page.force_update_suggested.emit(failed))
-            except Exception:
-                pass
+                    self._post_to_ui(lambda f=list(failed): self.page.force_update_suggested.emit(f))
+                    msg = msg + f"（{len(failed)} 个建议强制更新）"
+            except Exception as e:
+                # 漏 2 meta-review：原 except:pass 把所有异常吞掉，finally 里 on_done()
+                # 永远按成功流程走。现在存 error，on_done 带 (False, 异常文案)，
+                # 让 qt_app 弹 show_error（非取消）或 registry 标错。
+                ok = False
+                msg = f"更新选中失败：{e}"
             finally:
                 self._populate_from_service()
                 if on_done:
-                    self._post_to_ui(on_done)
+                    def _safe_on_done(o=bool(ok), m=msg):
+                        try:
+                            on_done(o, m)
+                        except TypeError:
+                            try:
+                                on_done()
+                            except Exception:
+                                pass
+                        except Exception:
+                            pass
+                    self._post_to_ui(_safe_on_done)
         self._run_in_background(work)
 
 
@@ -848,10 +1199,15 @@ class PluginController:
 
     # ---- disable / enable（service 单 target，循环调用）----
     def _on_disable_selected(self, dir_names):
-        self._run_in_background(lambda: self._lifecycle_work("disable", dir_names))
+        # P2-6 meta-review：默认信号连接入口。生产环境 qt_app 会 disconnect 此默认
+        # 连接改连自己的 _do_plugin_disable_selected（带进度 + 后台注册）；
+        # 测试 / 无 qt_app 环境则保留默认薄包装：调 run_disable(on_done=None)。
+        # 不再直接裸调 _lifecycle_work，统一走新 run_* 路径，保证错误处理一致。
+        self.run_disable(list(dir_names))
 
     def _on_enable_selected(self, dir_names):
-        self._run_in_background(lambda: self._lifecycle_work("enable", dir_names))
+        # P2-6 meta-review：同 _on_disable_selected，薄包装 run_enable(on_done=None)
+        self.run_enable(list(dir_names))
 
     def _lifecycle_work(self, op, dir_names):
         for dn in dir_names:
@@ -860,7 +1216,11 @@ class PluginController:
 
     # ---- uninstall（破坏性，需 qt_app 二次确认后调 apply_uninstall）----
     def apply_uninstall(self, dir_names):
-        """用户在二次确认弹窗里同意后调用：卸载这些插件。"""
+        """P2-6 meta-review：保留兼容性。生产代码 qt_app 二次确认后应调
+        ctrl.run_uninstall（带进度 + 后台注册 + 成功/失败反馈）；旧代码/测试仍
+        可用此入口（旧静默实现：_run_in_background → _uninstall_work）。
+        保持与老版本完全一致的 svc.uninstall 调用契约，不破坏测试。
+        """
         self._run_in_background(lambda: self._uninstall_work(dir_names))
 
     def _uninstall_work(self, dir_names):
@@ -870,7 +1230,11 @@ class PluginController:
 
     # ---- install（qt_app 输入框拿到 spec 后调 request_install）----
     def request_install(self, spec):
-        """qt_app 输入弹窗拿到 git URL/CNR id 后调用。"""
+        """P2-6 meta-review：保留兼容性。生产代码 qt_app 弹框拿 URL/CNR id
+        后应调 ctrl.run_install（带 cm-cli 阶段进度流 + cancel 可树杀）；旧代码/
+        测试仍可用此入口（旧静默实现：_run_in_background → _install_work）。
+        保持 svc.install（单命令无 streaming）的调用契约，不破坏测试。
+        """
         self._run_in_background(lambda: self._install_work(spec))
 
     def _install_work(self, spec):
@@ -916,7 +1280,17 @@ class PluginController:
                         msg = f"插件安装完成：{spec}"
                     else:
                         msg = f"插件安装失败：{spec}" + (f"\n{err}" if err else "")
-                    self._post_to_ui(lambda: on_done(ok, msg))
+                    def _safe_on_done(o=ok, m=msg):
+                        try:
+                            on_done(o, m)
+                        except TypeError:
+                            try:
+                                on_done()
+                            except Exception:
+                                pass
+                        except Exception:
+                            pass
+                    self._post_to_ui(_safe_on_done)
         self._run_in_background(work)
 
     def run_uninstall(self, dir_names, on_status=None, on_done=None):
@@ -951,14 +1325,27 @@ class PluginController:
                 except Exception:
                     pass
                 if on_done:
-                    failed = [(dn, r) for dn, r in results if not r.get("ok")]
+                    # r 可能是 None（mock 默认返回值或旧 svc 实现无返回），(r or {}) 防 None
+                    failed = [(dn, r) for dn, r in results if not (r or {}).get("ok")]
                     ok = len(failed) == 0 and len(results) == len(dir_names)
                     if ok:
                         msg = f"已{op_label} {len(dir_names)} 个插件"
                     else:
-                        detail = "; ".join(f"{dn}: {r.get('error', '?')}" for dn, r in failed)
+                        detail = "; ".join(
+                            f"{dn}: {(r or {}).get('error', '无返回结果')}" for dn, r in failed
+                        )
                         msg = f"{op_label}完成，{len(failed)}/{len(dir_names)} 失败：{detail}"
-                    self._post_to_ui(lambda: on_done(ok, msg))
+                    def _safe_on_done(o=bool(ok), m=msg):
+                        try:
+                            on_done(o, m)
+                        except TypeError:
+                            try:
+                                on_done()
+                            except Exception:
+                                pass
+                        except Exception:
+                            pass
+                    self._post_to_ui(_safe_on_done)
         self._run_in_background(work)
 
     # ---- 检查更新（批量 ls-remote，结果回推页面标记）----
@@ -996,7 +1383,7 @@ class PluginController:
         self._run_in_background(lambda: self._force_update_work(names))
 
     def _force_update_work(self, names):
-        self.svc.force_update_selected(names)
+        results = self.svc.force_update_selected(names)
         # 复用普通更新的「同步依赖库」流程（与内核更新同一套，按 checkbox 网关）
         if self._sync_deps:
             try:
@@ -1004,6 +1391,66 @@ class PluginController:
             except Exception:
                 pass
         self._populate_from_service()
+        return results
+
+    # ---- 漏 1 meta-review：强制更新带反馈版（仿 run_update_selected 契约）----
+    def run_force_update(self, names, on_status=None, on_done=None):
+        """qt_app 触发: 带进度回调的「强制更新选中」。
+
+        on_status(str): 起始回调, 派回 UI 线程.
+        on_done(ok, summary, per_plugin): 收尾 (含异常路径) 都会调, 派回 UI 线程.
+          - ok: bool, 全部成功 (即所有结果 ok=True 或 skipped=True)
+          - summary: 一行人类文案
+          - per_plugin: [{name, ok, skipped, detail}]，逐插件明细（来自 service.force_update_selected）
+        """
+        def work():
+            results: list[dict[str, Any]] = []
+            err_msg = None
+            try:
+                if on_status:
+                    label = f"正在强制更新插件 ({len(names)} 个，git stash + pull --ff-only)..."
+                    self._post_to_ui(lambda: on_status(label))
+                results = list(self.svc.force_update_selected(names) or [])
+                # 复用普通更新的「同步依赖库」
+                if self._sync_deps:
+                    try:
+                        self._sync_deps()
+                    except Exception as e:
+                        err_msg = f"同步依赖失败：{e}"
+                ok_all = all(r.get("ok", False) or r.get("skipped", False) for r in results)
+                ok_count = sum(1 for r in results if r.get("ok", False) and not r.get("skipped", False))
+                skip_count = sum(1 for r in results if r.get("skipped", False))
+                fail_count = sum(1 for r in results if not r.get("ok", False) and not r.get("skipped", False))
+                summary = f"强制更新完成：成功 {ok_count} 个，跳过 {skip_count} 个，失败 {fail_count} 个"
+                if err_msg:
+                    summary = summary + f"；{err_msg}"
+                # B5 CR：GUI 用户必须能看到 per_plugin 的 [警告] 和失败 detail。
+                # 原先 qt_app._adapted_done 会把 per_plugin 整个丢掉，强制更新 stash 冲突时
+                # 用户看不到任何冲突提示（以为成功了）。这里把 failed + 有警告的 detail
+                # 追加到 summary 文本里，保证 show_error / mark_complete 里能一眼看到。
+                notable: list[str] = []
+                for r in results:
+                    name = r.get("name") or "?"
+                    detail = r.get("detail") or ""
+                    if not detail:
+                        continue
+                    if not r.get("ok", False) and not r.get("skipped", False):
+                        notable.append(f"{name}（失败）: {detail.strip()}")
+                    elif "[警告]" in detail:
+                        notable.append(f"{name}（有告警）: {detail.strip()}")
+                if notable:
+                    joined = "\n".join("· " + s for s in notable)
+                    summary = f"{summary}\n\n{joined}"
+                if on_done:
+                    self._post_to_ui(lambda o=bool(ok_all), s=summary, p=list(results): on_done(o, s, p))
+            except Exception as e:
+                ok_all = False
+                summary = f"强制更新异常：{e}"
+                if on_done:
+                    self._post_to_ui(lambda o=False, s=summary, p=list(results): on_done(o, s, p))
+            finally:
+                self._populate_from_service()
+        self._run_in_background(work)
 
     def _populate_from_service(self):
         """取最新已装列表并派回 UI 线程填充页面（刷新 / 更新后都用）。

@@ -26,6 +26,14 @@ venv/
 # docs
 docs/*.txt
 docs/*.json
+# docs/reviews/ 是 AI review 输出目录，纯机器本地产物 —— 不要提交。
+# AGENTS.md 已经明确 launcher/运行时路径变更不提交；review 文档类同样不入库，
+# 避免不同开发者本地 review 互相覆盖。
+docs/reviews/
+
+# Build time parameters（本地构建产物，构建时间戳每次不同）—— 提交会让 CI/别人机器的
+# test_cli_cmd_info 断言 build_time 对不上而失败，CR 明确不能入库。
+build_parameters.json
 
 # Logs
 *.log
