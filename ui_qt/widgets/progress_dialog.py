@@ -22,9 +22,7 @@ class ProgressDialog(FramelessDraggableDialog):
         self._on_cancel_callback = None
         self._on_background_callback = None
         self._on_complete_callback = None
-        # 用普通箭头光标（基类 enterEvent 会设 SizeAll 十字暗示可拖，但进度弹窗
-        # 主要看进度/点按钮，十字光标会让用户困惑）。仍保留拖拽能力（基类 mousePress/Move）。
-        self.setCursor(QtCore.Qt.ArrowCursor)
+
 
         # UI Setup
         layout = QtWidgets.QVBoxLayout(self)
@@ -171,11 +169,6 @@ class ProgressDialog(FramelessDraggableDialog):
 
         layout.addWidget(self.container)
 
-    def enterEvent(self, event):
-        """覆盖基类：保持普通箭头光标（基类会设 SizeAll 十字暗示可拖，进度弹窗不需要）。"""
-        super().enterEvent(event)
-        self.setCursor(QtCore.Qt.ArrowCursor)
-
     def _confirm_cancel(self):
         """取消按钮点击 → 二次确认弹窗（破坏性操作，避免误点）。
 
@@ -300,7 +293,6 @@ class ProgressDialog(FramelessDraggableDialog):
         self.adjustSize()
         QtWidgets.QApplication.processEvents()
 
-    # 拖拽、hover cursor 等统一在 FramelessDraggableDialog 基类里实现。
 
     def set_progress(self, value, maximum=100):
         """设置进度条。value 为 None 表示息式 (脉冲)模式。"""

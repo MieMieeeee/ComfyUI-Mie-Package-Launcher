@@ -495,11 +495,31 @@ class PluginService:
                 repo = (n.get("repository") or "").strip()
                 if not repo:
                     continue
+                # author 兜底：CNR 部分老数据 author 字段为空，但 repository 一定是
+                # GitHub URL，从中抽 username（https://github.com/xxx/yyy → xxx）
+                author = (n.get("author") or "").strip()
+                if not author:
+                    try:
+                        parts = [seg for seg in repo.replace("\\", "/").split("/") if seg]
+                        if len(parts) >= 2:
+                            # http(s)://github.com/<username>/<repo>[/...]
+                            # <username> 在 parts 倒数第二（域名后第一段）；git@github.com:xxx/yyy
+                            # 也按 split("/") 拆，倒数第二是 xxx（域名那部分会包含 ":xxx"，
+                            # 再用 rsplit 取最后一段）
+                            second_last = parts[-2]
+                            candidate = (second_last.rsplit(":", 1)[-1] if ":" in second_last
+                                         else second_last)
+                            # 排除以 .git 结尾（一般不会在这层）和明显的域名
+                            if candidate and not candidate.endswith(".git") \
+                                    and "." not in candidate:
+                                author = candidate
+                    except Exception:
+                        pass
                 result.append({
                     "id": n.get("id") or "",
                     "name": n.get("name") or repo.rstrip("/").split("/")[-1],
                     "description": n.get("description") or "",
-                    "author": n.get("author") or "",
+                    "author": author,
                     "repository": repo,
                     "category": n.get("category") or "",
                     "tags": n.get("tags") or [],
@@ -545,11 +565,27 @@ class PluginService:
                 if not ref:
                     continue
                 title = it.get("title") or it.get("name") or ref.rstrip("/").split("/")[-1]
+                # author 兜底：custom-node-list 老数据很多 author 为空但 reference 一定是
+                # GitHub URL，从中抽 username（http(s)://github.com/xxx/yyy → xxx；
+                # git@github.com:xxx/yyy.git → xxx）
+                author = (it.get("author") or "").strip()
+                if not author:
+                    try:
+                        parts = [seg for seg in ref.replace("\\", "/").split("/") if seg]
+                        if len(parts) >= 2:
+                            second_last = parts[-2]
+                            candidate = (second_last.rsplit(":", 1)[-1] if ":" in second_last
+                                         else second_last)
+                            if candidate and not candidate.endswith(".git") \
+                                    and "." not in candidate:
+                                author = candidate
+                    except Exception:
+                        pass
                 result.append({
                     "id": "",  # legacy 列表没有 CNR id
                     "name": title,
                     "description": it.get("description") or "",
-                    "author": it.get("author") or "",
+                    "author": author,
                     "repository": ref,
                     "category": it.get("category") or "",
                     "tags": [],

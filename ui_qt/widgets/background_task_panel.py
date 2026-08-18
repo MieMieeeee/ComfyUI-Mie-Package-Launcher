@@ -299,7 +299,6 @@ class BackgroundTaskPanel(FramelessDraggableDialog):
     def __init__(self, parent, registry, theme_manager=None):
         super().__init__(parent=parent, modal=False, window_type=QtCore.Qt.Tool)
         self.setWindowTitle("后台任务")
-        self.setCursor(QtCore.Qt.ArrowCursor)
         _styles = theme_manager.styles if theme_manager else None
         _px = _styles._px if _styles else (lambda b: b)
         layout = QtWidgets.QVBoxLayout(self)
@@ -314,10 +313,6 @@ class BackgroundTaskPanel(FramelessDraggableDialog):
 
     def _restore_task(self, task_id):
         self._page._restore_task(task_id)
-
-    def enterEvent(self, event):
-        super().enterEvent(event)
-        self.setCursor(QtCore.Qt.ArrowCursor)
 
     def closeEvent(self, event):
         self.hide()

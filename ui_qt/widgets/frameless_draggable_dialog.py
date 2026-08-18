@@ -79,18 +79,4 @@ class FramelessDraggableDialog(QtWidgets.QDialog):
         else:
             super().mouseReleaseEvent(event)
 
-    def enterEvent(self, event):
-        """鼠标进入时给 SizeAll cursor，暗示这里可以拖。"""
-        try:
-            self.setCursor(QtCore.Qt.SizeAllCursor)
-        except Exception:
-            pass
-        super().enterEvent(event)
 
-    def leaveEvent(self, event):
-        """鼠标离开时还原 cursor。"""
-        try:
-            self.unsetCursor()
-        except Exception:
-            pass
-        super().leaveEvent(event)
