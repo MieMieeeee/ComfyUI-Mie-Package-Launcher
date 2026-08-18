@@ -235,6 +235,9 @@ def step_nuitka_compile(is_test):
         # 包含资源文件
         '--include-data-dir=assets=assets',
         '--include-data-file=build_parameters.json=build_parameters.json',
+        # cm_fast 包装器：运行时由启动器物化到真实磁盘（EVB 封包后虚拟文件对
+        # 环境 python 不可见），再用环境 python 执行（见 services/plugin_service.py）
+        '--include-data-file=services/_runner_scripts/cm_fast.py=cm_fast.py',
 
         # 排除不需要的 Qt 模块（减小体积）
         '--nofollow-import-to=PyQt5.QtQuick',

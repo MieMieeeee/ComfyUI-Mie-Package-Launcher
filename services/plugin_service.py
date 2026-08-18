@@ -6,10 +6,18 @@
   不 import manager_server），复用 Manager 全部能力：git 更新 + 每个插件的 pip 依赖
   （PIPFixer）+ CNR registry + snapshot。
 
-调用形态：
-    [python_path, cm_cli_path, "update", "all"]
+调用形态（优先 cm_fast 包装器，失败退原生 cm-cli）：
+    [python_path, cm_fast.py|cm_cli_path, "update", "all"]
     env: COMFYUI_PATH=<comfyui_dir>   # cm-cli.py:26 靠它定位 ComfyUI
+         CM_FAST_MANAGER_DIR=<manager_dir>  # 仅 cm_fast：定位 cm-cli.py（可选，可推导）
     cwd: ComfyUI-Manager 目录
+
+cm_fast 包装器（services/_runner_scripts/cm_fast.py，运行时物化）：
+- 原生 cm-cli 硬编码 reload(dont_wait=False) + Windows getctime/NTFS 隧道使
+  缓存永远判过期 → 每次调用同步全量拉 CNR ~5.5 分钟（实测）。
+- 包装器 monkey-patch is_file_created_within_one_day(mtime) + reload(dont_wait=True)，
+  行为/参数/输出行与 cm-cli 完全一致；install(CNR) 且缓存文件缺失时 exit 3，
+  本服务收到 3 自动转原生 cm-cli 兜底（付一次慢速全量建缓存）。
 
 Phase 1：仅 update（update_all / update_selected）。
 后续（cm-cli 已支持，同一套 _run_cmcli 包装）：
@@ -53,6 +61,8 @@ def _parse_version(v: str) -> tuple:
 _DEFAULT_TIMEOUT = 3600
 # 返回 log 截断长度（cm-cli 输出是人类文本，可能很长）。
 _LOG_LIMIT = 4000
+# cm_fast 包装器约定退出码：install(CNR) 时 registry 缓存文件缺失，需转原生 cm-cli。
+_CM_FAST_EXIT_CACHE_MISSING = 3
 
 logger = logging.getLogger("comfyui_launcher")
 # 流式执行 cm-cli 时的日志序号（便于在 launcher.log 检索某次 install 的完整原始输出）
@@ -737,17 +747,93 @@ class PluginService:
         names = [p["dir_name"] for p in self.list_installed()]
         return self.outdated_plugins(names, on_progress=on_progress)
 
+    # ---- cm_fast 包装器物化 ----
+    def _cm_fast_source(self) -> Optional[Path]:
+        """定位随启动器分发的 cm_fast.py 源文件。
+
+        打包态：Nuitka --include-data-file 放在 exe 旁（dev tester / dist 目录
+        里是真文件）；开发态：services/_runner_scripts/ 下。都没有 → None。
+        注意 EVB 封包单 exe 场景下 exe 旁的 cm_fast.py 在 EVB 虚拟文件系统里，
+        只有本进程读得到（环境 python 看不到）——所以调用方必须先物化再执行。
+        """
+        try:
+            cands = [
+                Path(sys.executable).resolve().parent / "cm_fast.py",
+                Path(__file__).resolve().parent / "_runner_scripts" / "cm_fast.py",
+            ]
+            for c in cands:
+                if c.is_file():
+                    return c
+        except Exception:
+            logger.exception("cm_fast: 源文件定位失败")
+        return None
+
+    def _materialize_cm_fast(self) -> Optional[Path]:
+        """把 cm_fast.py 物化到真实磁盘（环境 python 可执行）并返回路径。
+
+        写入 launcher/plugins/cm_fast.py，内容 hash 相同则跳过重写；
+        目录只读/权限异常时退 %TEMP%；再失败返回 None（调用方用原生 cm-cli）。
+        """
+        import hashlib
+        import tempfile
+
+        src = self._cm_fast_source()
+        if src is None:
+            return None
+        try:
+            content = src.read_bytes()
+        except Exception:
+            logger.exception("cm_fast: 读源文件失败 %s", src)
+            return None
+        digest = hashlib.sha256(content).hexdigest()
+
+        def _same(p: Path) -> bool:
+            try:
+                return hashlib.sha256(p.read_bytes()).hexdigest() == digest
+            except Exception:
+                return False
+
+        targets = [
+            PATHS.stable_project_root() / "launcher" / "plugins" / "cm_fast.py",
+            Path(tempfile.gettempdir()) / "cm_fast.py",
+        ]
+        for t in targets:
+            try:
+                t.parent.mkdir(parents=True, exist_ok=True)
+                if t.exists() and _same(t):
+                    return t
+                t.write_bytes(content)
+                if _same(t):
+                    return t
+            except Exception:
+                logger.warning("cm_fast: 物化到 %s 失败", t, exc_info=True)
+                continue
+        return None
+
     # ---- 通用 cm-cli 执行器 ----
     def _run_cmcli(self, args: list[str], timeout: int = _DEFAULT_TIMEOUT) -> dict[str, Any]:
-        """跑一个 cm-cli 子命令。返回 {returncode, stdout, stderr, error}。"""
+        """跑一个 cm-cli 子命令（优先 cm_fast 包装器）。返回 {returncode, stdout, stderr, error}。"""
         py = self._python_exec()
         cm = self._cm_cli_path()
         if not py or not cm or not Path(py).exists():
             return {"returncode": -1, "stdout": "", "stderr": "",
                     "error": "ComfyUI-Manager 或 ComfyUI 内置 python 未找到"}
-        cmd = [py, str(cm), *args]
+        wrapper = self._materialize_cm_fast()
+        if wrapper is not None:
+            res = self._run_cmcli_script(py, cm, wrapper, args, timeout=timeout)
+            if res.get("returncode") != _CM_FAST_EXIT_CACHE_MISSING:
+                return res
+            logger.info("cmcli: 包装器 exit 3（CNR 缓存缺失）→ 原生 cm-cli 兜底建缓存 args=%r", args)
+        return self._run_cmcli_script(py, cm, cm, args, timeout=timeout)
+
+    def _run_cmcli_script(self, py: str, cm: Path, script: Path,
+                          args: list[str], timeout: int = _DEFAULT_TIMEOUT) -> dict[str, Any]:
+        """跑单个脚本（cm_fast 包装器或原生 cm-cli）。"""
+        cmd = [py, str(script), *args]
         env = os.environ.copy()
         env["COMFYUI_PATH"] = str(self._comfyui_dir())
+        if script != cm:
+            env["CM_FAST_MANAGER_DIR"] = str(cm.parent)
         try:
             r = run_hidden(
                 cmd,
@@ -808,25 +894,49 @@ class PluginService:
 
     def _run_cmcli_streaming(self, args: list[str], on_output=None,
                              cancel_event=None, timeout: int = _DEFAULT_TIMEOUT) -> dict[str, Any]:
-        """跑一个 cm-cli 子命令，逐行流式回调输出。返回 {returncode, stdout, stderr, error}。
+        """跑一个 cm-cli 子命令（优先 cm_fast 包装器），逐行流式回调输出。
 
-        与 _run_cmcli 同契约，但用 Popen + stderr 合并到 stdout 单流逐行读，
-        每行调 on_output(line)（实时反馈给 UI）。合并单流避免双流死锁。
-        整体超时用读线程 + join(timeout) 保证（cm-cli 卡死不输出时也能兜底 kill）。
-        cancel_event（threading.Event）：若外部 set，读循环检测到后 tree-kill 整棵 cm-cli 进程
-        并立即返回（error="用户取消"）。
-        为了避免「readline 阻塞期间 cancel_event.set() 不生效」，上层应在 set_event 之后
-        立刻再次调用 _tree_kill_pid(proc.pid)（见 install_streaming 的 cancel_wrapper），
-        不等 readline 下一行返回。
+        返回 {returncode, stdout, stderr, error}，与 _run_cmcli 同契约，但用
+        Popen + stderr 合并到 stdout 单流逐行读，每行调 on_output(line)（实时
+        反馈给 UI）。合并单流避免双流死锁。整体超时用读线程 + join(timeout)
+        保证（cm-cli 卡死不输出时也能兜底 kill）。cancel_event（threading.Event）：
+        若外部 set，读循环检测到后 tree-kill 整棵 cm-cli 进程并立即返回
+        （error="用户取消"）。
+        为了避免「readline 阻塞期间 cancel_event.set() 不生效」，上层应在 set_event
+        之后立刻再次调用 _tree_kill_pid(proc.pid)（见 install_streaming 的
+        cancel_wrapper），不等 readline 下一行返回。
+
+        cm_fast 包装器与 cm-cli 参数/输出行完全一致；exit 3（install(CNR) 且
+        registry 缓存缺失）时转原生 cm-cli 重跑一次。
         """
         py = self._python_exec()
         cm = self._cm_cli_path()
         if not py or not cm or not Path(py).exists():
             return {"returncode": -1, "stdout": "", "stderr": "",
                     "error": "ComfyUI-Manager 或 ComfyUI 内置 python 未找到"}
-        cmd = [py, str(cm), *args]
+        wrapper = self._materialize_cm_fast()
+        if wrapper is not None:
+            res = self._run_script_streaming(py, cm, wrapper, args,
+                                             on_output=on_output,
+                                             cancel_event=cancel_event,
+                                             timeout=timeout)
+            if res.get("returncode") != _CM_FAST_EXIT_CACHE_MISSING:
+                return res
+            logger.info("cmcli_stream: 包装器 exit 3（CNR 缓存缺失）→ 原生 cm-cli 兜底建缓存 args=%r", args)
+        return self._run_script_streaming(py, cm, cm, args,
+                                          on_output=on_output,
+                                          cancel_event=cancel_event,
+                                          timeout=timeout)
+
+    def _run_script_streaming(self, py: str, cm: Path, script: Path, args: list[str],
+                              on_output=None, cancel_event=None,
+                              timeout: int = _DEFAULT_TIMEOUT) -> dict[str, Any]:
+        """流式跑单个脚本（cm_fast 包装器或原生 cm-cli）。"""
+        cmd = [py, str(script), *args]
         env = os.environ.copy()
         env["COMFYUI_PATH"] = str(self._comfyui_dir())
+        if script != cm:
+            env["CM_FAST_MANAGER_DIR"] = str(cm.parent)
         # 强制 cm-cli（python 子进程）stdout 无缓冲：默认非 tty(PIPE) 下 Python 是
         # 块缓冲，print 会积压到进程结束才 flush，导致流式阶段进度读不到（全程无更新）。
         env["PYTHONUNBUFFERED"] = "1"

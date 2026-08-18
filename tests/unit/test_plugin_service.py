@@ -199,6 +199,7 @@ def test_run_cmcli_builds_command_with_comfyui_path_env_and_cwd():
     with patch.object(svc, "_python_exec", return_value="/py/python.exe"), \
          patch.object(svc, "_cm_cli_path", return_value=Path("/mgr/ComfyUI-Manager/cm-cli.py")), \
          patch.object(svc, "_comfyui_dir", return_value=comfy), \
+         patch.object(svc, "_materialize_cm_fast", return_value=None), \
          patch("pathlib.Path.exists", return_value=True), \
          patch("services.plugin_service.run_hidden", side_effect=fake_run_hidden):
         res = svc._run_cmcli(["update", "all"])
@@ -212,6 +213,60 @@ def test_run_cmcli_builds_command_with_comfyui_path_env_and_cwd():
     assert captured["env"]["COMFYUI_PATH"] == str(comfy)
     # cwd 必须是 cm-cli.py 所在的 Manager 目录
     assert captured["cwd"] == str(Path("/mgr/ComfyUI-Manager"))
+
+
+def test_run_cmcli_prefers_wrapper_and_sets_manager_dir_env():
+    """有物化包装器时：命令指向 cm_fast.py，env 带 CM_FAST_MANAGER_DIR。"""
+    svc = PluginService(_app())
+    captured = {}
+
+    def fake_run_hidden(cmd, **kwargs):
+        captured["cmd"] = cmd
+        captured["env"] = kwargs.get("env")
+        captured["cwd"] = kwargs.get("cwd")
+        r = MagicMock()
+        r.returncode = 0
+        r.stdout = "done"
+        r.stderr = ""
+        return r
+
+    with patch.object(svc, "_python_exec", return_value="/py/python.exe"), \
+         patch.object(svc, "_cm_cli_path", return_value=Path("/mgr/ComfyUI-Manager/cm-cli.py")), \
+         patch.object(svc, "_comfyui_dir", return_value=Path("/comfy/ComfyUI")), \
+         patch.object(svc, "_materialize_cm_fast", return_value=Path("/out/cm_fast.py")), \
+         patch("pathlib.Path.exists", return_value=True), \
+         patch("services.plugin_service.run_hidden", side_effect=fake_run_hidden):
+        res = svc._run_cmcli(["install", "foo"])
+
+    assert res["returncode"] == 0
+    assert captured["cmd"] == ["/py/python.exe", str(Path("/out/cm_fast.py")), "install", "foo"]
+    assert captured["env"]["CM_FAST_MANAGER_DIR"] == str(Path("/mgr/ComfyUI-Manager"))
+    assert captured["cwd"] == str(Path("/mgr/ComfyUI-Manager"))
+
+
+def test_run_cmcli_exit3_falls_back_to_stock_cmcli():
+    """包装器 exit 3（CNR 缓存缺失）→ 自动用原生 cm-cli 重跑一次。"""
+    svc = PluginService(_app())
+    calls = []
+
+    def fake_run_hidden(cmd, **kwargs):
+        calls.append(cmd[1])
+        r = MagicMock()
+        r.returncode = 3 if len(calls) == 1 else 0
+        r.stdout = "done"
+        r.stderr = ""
+        return r
+
+    with patch.object(svc, "_python_exec", return_value="/py/python.exe"), \
+         patch.object(svc, "_cm_cli_path", return_value=Path("/mgr/ComfyUI-Manager/cm-cli.py")), \
+         patch.object(svc, "_comfyui_dir", return_value=Path("/comfy/ComfyUI")), \
+         patch.object(svc, "_materialize_cm_fast", return_value=Path("/out/cm_fast.py")), \
+         patch("pathlib.Path.exists", return_value=True), \
+         patch("services.plugin_service.run_hidden", side_effect=fake_run_hidden):
+        res = svc._run_cmcli(["install", "foo"])
+
+    assert res["returncode"] == 0
+    assert calls == [str(Path("/out/cm_fast.py")), str(Path("/mgr/ComfyUI-Manager/cm-cli.py"))]
 
 
 def test_run_cmcli_returns_error_when_paths_missing():
