@@ -1097,7 +1097,7 @@ class PluginController:
                 failed = self.svc.outdated_plugins(names)
                 if failed:
                     self._post_to_ui(lambda f=list(failed): self.page.force_update_suggested.emit(f))
-                msg = "插件更新全部完成" + (f"（{len(failed)} 个建议强制更新）" if failed else "")
+                msg = "插件更新全部完成，重启 ComfyUI 后生效" + (f"（{len(failed)} 个建议强制更新）" if failed else "")
                 ok = True
             except Exception as e:
                 ok = False
@@ -1152,7 +1152,7 @@ class PluginController:
         """
         def work():
             failed = []
-            msg = f"选中插件更新完成 ({len(names)} 个)"
+            msg = f"选中插件更新完成 ({len(names)} 个)，重启 ComfyUI 后生效"
             ok = True
             try:
                 if on_status:
@@ -1277,7 +1277,7 @@ class PluginController:
                     ok = bool(res.get("ok"))
                     err = res.get("error")
                     if ok:
-                        msg = f"插件安装完成：{spec}"
+                        msg = f"插件安装完成：{spec}\n重启 ComfyUI 后生效"
                     else:
                         msg = f"插件安装失败：{spec}" + (f"\n{err}" if err else "")
                     def _safe_on_done(o=ok, m=msg):
@@ -1329,7 +1329,7 @@ class PluginController:
                     failed = [(dn, r) for dn, r in results if not (r or {}).get("ok")]
                     ok = len(failed) == 0 and len(results) == len(dir_names)
                     if ok:
-                        msg = f"已{op_label} {len(dir_names)} 个插件"
+                        msg = f"已{op_label} {len(dir_names)} 个插件，重启 ComfyUI 后生效"
                     else:
                         detail = "; ".join(
                             f"{dn}: {(r or {}).get('error', '无返回结果')}" for dn, r in failed

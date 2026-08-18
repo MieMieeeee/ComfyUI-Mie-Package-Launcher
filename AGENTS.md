@@ -117,6 +117,7 @@ python __main__.py <command> [--json] [-v]
 
 ## 坑（agent 易踩）
 
+- **原生 cm-cli 在 Windows 每次调用要 ~5.5 分钟，不要直接跑**：ComfyUI-Manager 的 `is_file_created_within_one_day` 用 `getctime`（Windows=创建时间，NTFS 隧道冻结）+ cm-cli 硬编码 `reload(dont_wait=False)`，导致每次调用同步全量拉取 CNR。启动器的插件操作（`services/plugin_service.py`）已两级分发绕过：ComfyUI 在跑 → Manager HTTP 队列 API（网页同路径）；否则 → `cm_fast` 包装器（`services/_runner_scripts/cm_fast.py`，monkey-patch `mtime` + `dont_wait=True`，运行时物化到 `launcher/plugins/cm_fast.py`），仅 install(CNR) 缓存缺失时 exit 3 → 原生 cm-cli 兜底建缓存。改插件操作逻辑请走 `PluginService` 公开方法，别自己拼 cm-cli 命令。
 - **`logs -f` 会永久阻塞**，自动化/脚本里禁用，要 `--no-follow`。
 - **无子命令 = GUI**：如果 agent 想跑 CLI 却只执行了 `ComfyUI启动器.exe`（不带子命令），会弹 GUI 而非执行命令。
 - `--start` / `--stop` / `--status` 这类**老 flag 已废弃**（旧文档可能还写），现在是子命令：`start` / `stop` / `status`。
