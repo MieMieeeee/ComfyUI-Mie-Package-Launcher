@@ -32,7 +32,9 @@ class ModelsPage(BasePage):
         self._is_silent = False  # suppress listbox signal during bulk refresh
 
         self.library_list = QtWidgets.QListWidget()
-        self.library_list.setMinimumWidth(self._px(220))
+        self._library_list_min_width_base = 220
+        self.library_list.setMinimumWidth(self._px(self._library_list_min_width_base))
+        self._dpi_sized_widgets.append((self.library_list, "setMinimumWidth", self._library_list_min_width_base))
         self.library_list.setSelectionMode(QtWidgets.QAbstractItemView.SingleSelection)
         self.library_list.setUniformItemSizes(True)
         # Theme-driven colors so the items stay legible in both light and dark modes.
@@ -69,7 +71,9 @@ class ModelsPage(BasePage):
         self.mapping_table = StyledTableWidget(self.theme_manager.styles)
         self.mapping_table.setColumnCount(2)
         self.mapping_table.setHorizontalHeaderLabels(["名称", "路径"])
-        self.mapping_table.setMinimumHeight(self._px(360))
+        self._mapping_table_min_height_base = 360
+        self.mapping_table.setMinimumHeight(self._px(self._mapping_table_min_height_base))
+        self._dpi_sized_widgets.append((self.mapping_table, "setMinimumHeight", self._mapping_table_min_height_base))
         self.mapping_table.setWordWrap(True)
         try:
             self.mapping_table.setTextElideMode(QtCore.Qt.ElideNone)

@@ -774,6 +774,37 @@ class VersionService(IVersionService):
                     "error": "no stable tag",
                 }
             report(f"正在切换到 {info.get('tag')}...")
+            # P1: short-circuit on dirty working tree before attempting
+            # checkout. Typical for 3rd-party package distributions that
+            # ship with patches over ComfyUI core files.
+            try:
+                dirty = self._collect_local_modifications()
+            except Exception:
+                dirty = None
+            if dirty:
+                target = info.get("tag") or info.get("commit") or "target ref"
+                sample = ", ".join(dirty["files"][:3])
+                more = "" if dirty["count"] <= 3 else f" (and {dirty['count'] - 3} more)"
+                res = {
+                    "component": "core",
+                    "error": (
+                        f"ComfyUI working tree has {dirty['count']} uncommitted"
+                        f" change(s); cannot checkout to {target}. Sample files:"
+                        f" {sample}{more}."
+                    ),
+                    "error_code": "LOCAL_MODIFICATIONS",
+                    "hint": (
+                        "Detected uncommitted changes that would be overwritten."
+                        " Please use the GUI force-update (stash) option, or run"
+                        " git stash / git reset --hard in the ComfyUI directory,"
+                        " then retry."
+                    ),
+                }
+                try:
+                    res.update({"tag": info.get("tag"), "commit": info.get("commit")})
+                except Exception:
+                    pass
+                return res
             tag = info.get("tag")
             if tag:
                 res = self._checkout_tag(tag)
@@ -1056,7 +1087,7 @@ class VersionService(IVersionService):
             )
             if r and r.returncode == 0:
                 return {"component": "core", "updated": True}
-            return {"component": "core", "error": r.stderr if r else "checkout failed"}
+            return self._make_checkout_error(r, "checkout failed")
         except Exception as e:
             return {"component": "core", "error": str(e)}
 
@@ -1090,11 +1121,107 @@ class VersionService(IVersionService):
                     return {"component": "core", "updated": True}
             except Exception:
                 pass
-            return {"component": "core", "error": r.stderr if r else "checkout tag failed"}
+            return self._make_checkout_error(r, "checkout tag failed")
         except Exception as e:
             return {"component": "core", "error": str(e)}
 
     # --- 本地修改冲突 / 强制更新 ---
+
+    @staticmethod
+    def _is_local_modifications_error(r) -> bool:
+        """Classify whether a git checkout/merge failure is caused by local
+        uncommitted changes that would be overwritten.
+
+        Used by ``_checkout_tag`` / ``_checkout_commit`` / ``git pull`` error
+        paths. When True, the caller should also set ``error_code`` to
+        ``LOCAL_MODIFICATIONS`` so the GUI surfaces the "force update (stash)"
+        dialog (see ``ui_qt.qt_app._offer_force_update``).
+
+        Note: Git error wording varies across versions; we OR-match on a few
+        stable markers rather than relying on exact line numbers or filename
+        formats.
+        """
+        try:
+            stderr = getattr(r, "stderr", "") or ""
+            stdout = getattr(r, "stdout", "") or ""
+            text = stderr + stdout
+        except Exception:
+            return False
+        if not text:
+            return False
+        markers = (
+            "Your local changes to the following files would be overwritten by checkout",
+            "Please commit your changes or stash them before you switch branches",
+            "would be overwritten by merge",
+        )
+        return any(m in text for m in markers)
+
+    def _make_checkout_error(self, r, default_msg: str) -> Dict[str, Any]:
+        """Build an error response for a failed git checkout.
+
+        Classifies the failure via :meth:`_is_local_modifications_error` and,
+        when local modifications are to blame, sets ``error_code`` to
+        ``LOCAL_MODIFICATIONS`` plus a hint so the GUI can surface the
+        force-update (stash) dialog instead of the bare git error.
+        """
+        err = (r.stderr if r else None) or default_msg
+        res = {"component": "core", "error": err}
+        if r and self._is_local_modifications_error(r):
+            res["error_code"] = "LOCAL_MODIFICATIONS"
+            res["hint"] = 'Detected uncommitted changes that would be overwritten. Please use the GUI force-update (stash) option, or run git stash / git reset --hard in the ComfyUI directory, then retry.'
+        return res
+
+    def _collect_local_modifications(self, limit: int = 5) -> Optional[Dict[str, Any]]:
+        """Detect uncommitted modifications on the working tree.
+
+        Runs ``git status --porcelain``; non-empty output is treated as dirty.
+        Returns ``{"count": int, "files": [...]}`` (files capped at ``limit``)
+        or ``None`` if the working tree is clean / detection fails.
+
+        Used by :meth:`upgrade_latest` to short-circuit before ``_checkout_tag``
+        on dirty trees (typical for 3rd-party package distributions that ship
+        with patches over ComfyUI core files), so we avoid wasting time on a
+        doomed ``git fetch + checkout`` and surface the conflict earlier with
+        a clean error_code so the GUI can offer "force update (stash)".
+        """
+        try:
+            r = self._run_git(
+                ["git", "status", "--porcelain"],
+                capture_output=True,
+                text=True,
+                timeout=10,
+                cwd=self._repo_root(),
+            )
+        except Exception:
+            return None
+        if not r or r.returncode != 0:
+            return None
+        out = (r.stdout or "")
+        if not out.strip():
+            return None
+        files: List[str] = []
+        for line in out.splitlines():
+            line = line.rstrip()
+            if len(line) < 4:
+                continue
+            # porcelain v1 format: XY <space> filename (XY = 2-char status)
+            name = line[3:]
+            # Handle quoted filenames (spaces / non-ASCII / special chars).
+            if name.startswith(chr(34)) and name.endswith(chr(34)):
+                try:
+                    import shlex
+                    parts = shlex.split(name)
+                    if parts:
+                        name = parts[0]
+                except Exception:
+                    name = name.strip(chr(34))
+            # porcelain v1 emits a second line for renames with arrow; skip.
+            if " -> " in name:
+                continue
+            files.append(name)
+        if not files:
+            return None
+        return {"count": len(files), "files": files[:limit]}
 
     def is_rebase_in_progress(self) -> bool:
         """检查当前仓库是否处于 rebase 进行中状态。"""

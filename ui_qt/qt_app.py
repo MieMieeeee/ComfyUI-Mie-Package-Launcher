@@ -2011,6 +2011,9 @@ class PyQtLauncher(QtWidgets.QMainWindow, process_events.ProcessCallback):
 
         # Add glow effect to title
         try:
+            from core.render_guard import is_safe_ui as _is_safe_ui
+            if _is_safe_ui():
+                raise Exception("safe-UI")
             glow = QtWidgets.QGraphicsDropShadowEffect(self)
             glow.setBlurRadius(15)
             glow.setColor(QtGui.QColor(158, 119, 237, 150))  # Purple glow
@@ -2056,6 +2059,9 @@ class PyQtLauncher(QtWidgets.QMainWindow, process_events.ProcessCallback):
 
                 # Shadow effect for depth (applied once)
                 try:
+                    from core.render_guard import is_safe_ui as _is_safe_ui
+                    if _is_safe_ui():
+                        raise Exception("safe-UI")
                     shadow = QtWidgets.QGraphicsDropShadowEffect(self)
                     shadow.setBlurRadius(15)
                     shadow.setOffset(0, 4)
@@ -2625,32 +2631,59 @@ class PyQtLauncher(QtWidgets.QMainWindow, process_events.ProcessCallback):
             avail_geo = primary_screen.availableGeometry()
             s_w, s_h = avail_geo.width(), avail_geo.height()
 
-            # 窗口初始尺寸：跟随 ui_scale 同比缩放（1350×900 为 100% 基准）。
-            # 历史「只放大不缩小」决策已反转：scale<1 时窗口也缩小，让内容和
-            # 容器同步缩，避免小 scale 下右侧大块留白（环境配置区「黑条比文本框长」）。
-            base_w = _sp(1350)
-            base_h = _sp(900)
-
-            final_w = min(base_w, s_w - 40)
-            final_h = min(base_h, s_h - 80)
-
             # 最小窗口尺寸：跟随 scale，防止缩到侧边栏 + 内容下限以下布局错乱。
             try:
                 self.setMinimumSize(_sp(960), _sp(640))
             except Exception:
                 pass
 
+            # 尝试走 MVP A 尺寸记忆：优先走 resolve_window_geometry_for_startup，
+            # 任何阶段失败（import / 纯函数抛错）都 fallback 到原硬编码 1350×900 逻辑。
+            final_w, final_h, final_state, final_pos = None, None, "normal", "center"
+            try:
+                from config.migrations import resolve_window_geometry_for_startup
+                cur_scale = self._compute_current_scale()
+                geo_res = resolve_window_geometry_for_startup(
+                    self.config,
+                    cur_scale,
+                    (avail_geo.x(), avail_geo.y(), avail_geo.width(), avail_geo.height()),
+                )
+                final_w = int(geo_res["w"])
+                final_h = int(geo_res["h"])
+                final_state = geo_res.get("state") or "normal"
+                final_pos = geo_res.get("position") or "center"
+                if final_state not in ("normal", "maximized"):
+                    final_state = "normal"
+            except Exception as e_geo:
+                try:
+                    if getattr(self, "logger", None):
+                        self.logger.info(
+                            "窗口几何记忆读取失败（fallback 硬编码）: %s",
+                            str(e_geo),
+                        )
+                except Exception:
+                    pass
+                # 窗口初始尺寸：跟随 ui_scale 同比缩放（1350×900 为 100% 基准）。
+                # 历史「只放大不缩小」决策已反转：scale<1 时窗口也缩小，让内容和
+                # 容器同步缩，避免小 scale 下右侧大块留白（环境配置区「黑条比文本框长」）。
+                base_w = _sp(1350)
+                base_h = _sp(900)
+                final_w = min(base_w, s_w - 40)
+                final_h = min(base_h, s_h - 80)
+                final_state = "normal"
+                final_pos = "center"
+
             # 调试日志
             try:
                 if getattr(self, "logger", None):
                     self.logger.info(
-                        "窗口初始化: 屏幕=%dx%d, base=%dx%d, final=%dx%d",
+                        "窗口初始化: 屏幕=%dx%d, final=%dx%d, state=%s, pos=%s",
                         s_w,
                         s_h,
-                        base_w,
-                        base_h,
                         final_w,
                         final_h,
+                        final_state,
+                        final_pos,
                     )
                     self.logger.info(
                         "页面大小: sizeHint=%dx%d",
@@ -2669,10 +2702,18 @@ class PyQtLauncher(QtWidgets.QMainWindow, process_events.ProcessCallback):
                     "resize() 后窗口大小: %dx%d", self.width(), self.height()
                 )
 
-            self.move(
-                avail_geo.x() + (s_w - final_w) // 2,
-                avail_geo.y() + (s_h - final_h) // 2,
-            )
+            if final_pos == "center":
+                self.move(
+                    avail_geo.x() + (s_w - final_w) // 2,
+                    avail_geo.y() + (s_h - final_h) // 2,
+                )
+
+            # 最大化：resize + move 之后 showMaximized()（normalGeometry 仍保留 final_w/h 基准）
+            if final_state == "maximized":
+                try:
+                    self.showMaximized()
+                except Exception:
+                    pass
         except Exception as e:
             if getattr(self, "logger", None):
                 self.logger.info("窗口大小设置异常: %s", str(e))
@@ -5153,6 +5194,37 @@ class PyQtLauncher(QtWidgets.QMainWindow, process_events.ProcessCallback):
         except Exception:
             pass
 
+        # 窗口几何记忆：MVP A 关闭时写 1 次（契合「绝不监听 resizeEvent 防 DWM 卡顿」）。
+        # 最大化时用 normalGeometry 的尺寸（别把全屏 3800×2080 写成 base，下次在小屏启动就悲剧）。
+        try:
+            from config.migrations import persist_window_geometry
+            cur_scale = self._compute_current_scale()
+            p_w, p_h = int(self.width()), int(self.height())
+            try:
+                n_g = self.normalGeometry()
+                n_w, n_h = int(n_g.width()), int(n_g.height())
+            except Exception:
+                n_w, n_h = p_w, p_h
+            is_max = bool(self.isMaximized())
+            persist_window_geometry(
+                self.config, p_w, p_h, n_w, n_h, is_max, cur_scale,
+            )
+        except Exception as e_geo_save:
+            try:
+                if logger:
+                    logger.info("窗口几何记忆保存失败（不影响退出）: %s", str(e_geo_save))
+            except Exception:
+                pass
+        # 写盘：确保上面的 persist 结果（以及本次会话的其他设置变更）落到磁盘。
+        try:
+            self.save_config()
+        except Exception as e_save:
+            try:
+                if logger:
+                    logger.info("退出前 save_config 失败: %s", str(e_save))
+            except Exception:
+                pass
+
         # 停止所有版本检测 workers
         try:
             self._stop_workers("_version_workers")
@@ -5321,6 +5393,40 @@ class PyQtLauncher(QtWidgets.QMainWindow, process_events.ProcessCallback):
         except Exception:
             pass
         self.show()
+
+        # 渲染模式升级提示：仅本次为兼容/安全时用 escalated_detail() 非 None 则
+        # 提示用户（compat=视觉无感 / safe=明确说明可改回。
+        try:
+            from core.render_guard import (
+                escalated_this_run as _escalated,
+                escalated_detail as _detail_fn,
+            )
+            if _escalated():
+                detail = _detail_fn()  # type: tuple | None
+                if detail and len(detail) >= 2:
+                    from_mode, to_mode = detail[0], detail[1]
+                    try:
+                        from ui_qt.widgets.dialog_helper import DialogHelper
+                        if to_mode == "safe":
+                            DialogHelper.show_info(
+                                self,
+                                "提示：界面已切换到安全模式",
+                                "检测到上次启动时图形渲染崩溃，为保证可用已自动切换到「安全模式」"
+                                "（关闭所有视觉特效 + 软件渲染）。\n\n"
+                                "如果您想改回自动模式，可前往 系统设置 → 界面与窗口 → "
+                                "界面渲染模式 选择后重启即可。",
+                            )
+                        else:  # compat
+                            DialogHelper.show_info(
+                                self,
+                                "提示：界面已切换到兼容模式",
+                                "检测到上次启动时图形渲染不稳定，已自动启用软件渲染（兼容模式）。\n"
+                                "视觉上基本无感，若仍有闪退会进一步升级到安全模式。",
+                            )
+                    except Exception:
+                        pass
+        except Exception:
+            pass
 
         # 初始化系统托盘（不可用时静默降级）
         try:

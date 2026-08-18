@@ -67,6 +67,10 @@ class LaunchPage(BasePage):
         layout.setContentsMargins(12, 12, 12, 12)
         layout.setSpacing(8)
 
+        # 提前初始化 DPI 相关 list，避免 _build_quick_dir 或后续 update_theme
+        # 在属性未创建时 AttributeError（TDD 构造 fake app 触发）。
+        self._quick_dir_buttons = []
+        self._styled_widgets = []
         # 调试日志：检查根目录设置
         try:
             comfy_root = self.app.config.get('paths', {}).get('comfyui_root', '.')
@@ -90,7 +94,9 @@ class LaunchPage(BasePage):
 
         # 右侧按钮容器
         right_container = QtWidgets.QWidget()
-        right_container.setFixedWidth(self.theme_manager.styles._px(200))
+        self._right_container_width_base = 200
+        right_container.setFixedWidth(self.theme_manager.styles._px(self._right_container_width_base))
+        self.right_container = right_container
         right_layout = QtWidgets.QVBoxLayout(right_container)
         right_layout.setContentsMargins(0, 0, 0, 0)
         right_layout.setSpacing(8)
@@ -215,14 +221,13 @@ class LaunchPage(BasePage):
         # 快捷目录始终在首屏可见范围内，超出部分由外层 ScrollArea 滚动。
         layout.addSpacing(8)
 
+        # 存基类 DPI 尺寸：(widget, setter_name, base_int_or_tuple)
+        self._dpi_sized_widgets.append((self.right_container, "setFixedWidth", self._right_container_width_base))
+
         # 存储需要主题更新的组件
         self._styled_widgets = [self.launch_controls_section, self.environment_section, self.version_section]
         if hasattr(self.app, "_styled_widgets"):
             self.app._theme_widgets.extend(self._styled_widgets)
-        try:
-            self._quick_dir_buttons = []
-        except Exception:
-            pass
 
     def _build_quick_dir(self, layout):
         """构建快捷目录区块"""
@@ -242,14 +247,12 @@ class LaunchPage(BasePage):
         for text, callback in buttons:
             b = QtWidgets.QPushButton(text)
             b.setCursor(Qt.PointingHandCursor)
-            b.setMinimumHeight(self.theme_manager.styles._px(32))
+            b._min_height_base = 32
+            b.setMinimumHeight(self.theme_manager.styles._px(b._min_height_base))
             b.setStyleSheet(self.theme_manager.styles.secondary_button_style())
             b.clicked.connect(callback)
             layout.addWidget(b)
-            try:
-                self._quick_dir_buttons.append(b)
-            except Exception:
-                pass
+            self._quick_dir_buttons.append(b)
 
         layout.addStretch(1)
 
@@ -529,7 +532,11 @@ class LaunchPage(BasePage):
         if hasattr(self, "btn_faq"):
             self.btn_faq.setStyleSheet(theme_styles.primary_button_style())
         if hasattr(self, "_quick_dir_buttons"):
+            _px = theme_styles._px
             for btn in self._quick_dir_buttons:
+                base = getattr(btn, "_min_height_base", None)
+                if base is not None:
+                    btn.setMinimumHeight(_px(base))
                 btn.setStyleSheet(theme_styles.secondary_button_style())
 
         # 更新按钮样式

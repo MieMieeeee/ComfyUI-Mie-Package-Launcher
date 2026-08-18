@@ -523,10 +523,11 @@ class LaunchControlsSection(QtWidgets.QWidget):
         form_layout.addWidget(env_edit, 3, 3)
 
         # DPI 相关尺寸：DPI 变化时需重算（见 _reapply_dpi_sizes / update_theme）。
+        # 元素：(widget, setter_name, base_int_or_tuple)；setter_name 为原生 Qt setter（getattr 分发）。
         self._dpi_sized_widgets = [
-            (self._port_edit, "fixed", 60),
-            (self._gpu_combo, "min", 220),
-            (self._cpath_btn, "fixed", 32),
+            (self._port_edit, "setFixedWidth", 60),
+            (self._gpu_combo, "setMinimumWidth", 220),
+            (self._cpath_btn, "setFixedWidth", 32),
         ]
 
     def _get_label_color(self):
@@ -578,6 +579,12 @@ class LaunchControlsSection(QtWidgets.QWidget):
         QGroupBox 边缘外的「黑条」且切回原 DPI 也无法恢复。重建 effect 能
         强制缓存按当前 DPR 重新分配，消除残影。
         """
+        try:
+            from core.render_guard import is_safe_ui as _is_safe_ui
+            if _is_safe_ui():
+                return
+        except Exception:
+            pass
         fg = getattr(self, "_form_group", None)
         if fg is None:
             return
@@ -593,12 +600,14 @@ class LaunchControlsSection(QtWidgets.QWidget):
 
     def _reapply_dpi_sizes(self):
         """重算所有用 _px() 设定的 DPI 相关尺寸（DPI 变化时调用）。"""
-        for w, kind, base in getattr(self, "_dpi_sized_widgets", []):
+        _px = self._px
+        for w, setter_name, base in getattr(self, "_dpi_sized_widgets", []):
             try:
-                if kind == "min":
-                    w.setMinimumWidth(self._px(base))
-                elif kind == "fixed":
-                    w.setFixedWidth(self._px(base))
+                setter = getattr(w, setter_name)
+                if isinstance(base, tuple):
+                    setter(_px(base[0]), _px(base[1]))
+                else:
+                    setter(_px(base))
             except Exception:
                 pass
 

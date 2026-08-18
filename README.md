@@ -502,8 +502,31 @@ pytest --cov=. --cov-report=html
 - `build_parameters.json` 自动 bump 时间戳；`version_preferences` 在 config.json 里调。
 
 </details>
-
+</parameters>
 <a id="faq-9"></a>
+<details>
+<summary><strong>启动器 GUI 闪退（混合显卡 / 核显驱动崩溃）</strong></summary>
+
+- **表现**：启动器界面闪一下就消失，主窗口没显示出来；或启动后点击某些按钮/切换页面时闪退。常见于笔记本 **混合显卡（Intel 核显 + NVIDIA/AMD 独显）**、驱动版本较老的场景（Qt5 OpenGL paint 触发核显驱动 native 崩溃，Python 层没有任何 traceback）。
+- **自动恢复机制（v1.1.0+）**：连续闪退 1~2 次后启动器会**自动进入可用模式**：
+  - 第 1 次闪退 → 下次启动自动切到 **「兼容模式」**（软件渲染 `QT_OPENGL=software`，视觉几乎无感，跳过 GPU 驱动路径）。
+  - 兼容模式下还闪退 → 再下次启动自动切到 **「安全模式」**（软件渲染 + 关闭全部圆角阴影特效 + 弹窗回退到系统原生标题栏，彻底避开崩溃的 OpenGL paint 路径）。
+  - 切换为安全模式启动后会弹出提示，告诉你已经自动降级；想手动改回去可以去 **系统设置 → 界面渲染模式** 下拉选「自动」并重启启动器。
+- **反馈时附两个文件**（否则无法定位）：
+  1. `launcher/crash.log` — 记录原生崩溃（faulthandler + Python excepthook）。注意如果是**纯驱动闪退**，这里会没有 Python 栈（只含启动头 + render mode 行），这也是证据。
+  2. `launcher/launcher.log` — 启动器自身的业务日志。
+- **Windows 图形设置建议（根本解决）**：
+  1. 按 `Win + I` 打开设置 → 系统 → 显示 → 「图形」（或「图形设置」）。
+  2. 「浏览」选中 `ComfyUI启动器.exe` → 选项 → **高性能（NVIDIA/AMD 独显）** → 保存。避免默认走核显驱动的崩溃路径。
+  3. 如果仍然闪退，把启动器所在的 python.exe（嵌入式环境或 `.venv\Scripts\python.exe`）同样加到图形设置里指定独显。
+- **手动复位渲染模式**：自动切到兼容/安全后想立刻回到自动模式，去 **系统设置 → 界面渲染模式** 下拉选「自动」→ 点「应用」→ 重启启动器。或手动：
+  1. 退出启动器；
+  2. 打开 `launcher/config.json` → 找到 `ui_settings.render_mode`，改为 `"auto"`；
+  3. 删掉同目录下的 `launcher/render_state.json`（如果存在）。
+
+</details>
+
+<a id="faq-10"></a>
 <details>
 <summary><strong>模型库放在外置硬盘上怎么接进来</strong></summary>
 

@@ -261,28 +261,51 @@ class SplashScreen(QtWidgets.QWidget):
 
     def __init__(self):
         super().__init__()
-        self.setWindowFlags(
-            QtCore.Qt.FramelessWindowHint |
-            QtCore.Qt.WindowStaysOnTopHint |
-            QtCore.Qt.Tool
-        )
-        self.setAttribute(QtCore.Qt.WA_TranslucentBackground)
+        # Safe-UI 下用原生标题栏（不设 FramelessWindowHint + 不透明背景），
+        # 避免 WA_TranslucentBackground 在部分核显驱动上闪退。
+        import core.render_guard as _rg
+        self._safe_ui = _rg.is_safe_ui()
+
+        if self._safe_ui:
+            self.setWindowFlags(
+                QtCore.Qt.WindowStaysOnTopHint |
+                QtCore.Qt.Tool
+            )
+        else:
+            self.setWindowFlags(
+                QtCore.Qt.FramelessWindowHint |
+                QtCore.Qt.WindowStaysOnTopHint |
+                QtCore.Qt.Tool
+            )
+            self.setAttribute(QtCore.Qt.WA_TranslucentBackground)
         self.setFixedSize(280, 160)
 
         # 主容器
         container = QtWidgets.QFrame(self)
         container.setObjectName("splashContainer")
         container.setGeometry(0, 0, 280, 160)
-        container.setStyleSheet("""
-            QFrame#splashContainer {
-                background-color: #1F2937;
-                border: 1px solid #374151;
-                border-radius: 12px;
-            }
-            QLabel {
-                background: transparent;
-            }
-        """)
+        if self._safe_ui:
+            container.setStyleSheet("""
+                QFrame#splashContainer {
+                    background-color: #1F2937;
+                    border: 1px solid #374151;
+                    border-radius: 0px;
+                }
+                QLabel {
+                    background: transparent;
+                }
+            """)
+        else:
+            container.setStyleSheet("""
+                QFrame#splashContainer {
+                    background-color: #1F2937;
+                    border: 1px solid #374151;
+                    border-radius: 12px;
+                }
+                QLabel {
+                    background: transparent;
+                }
+            """)
 
         layout = QtWidgets.QVBoxLayout(container)
         layout.setContentsMargins(20, 25, 20, 20)
@@ -345,13 +368,27 @@ class SplashScreen(QtWidgets.QWidget):
 # 你的原 import 继续
 from utils.common import SingletonLock
 from ui_qt.qt_app import PyQtLauncher
+from utils.logging import install_crash_reporting
+import core.render_guard as render_guard
 
 def launch_gui():
     """Launch the GUI application."""
+    # 最早：崩溃留痕（包括锁竞争失败路径也要管）
+    install_crash_reporting()
+
     lock = SingletonLock("comfyui_launcher_pyqt.lock")
     if not lock.acquire():
+        # 单实例弹窗之前先让 safe-UI env 生效（弹窗继承 FramelessDraggableDialog，
+        # 其 init 中会读 render_guard.is_safe_ui()）
+        render_guard.prepare()
         _show_single_instance_dialog()
         sys.exit(0)
+
+    # 拿到互斥：读 state + 可能升级 + 写 running 标记。
+    # 必须在 _configure_qt_highdpi() 之前（QT_OPENGL 要在 Qt 初始化前设好）。
+    # **不包在 try 块里**：让源码 AST 里 begin 和 highdpi 是两条独立顶层 stmt，
+    # 避免被单 try 合并后 AST stmt 索引重合导致顺序判断失效（功能不变）。
+    render_guard.begin()
 
     try:
         # 设置高分屏支持（必须在 QApplication 创建之前）
@@ -372,6 +409,10 @@ def launch_gui():
         # 关闭启动画面并显示主窗口
         splash.close()
         window.run()
+
+        # 仅在 run() 正常返回后：清标记 / 写 clean 哨兵。
+        # 放 try 内、finally 之外：构造抛异常时不调用，保留升级信号。
+        render_guard.finish()
 
     finally:
         lock.release()

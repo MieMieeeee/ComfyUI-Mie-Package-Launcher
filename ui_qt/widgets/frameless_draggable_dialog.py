@@ -30,15 +30,30 @@ class FramelessDraggableDialog(QtWidgets.QDialog):
         window_type: QtCore.Qt.WindowType = QtCore.Qt.Dialog,
     ):
         super().__init__(parent)
-        # window_type | frameless | on-top covers all 3 subclasses.
-        self.setWindowFlags(
-            window_type
-            | QtCore.Qt.FramelessWindowHint
-            | QtCore.Qt.WindowStaysOnTopHint
-        )
-        # Translucent background lets the rounded border on the
-        # inner QFrame show through.
-        self.setAttribute(QtCore.Qt.WA_TranslucentBackground)
+        # Safe-UI 下退回到系统原生标题栏，不走 WA_TranslucentBackground，
+        # 避免部分核显驱动上驱动闪退。拖拽 handlers 保留但此时因标题栏接管
+        # 鼠标，不生效（无害）。
+        try:
+            from core.render_guard import is_safe_ui as _is_safe_ui
+            self._safe_ui = _is_safe_ui()
+        except Exception:
+            self._safe_ui = False
+
+        if self._safe_ui:
+            self.setWindowFlags(
+                window_type
+                | QtCore.Qt.WindowStaysOnTopHint
+            )
+        else:
+            # window_type | frameless | on-top covers all 3 subclasses.
+            self.setWindowFlags(
+                window_type
+                | QtCore.Qt.FramelessWindowHint
+                | QtCore.Qt.WindowStaysOnTopHint
+            )
+            # Translucent background lets the rounded border on the
+            # inner QFrame show through.
+            self.setAttribute(QtCore.Qt.WA_TranslucentBackground)
         self.setModal(modal)
         # 拖拽状态。press 时记录 globalPos - frameTopLeft,
         # move 时按差值平移, release 时清空。

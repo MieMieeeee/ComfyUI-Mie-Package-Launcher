@@ -245,3 +245,257 @@ def resolve_active_paths_for_webui(config: Dict[str, Any], env_id: str | None = 
     except Exception:
         pass
     return out
+
+
+# ---------------------------------------------------------------------------
+# 窗口几何记忆：字段归一化 / 启动恢复 / 关闭保存
+# ---------------------------------------------------------------------------
+# 新 schema（归一化后）:
+#   ui_settings.window_w: int | None        # base 宽度（ui_scale=1.0 时的基准尺寸）
+#   ui_settings.window_h: int | None        # base 高度
+#   ui_settings.window_x: int | None        # 屏幕坐标 x（MVP A 方案未使用，仅字段占坑供未来 B 方案用）
+#   ui_settings.window_y: int | None        # 屏幕坐标 y（同上）
+#   ui_settings.window_state: "normal" | "maximized" | None
+#
+# 老字段（迁移后不再读写）：
+#   ui_settings.window_width / window_height（数字）
+#   ui_settings.window_size（"WxH" 字符串）
+# ---------------------------------------------------------------------------
+
+def migrate_window_geometry_fields(config: Dict[str, Any]) -> bool:
+    """把老的 window 字段迁移到归一化新 schema。
+
+    规则（按优先级，第一条命中即取）：
+      1. 新字段 window_w/window_h 已有其一（有效的 int>0）→ 视为已迁移：补齐剩余缺的占坑字段为 None，返回 False（幂等）。
+         ⚠️ 附加一次性清理：老 default_config 2 年前死值 window_width=800/window_height=600 以及
+         衍生出的 base<960×640 的脏值，**在迁移阶段一次性置 None 回退默认**，
+         不让「小于合理值」逻辑污染运行时启动路径（启动时任何 >=MIN_BASE 的 base 都视为用户自定义，不再静默重置）。
+      2. 老数字字段 window_width + window_height 有 → 写入 window_w/window_h。
+      3. 老字符串字段 window_size "WxH" 有 → 解析后写入。
+      4. 都没有 → 补齐 window_w/h/x/y/state = None，返回 True 表示改过（因为加了新字段）。
+
+    返回 ``True`` 表示本次调用产生了需要落盘的实质迁移改动（caller 负责 save_config）。
+    """
+    ui = config.setdefault("ui_settings", {})
+
+    # 一次性 guard：迁移前就已存在新字段但值是老脏值（800×600 派生）的，直接置 None 回退。
+    # （migrate 有「一次性」语义，适合干这件事；启动 resolve 阶段不应再管 <1200×820 的合法中等尺寸。）
+    def _tiny_base(v):
+        return isinstance(v, int) and v > 0 and v < 960
+    def _tiny_h(v):
+        return isinstance(v, int) and v > 0 and v < 640
+
+    # 1) 先判定是否已迁移：w/h 有效
+    def _has_valid_int(k):
+        v = ui.get(k)
+        return isinstance(v, int) and v > 0
+    already = _has_valid_int("window_w") or _has_valid_int("window_h")
+    if already:
+        # 已迁移过：缺字段用 setdefault 补齐（不参与 changed 判断）——只有「一次性清掉老 800/600 脏基」时才返回 changed=True。
+        changed = False
+        # 三个占坑字段 x/y/state：缺就补 None（但不用计数 changed，它们不影响实际行为）
+        for k in ("window_x", "window_y", "window_state"):
+            ui.setdefault(k, None)
+        # window_w/h 已存在且已 valid → 不用 setdefault
+        # 一次性清「老 default 死值」：命中 (w<960 且 h<640) → 置 None 并 changed=True
+        if _tiny_base(ui.get("window_w")) and _tiny_h(ui.get("window_h")):
+            ui["window_w"] = None
+            ui["window_h"] = None
+            ui["window_x"] = None
+            ui["window_y"] = None
+            ui["window_state"] = None
+            changed = True
+        return changed
+
+    changed = False
+
+    # 补齐 5 字段（缺啥补啥为 None）
+    for k in ("window_w", "window_h", "window_x", "window_y", "window_state"):
+        if k not in ui:
+            ui[k] = None
+            changed = True
+
+    # 🚨 一次性 guard（仅在「首次命中已迁移」时执行）：
+    #   新字段存在但其中 w+h 同时 < MIN_BASE 的老 default 脏值 (800/600 派生)
+    #   也一次性清掉。避免已迁移过但被之前老逻辑塞进脏值的 config 被遗忘。
+    # 判定严格化：只有 w<960 且 h<640 同时成立才清理；避免误伤 1200×800 这类合法小尺寸。
+    def _tiny_base2(v):
+        return isinstance(v, int) and v > 0 and v < 960
+    def _tiny_h2(v):
+        return isinstance(v, int) and v > 0 and v < 640
+    if _tiny_base2(ui.get("window_w")) and _tiny_h2(ui.get("window_h")):
+        ui["window_w"] = None
+        ui["window_h"] = None
+        ui["window_x"] = None
+        ui["window_y"] = None
+        ui["window_state"] = None
+        changed = True
+
+    # 2) 老数字字段
+    w_num = ui.get("window_width")
+    h_num = ui.get("window_height")
+    if isinstance(w_num, int) and isinstance(h_num, int) and w_num > 0 and h_num > 0:
+        ui["window_w"] = w_num
+        ui["window_h"] = h_num
+        return True
+
+    # 3) 老字符串字段
+    s = ui.get("window_size")
+    if isinstance(s, str) and "x" in s:
+        try:
+            ws, hs = s.split("x", 1)
+            wi, hi = int(ws), int(hs)
+            if wi > 0 and hi > 0:
+                ui["window_w"] = wi
+                ui["window_h"] = hi
+                return True
+        except (ValueError, TypeError):
+            pass
+
+    # 4) 都没有
+    return changed
+
+
+def resolve_window_geometry_for_startup(
+    config: Dict[str, Any],
+    scale: float,
+    screen_available,
+) -> Dict[str, Any]:
+    """启动时从 config 恢复窗口几何。
+
+    Args:
+        config: 完整 config dict（已跑过 migrate_window_geometry_fields）。
+        scale:  当前 ui_scale（由 resolve_ui_scale 算出）。
+        screen_available: 四元组 ``(x, y, w, h)`` 表示当前主屏可用区域。
+
+    Returns:
+        dict:
+          - w / h: 像素尺寸（可能被 clip 过，≥ min 960x640 base → pixel 也要 min）
+          - state: "normal" | "maximized"
+          - position: "center"（MVP A 方案永远居中）| {"x": int, "y": int}（B 方案未来扩展）
+    """
+    ui = config.get("ui_settings") or {}
+    base_w = ui.get("window_w")
+    base_h = ui.get("window_h")
+    state = ui.get("window_state") or "normal"
+    if state not in ("normal", "maximized"):
+        state = "normal"
+
+    # 最小允许 base 尺寸（跟 qt_app 里 setMinimumSize(_sp(960), _sp(640)) 的 base 对齐）
+    MIN_BASE_W = 960
+    MIN_BASE_H = 640
+    # 🚨 老 default_config 800×600 这类「比 MIN_BASE 还小的脏基」直接回默认 1350×900。
+    #    阈值严格等于 MIN_BASE：
+    #    * 800×600 / 800×700 → w<960 且 h<640 → 视为异常小 → 1350×900（底部不会被切）
+    #    * 960×640 / 1100×760 / 1200×820 → 都 ≥ 一边，视为用户合法中等尺寸，保留（不回默认）
+    #    这对应设置页允许填 800~1200 的中等尺寸，记忆一致。
+    DEFAULT_BASE_W, DEFAULT_BASE_H = 1350, 900
+
+    if isinstance(base_w, int) and isinstance(base_h, int) and base_w > 0 and base_h > 0:
+        if base_w < MIN_BASE_W and base_h < MIN_BASE_H:
+            # 异常小：比 MIN_BASE 两边都小，肯定是脏值，直接回默认
+            bw, bh = DEFAULT_BASE_W, DEFAULT_BASE_H
+        else:
+            bw = max(MIN_BASE_W, base_w)
+            bh = max(MIN_BASE_H, base_h)
+    else:
+        bw, bh = DEFAULT_BASE_W, DEFAULT_BASE_H
+
+    # base → pixel（MVP A 方案：存 base 启动 × scale）
+    pw = round(bw * scale)
+    ph = round(bh * scale)
+
+    # clip 到屏幕可用区域 - 边框余量（跟 qt_app 现有逻辑对齐：-40/-80）
+    sx, sy, sw, sh = screen_available
+    max_w = max(MIN_BASE_W * scale, sw - 40)
+    max_h = max(MIN_BASE_H * scale, sh - 80)
+    pw = int(max(round(MIN_BASE_W * scale), min(pw, max_w)))
+    ph = int(max(round(MIN_BASE_H * scale), min(ph, max_h)))
+
+    # centering（MVP A 永远居中，不存 x/y；下次启动再 center 防止分辨率变时跑屏幕外）
+    cx = sx + max(0, int((sw - pw) // 2))
+    cy = sy + max(0, int((sh - ph) // 2))
+    return {
+        "w": pw,
+        "h": ph,
+        "state": state,
+        "x": cx,
+        "y": cy,
+        "position": "center",  # 向后兼容：旧断言 position="center" 的字符串
+        "position_xy": {"x": cx, "y": cy},  # MVP B 方案未来直接用的精确坐标
+    }
+
+
+def persist_window_geometry(
+    config: Dict[str, Any],
+    pixel_w: int,
+    pixel_h: int,
+    normal_pixel_w,
+    normal_pixel_h,
+    maximized: bool,
+    scale: float,
+) -> None:
+    """关闭时把窗口几何写回 config（只改内存，caller 负责 save_config 落盘）。
+
+    Args:
+        pixel_w / pixel_h: 当前窗口像素尺寸（最大化时不可信）。
+        normal_pixel_w / normal_pixel_h: 最大化前的 normal 态像素（或 qt normalGeometry
+            返回的尺寸）。最大化态必须传这两个，否则会把全屏尺寸写入 base。
+            未最大化时传 None 即可，内部会回退使用 pixel_w / pixel_h。
+        maximized: 是否处于最大化。
+        scale: 当前 ui_scale（用于 pixel → base 的换算除数）。
+    """
+    ui = config.setdefault("ui_settings", {})
+    # 先确保 5 字段存在（补齐 None），方便 caller 下次直接读
+    for k in ("window_w", "window_h", "window_x", "window_y"):
+        ui.setdefault(k, None)
+
+    if maximized:
+        # 最大化时：存 normal 态的 base，state=maximized
+        pw = normal_pixel_w if (isinstance(normal_pixel_w, int) and normal_pixel_w > 0) else pixel_w
+        ph = normal_pixel_h if (isinstance(normal_pixel_h, int) and normal_pixel_h > 0) else pixel_h
+        ui["window_state"] = "maximized"
+    else:
+        pw, ph = pixel_w, pixel_h
+        ui["window_state"] = "normal"
+
+    if isinstance(scale, (int, float)) and scale > 0 and isinstance(pw, int) and isinstance(ph, int):
+        # 用 round 对称：与 resolve_window_geometry_for_startup 的 round(base*scale) 尽量互逆
+        ui["window_w"] = max(960, round(pw / scale))
+        ui["window_h"] = max(640, round(ph / scale))
+    else:
+        # 防御：scale 异常时至少记 pixel 值当成 base（不抛出）
+        ui["window_w"] = pw
+        ui["window_h"] = ph
+
+
+def reset_ui_size_defaults(config: Dict[str, Any]) -> bool:
+    """恢复界面大小默认值：ui_scale → 自动跟随 DPI，窗口几何记忆 → 走 1350×900 默认基准。
+
+    - ui_settings.ui_scale = None（自动跟随 DPI，不再锁定）
+    - ui_settings.{window_w, window_h, window_x, window_y, window_state} = None
+      （下次启动由 resolve_window_geometry_for_startup 回退默认基准，并居中）
+
+    其他字段（主题、托盘、代理偏好等）原样保留。
+
+    Returns:
+        bool: True 表示有字段被改，caller 负责 save_config 落盘。
+    """
+    ui = config.setdefault("ui_settings", {})
+    changed = False
+
+    target_none = {
+        "ui_scale": None,
+        "window_w": None,
+        "window_h": None,
+        "window_x": None,
+        "window_y": None,
+        "window_state": None,
+    }
+    for k, want in target_none.items():
+        current = ui.get(k, "__missing__")
+        if current != want:
+            ui[k] = want
+            changed = True
+    return changed
+

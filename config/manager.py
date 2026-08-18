@@ -10,7 +10,7 @@ import tempfile
 from pathlib import Path
 from typing import Dict, Any, Optional
 
-from config.migrations import migrate_environments
+from config.migrations import migrate_environments, migrate_window_geometry_fields
 
 
 def atomic_write_json(config_file: Path, data: Dict[str, Any]) -> None:
@@ -72,17 +72,17 @@ class ConfigManager:
                 "gpu_device": -1,
             },
             "ui_settings": {
-                "window_width": 800,
-                "window_height": 600,
                 "theme": "default",
                 "font_size": 9,
                 "log_max_lines": 1000,
                 "minimize_to_tray_on_close": False,
                 "minimize_to_tray_ask_every_time": True,
-                "window_size": "500x680",
                 # UI 缩放：None=自动跟随屏幕 DPI；设为 0.75~1.25 内的值则锁定。
                 # 由 core.ui_scaling.resolve_ui_scale() 解析。
                 "ui_scale": None,
+                # 界面渲染模式（v1.? 三态：auto（默认/硬件）/ compat（软件渲染） /
+                # safe（无特效+软件）。见 core.render_guard 解析。）
+                "render_mode": "auto",
             },
             "paths": {
                 "comfyui_root": ".",
@@ -177,6 +177,19 @@ class ConfigManager:
                     ui.setdefault("minimize_to_tray_ask_every_time", True)
                     # UI 缩放字段：老配置补 None（=自动跟随 DPI）。
                     ui.setdefault("ui_scale", None)
+                    # 界面渲染模式：老配置补 auto + 非法值归一
+                    _valid_render_modes = {"auto", "compat", "safe"}
+                    ui.setdefault("render_mode", "auto")
+                    if ui.get("render_mode") not in _valid_render_modes:
+                        ui["render_mode"] = "auto"
+                    # 窗口几何记忆：归一化 5 字段补 None（MVP A 仅用 w/h/state，x/y 占坑）。
+                    for k in ("window_w", "window_h", "window_x", "window_y", "window_state"):
+                        ui.setdefault(k, None)
+                    # 老 window_width/window_height + window_size → 归一化新 schema（幂等）。
+                    try:
+                        migrate_window_geometry_fields(self.config)
+                    except Exception:
+                        pass
                     # 整合包更新段（v1.1.0）：老配置补默认段，读取处 .get() 兜底。
                     pu = self.config.setdefault("package_update", {})
                     pu.setdefault("respect_frozen_pkgs", True)

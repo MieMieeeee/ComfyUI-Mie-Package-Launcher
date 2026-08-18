@@ -43,6 +43,55 @@ RELEASE_DOC_FILES = [
 ]
 
 
+def _locate_opengl32sw_dll():
+    """搜索当前 Python 环境 PyQt5 wheel 内的 opengl32sw.dll。
+
+    Windows DLL 搜索顺序：exe 同级目录 > PATH。把它放 exe 旁即可让
+    QT_OPENGL=software 生效，无需 Enigma 虚拟化 / 注册表。
+
+    Returns
+    -------
+    str | None
+        DLL 真实路径；找不到返回 None，构建尾部会告警。
+    """
+    try:
+        import importlib.util
+        spec = importlib.util.find_spec("PyQt5")
+        if spec is None or not getattr(spec, "origin", None):
+            return None
+        pkg_root = os.path.dirname(os.path.abspath(spec.origin))
+        sub_dirs = [
+            os.path.join(pkg_root, "Qt5", "bin"),
+            os.path.join(pkg_root, "Qt", "bin"),
+        ]
+        for sd in sub_dirs:
+            cand = os.path.join(sd, "opengl32sw.dll")
+            if os.path.isfile(cand):
+                return cand
+    except Exception:
+        pass
+    return None
+
+
+def _copy_opengl32sw_to(target_dir):
+    """把 opengl32sw.dll 拷到 target_dir（dist / release 子目录）；找不到返回 False。"""
+    src = _locate_opengl32sw_dll()
+    if src is None:
+        return False
+    try:
+        if not os.path.isdir(target_dir):
+            os.makedirs(target_dir, exist_ok=True)
+        dst = os.path.join(target_dir, "opengl32sw.dll")
+        if os.path.abspath(src) == os.path.abspath(dst):
+            return True
+        shutil.copy2(src, dst)
+        if os.path.isfile(dst):
+            return True
+    except Exception:
+        return False
+    return False
+
+
 def parse_args():
     parser = argparse.ArgumentParser(description='ComfyUI启动器 一键构建脚本')
     parser.add_argument('--version', type=str, default=None,
@@ -326,6 +375,14 @@ def step_nuitka_compile(is_test):
             print(f"[输出] 目录: {dist_dir}")
             print(f"[输出] EXE: {exe_path}")
             print(f"[体积] 总计: {size_mb:.1f} MB")
+
+            # 复制 opengl32sw.dll 到 dist（exe 旁）—— Windows 搜索顺序里 exe 同级最高优先
+            dll_ok = _copy_opengl32sw_to(dist_dir)
+            if dll_ok:
+                print("[渲染] opengl32sw.dll 已复制到 dist（软件渲染 fallback 就绪）")
+            else:
+                print("[警告] 未找到 opengl32sw.dll（跳过；compat/safe 模式将缺 DLL）")
+
             print(f"\n[下一步] 使用 Enigma Virtual Box 打包 {output_name}.dist 目录")
             print(f"[提示] 内部 exe 已命名为 {internal_name}.exe，避免与外层同名冲突")
             print(f"[提示] Enigma 打包后的外层 exe 可以安全命名为 ComfyUI启动器.exe")
@@ -470,6 +527,13 @@ def step_finalize_release(boxed_exe, version, is_test):
     # 3) 操作文档（让 agent / 用户拿到 release 包就能读到 CLI 介绍）
     step_copy_release_docs(sub_dir, project_dir)
 
+    # 4) opengl32sw.dll：box exe 旁，与 ComfyUI启动器.exe 同子目录
+    release_dll_ok = _copy_opengl32sw_to(sub_dir)
+    if release_dll_ok:
+        print(f"[渲染] opengl32sw.dll 已复制到发布目录: {sub_dir}")
+    else:
+        print("[警告] 未复制 opengl32sw.dll 到发布目录（跳过；compat/safe 模式将缺 DLL）")
+
     return sub_dir
 
 
@@ -567,6 +631,20 @@ def main():
     print(f"  通道:      {channel}")
     print(f"  输出目录:  {os.path.relpath(final_path, project_dir)}")
     print(f"  目录大小:  {size_mb:.1f} MB")
+
+    # 构建尾部 sanity：确认发布子目录里 opengl32sw.dll / wrapper / build_parameters 就位
+    release_dll = os.path.join(final_path, "opengl32sw.dll")
+    release_wrapper = os.path.join(final_path, CLI_WRAPPER_NAME)
+    if os.path.isfile(release_dll):
+        release_dll_size_kb = os.path.getsize(release_dll) / 1024
+        print(f"  [渲染 DLL] opengl32sw.dll 就位，{release_dll_size_kb:.0f} KB")
+    else:
+        print("  [渲染 DLL] 缺 opengl32sw.dll（compat/safe 模式 fallback 不生效）")
+    if os.path.isfile(release_wrapper):
+        print(f"  [CLI Wrapper] {CLI_WRAPPER_NAME} 就位")
+    else:
+        print(f"  [CLI Wrapper] 缺 {CLI_WRAPPER_NAME}")
+
     print(f"  耗时:      {format_duration(elapsed)}")
     print("=" * 60)
 

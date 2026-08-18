@@ -40,17 +40,17 @@ def _column_geometry(width, px):
     width: item/content 区域可用宽度（已扣除 list padding/border）。
     px: theme_styles._px 缩放函数。
     列顺序（左→右）：复选框 | 图标+名称 | 可更新 | 版本 | 远端日期 | 类型 | 状态。
-    名称列吃掉中间剩余空间（update_col_x 左边界即名称列右边界）。
+    2026-08-18 升级：各列宽度整体放大一码，避免长 hash / 日期 / 徽章挤在一起。
     """
-    right_margin = px(14)
-    status_w = px(58)    # 状态列：启用/禁用 胶囊
-    type_w = px(48)      # 类型列：Git/CNR/本地
-    local_w = px(92)     # 版本（pyproject 版本号 / git hash）
-    remote_w = px(92)    # 远端日期
-    update_w = px(72)    # 可更新徽章列（仅 outdated 显示徽章，否则空）
-    cb_x, cb_w = px(10), px(16)
-    icon_x, icon_w = px(38), px(22)
-    name_x = icon_x + icon_w + px(2)
+    right_margin = px(16)
+    status_w = px(64)    # 状态列：启用/禁用 胶囊（54 宽 + 10 边距余留）
+    type_w = px(56)      # 类型列：Git/CNR/本地
+    local_w = px(110)    # 版本（pyproject 版本号 / git hash 短）
+    remote_w = px(110)   # 远端日期（YYYY-MM-DD 10 字 + 余留）
+    update_w = px(82)    # 可更新徽章列（"有更新"3 字 + 药丸 padding）
+    cb_x, cb_w = px(12), px(16)
+    icon_x, icon_w = px(42), px(24)
+    name_x = icon_x + icon_w + px(4)
     # 右侧五列从右往左排：status | type | remote | local(version) | update
     status_x = width - right_margin - status_w
     type_x = status_x - type_w
@@ -156,20 +156,36 @@ class PluginItemDelegate(QtWidgets.QStyledItemDelegate):
         selected = bool(option.state & QtWidgets.QStyle.State_Selected)
         hover = bool(option.state & QtWidgets.QStyle.State_MouseOver)
 
-        # ---- 1. 行背景 ----
+        # ---- 1. 行背景（轻微卡片质感：每两行一组，极淡交替底色，避免整屏密集时失焦）----
+        dark_mode = bool(c.get("dark", True))
         if selected:
-            painter.fillRect(rect, QtGui.QColor(127, 86, 217, 64))  # ≈0.25 alpha 柔和紫底
+            painter.fillRect(rect, QtGui.QColor(127, 86, 217, 55))  # ≈0.215 alpha 柔和紫底
         elif hover:
-            painter.fillRect(rect, QtGui.QColor(c.get("group_bg", "rgba(0,0,0,0.2)")))
+            painter.fillRect(rect, QtGui.QColor(c.get("group_bg", "rgba(0,0,0,0.25)")))
+        elif index.row() % 2 == 1:
+            # 奇数行（第 2/4/6...行）给极浅一点底（<5% alpha），做斑马纹分区，但保持极简
+            if dark_mode:
+                painter.fillRect(rect, QtGui.QColor(255, 255, 255, 8))
+            else:
+                painter.fillRect(rect, QtGui.QColor(0, 0, 0, 8))
 
         if selected:  # 左侧 3px 紫色指示条
             bar = c.get("btn_primary_bg", "#7F56D9")
-            painter.fillRect(QtCore.QRect(rect.left(), rect.top(), self._px(3), rect.height()),
+            painter.fillRect(QtCore.QRect(rect.left() + self._px(1), rect.top() + self._px(6),
+                                          self._px(3), rect.height() - self._px(12)),
                              QtGui.QColor(bar))
-        elif not selected:  # 底部极弱分割线
-            div = QtGui.QColor(255, 255, 255, 13) if c.get("dark") else QtGui.QColor(0, 0, 0, 13)
-            painter.fillRect(QtCore.QRect(rect.left(), rect.bottom() - self._px(1),
-                                          rect.width(), self._px(1)), div)
+        # 不选中小行才画底部分割线，选中行用左边紫条 + 整块紫底，视觉权重更高，不需要分割线打断
+        if not selected:
+            div = QtGui.QColor(255, 255, 255, 16) if dark_mode else QtGui.QColor(0, 0, 0, 18)
+            painter.fillRect(
+                QtCore.QRect(
+                    rect.left() + self._px(16),
+                    rect.bottom() - self._px(1),
+                    max(0, rect.width() - self._px(32)),
+                    self._px(1),
+                ),
+                div,
+            )
 
         # ---- 2. 读数据 ----
         plugin = index.data(QtCore.Qt.UserRole) or {}
@@ -199,17 +215,36 @@ class PluginItemDelegate(QtWidgets.QStyledItemDelegate):
                                        else QtWidgets.QStyle.State_Off)
         style.drawPrimitive(QtWidgets.QStyle.PE_IndicatorCheckBox, opt_cb, painter, option.widget)
 
-        # ---- 4. 🧩 图标（紧跟复选框）----
+        # ---- 4. 🧩 图标（紧跟复选框）。不使用 emoji 渲染（不同平台 emoji 字重不一、抗锯齿差），
+        # 改成 QPainter 画的纯色「方块+小十字」图标，在深/浅主题上都统一。
         icon_x = rect.left() + g["icon_x"]
-        painter.setFont(_font("icon", self._pt(11)))
-        painter.setPen(QtGui.QColor(c.get("label_muted", "#9CA3AF")))
-        painter.drawText(QtCore.QRect(icon_x, rect.top(), g["icon_w"], rect.height()),
-                         QtCore.Qt.AlignCenter, "🧩")
+        icon_cy = rect.center().y()
+        icon_w = g["icon_w"]
+        icon_h = self._px(24)
+        icon_cx = icon_x + icon_w // 2
+        # 方块底（圆角 4px）
+        muted_color = QtGui.QColor(c.get("label_muted", "#9CA3AF"))
+        painter.setPen(QtCore.Qt.NoPen)
+        painter.setBrush(muted_color)
+        r = QtCore.QRect(icon_x + icon_w // 2 - self._px(9),
+                         int(icon_cy - self._px(9)),
+                         self._px(18), self._px(18))
+        painter.drawRoundedRect(r, self._px(4), self._px(4))
+        # 十字凹口（让方块看起来像「插件/拼图块」）—— 挖掉上/下/左/右四个小方块的中心小块？
+        # 简化方案：方块上叠加一个透明圆形凹口 = 画一个 6px 的小圆，用背景色盖住（因为背景色透明无法 cover，
+        # 改用在方块四角画 4 个小圆点，像拼图凸块，视觉含义等同"插件"）
+        painter.setBrush(QtGui.QColor(c.get("input_bg", "#111827")))
+        dot_r = self._px(2)
+        # 四个凸点：上下左右中心
+        painter.drawEllipse(QtCore.QPoint(icon_cx, r.top() - 1), dot_r, dot_r)
+        painter.drawEllipse(QtCore.QPoint(icon_cx, r.bottom() + 1), dot_r, dot_r)
+        painter.drawEllipse(QtCore.QPoint(r.left() - 1, icon_cy), dot_r, dot_r)
+        painter.drawEllipse(QtCore.QPoint(r.right() + 1, icon_cy), dot_r, dot_r)
 
         # ---- 5. 名称（粗体；禁用态灰。「可更新」标记移到独立列，名称区不加前缀）----
         name_x = rect.left() + g["name_x"]
         name_right = rect.left() + g["name_right"]
-        name_font = _font("name", self._pt(10), True)
+        name_font = _font("name", self._pt(10.5), True)
         painter.setFont(name_font)
         if not enabled:
             painter.setPen(QtGui.QColor(c.get("label_dim", "#6B7280")))
@@ -254,9 +289,13 @@ class PluginItemDelegate(QtWidgets.QStyledItemDelegate):
             painter.setPen(QtGui.QColor(dim))
             painter.drawText(update_rect, QtCore.Qt.AlignVCenter | QtCore.Qt.AlignCenter, "无法检查")
         else:
-            # 未检查（点检查更新前）
+            # 未检查（点检查更新前）：用淡药丸状半透明背景 + "未检查"提示，
+            # 代替原来的 "—" 单字，让用户知道这列是"还没查"不是"没有更新"。
+            painter.setBrush(QtGui.QColor(107, 114, 128, 32))
+            painter.setPen(QtCore.Qt.NoPen)
+            painter.drawRoundedRect(pill, pill_h // 2, pill_h // 2)
             painter.setPen(QtGui.QColor(dim))
-            painter.drawText(update_rect, QtCore.Qt.AlignVCenter | QtCore.Qt.AlignCenter, "—")
+            painter.drawText(pill, QtCore.Qt.AlignCenter, "未检查")
 
         # ---- 7. 版本列（优先 pyproject 版本号；无则 git 日期；都没有 —）----
         painter.setFont(_font("small", self._pt(8)))
@@ -331,7 +370,8 @@ class PluginItemDelegate(QtWidgets.QStyledItemDelegate):
         painter.restore()
 
     def sizeHint(self, option, index):
-        return QtCore.QSize(0, self.theme_manager.styles._px(42))
+        # 48 → 52：行高加大一码，每行多 4px，name 粗体 + emoji 上下有呼吸
+        return QtCore.QSize(0, self.theme_manager.styles._px(52))
 
     def editorEvent(self, event, model, option, index):
         """自绘 checkbox 后，点击→toggle 完全由本 delegate 接管。
@@ -419,11 +459,11 @@ class _PluginListHeader(QtWidgets.QWidget):
         c = getattr(self.theme_manager, "colors", {}) if self.theme_manager else {}
         px = self._px
         return (f"_PluginListHeader {{"
-                f" background-color: {c.get('group_bg', 'rgba(0,0,0,0.2)')};"
-                f" border: 1px solid {c.get('input_border', '#4B5563')};"
-                f" border-bottom: 1px solid {c.get('divider', '#374151')};"
-                f" border-top-left-radius: {px(6)}px;"
-                f" border-top-right-radius: {px(6)}px;"
+                f" background-color: {c.get('group_bg', 'rgba(0,0,0,0.25)')};"
+                f" border: none;"
+                f" border-bottom: 1px solid {c.get('input_border', '#4B5563')};"
+                f" border-top-left-radius: {px(11)}px;"
+                f" border-top-right-radius: {px(11)}px;"
                 f"}}")
 
     def update_theme(self, _theme_styles=None):
@@ -433,10 +473,10 @@ class _PluginListHeader(QtWidgets.QWidget):
         except Exception:
             pass
         try:
-            self.setFixedHeight(self._px(30))
+            # 30 → 36：表头加高一码，顶部呼吸感更好
+            self.setFixedHeight(self._px(36))
         except Exception:
             pass
-        # paintEvent 内部的 px/pt 每次动态取，不需要刷新缓存；但 repaint 一下保险
         try:
             self.update()
         except Exception:
@@ -508,6 +548,80 @@ class _PluginListHeader(QtWidgets.QWidget):
         draw_label(g["type_x"], g["type_w"], "类型")
         draw_label(g["status_x"], g["status_w"], "状态")
         painter.end()
+
+
+class _StatCard(QtWidgets.QFrame):
+    """状态统计卡片：左侧小圆点 + 右侧大号数字 + 下方语义标签。
+
+    4 张一组：总数 / 可更新 / 已启用 / 已禁用。风格参考 Apple Settings/Arc Sidebar：
+    - 卡片底：比页面背景浅一档半透明磨砂（group_bg）
+    - 圆角 12px，1px border（弱描边）
+    - 数字使用 accent/dot 颜色（每张卡的主题色），粗体大号
+    - 下方 9pt muted 标签，数字和标签纵向间距极小，视觉紧凑但不挤
+    """
+
+    def __init__(self, theme_manager, label: str, dot_color: str, accent_color: str,
+                 parent=None):
+        super().__init__(parent)
+        self.theme_manager = theme_manager
+        self._label_text = label
+        self._dot_color = dot_color
+        self._accent_color = accent_color
+        self.setObjectName("PluginStatCard")
+        self.setAttribute(QtCore.Qt.WA_StyledBackground, True)
+
+        self._px = lambda v: (theme_manager.styles._px(v)
+                              if theme_manager and getattr(theme_manager, "styles", None)
+                              else v)
+        self._pt = lambda v: (theme_manager.styles._pt(v)
+                              if theme_manager and getattr(theme_manager, "styles", None)
+                              else v)
+
+        vl = QtWidgets.QVBoxLayout(self)
+        vl.setContentsMargins(self._px(16), self._px(12), self._px(16), self._px(12))
+        vl.setSpacing(self._px(2))
+
+        # 顶部一行：语义圆点 + 标签（左侧一排小语义，不要占太多视线）
+        top = QtWidgets.QHBoxLayout()
+        top.setSpacing(self._px(8))
+        self._dot = QtWidgets.QFrame()
+        self._dot.setObjectName("PluginStatDot")
+        self._dot.setFixedSize(self._px(8), self._px(8))
+        self._dot.setStyleSheet(
+            f"QFrame#PluginStatDot {{ background-color: {dot_color};"
+            f" border-radius: {self._px(4)}px; }}")
+        self._lbl_label = QtWidgets.QLabel(label)
+        top.addWidget(self._dot)
+        top.addWidget(self._lbl_label)
+        top.addStretch()
+        vl.addLayout(top)
+
+        # 大号数字
+        self._lbl_value = QtWidgets.QLabel("0")
+        vl.addWidget(self._lbl_value)
+
+        self.update_theme()
+        if theme_manager:
+            theme_manager.register_listener(lambda _s: self.update_theme())
+
+    def update_theme(self, _theme_styles=None):
+        c = getattr(self.theme_manager, "colors", {}) if self.theme_manager else {}
+        px, pt = self._px, self._pt
+        self._lbl_label.setStyleSheet(
+            f"color: {c.get('label_muted', '#9CA3AF')};"
+            f" font: {pt(9)}pt 'Microsoft YaHei UI';")
+        self._lbl_value.setStyleSheet(
+            f"color: {self._accent_color};"
+            f" font: bold {pt(18)}pt 'Microsoft YaHei UI';"
+            f" letter-spacing: 0.2px;")
+        self.setStyleSheet(
+            f"QFrame#PluginStatCard {{"
+            f" background-color: {c.get('group_bg', 'rgba(0,0,0,0.2)')};"
+            f" border: 1px solid {c.get('input_border', '#4B5563')};"
+            f" border-radius: {px(12)}px; }}")
+
+    def set_value(self, value: int):
+        self._lbl_value.setText(str(int(value)))
 
 
 class PluginsPage(BasePage):
@@ -599,76 +713,158 @@ class PluginsPage(BasePage):
         s = self.theme_manager.styles if self.theme_manager else None
         _px, _pt = self._px, self._pt
         layout = QtWidgets.QVBoxLayout(self)
-        layout.setContentsMargins(_px(25), _px(25), _px(25), _px(25))
-        layout.setSpacing(_px(12))
+        layout.setContentsMargins(_px(28), _px(24), _px(28), _px(24))
+        layout.setSpacing(_px(16))
 
+        # ---- 1. 标题 + 右上主操作（标题+一排主按钮，左右对齐，Apple 风格）----
+        titlebar = QtWidgets.QHBoxLayout()
+        titlebar.setSpacing(0)
+        # 左：标题 + 副标题
+        title_v = QtWidgets.QVBoxLayout()
+        title_v.setSpacing(_px(2))
+        title_v.setContentsMargins(0, 0, 0, 0)
         title = QtWidgets.QLabel("插件管理")
         title.setStyleSheet(f"""
-            font: bold {_pt(16)}pt "Microsoft YaHei UI";
+            font: bold {_pt(18)}pt "Microsoft YaHei UI";
             color: {c['label']};
-            margin-bottom: {_px(2)}px;
+            letter-spacing: 0.2px;
         """)
         self._title_label = title
-        layout.addWidget(title)
-
-        # 一级按钮区（单行）：刷新(ghost)  安装插件(ghost)  ←stretch→  检查更新(primary) 更新全部(primary)
-        # 三级视觉权重：ghost 弱、primary 强。依赖勾选的操作收纳到下方 ActionBar。
-        toolbar = QtWidgets.QHBoxLayout()
-        toolbar.setSpacing(_px(8))
+        subtitle = QtWidgets.QLabel("已安装 custom_nodes，支持勾选后批量操作")
+        subtitle.setStyleSheet(
+            f"color: {c['label_muted']}; font: {_pt(9)}pt 'Microsoft YaHei UI';"
+        )
+        self._subtitle_label = subtitle
+        title_v.addWidget(title)
+        title_v.addWidget(subtitle)
+        titlebar.addLayout(title_v)
+        titlebar.addStretch()
+        # 右：主操作按钮（按权重排：刷新 · 搜索安装 · URL安装插件 ·  检查更新 · 更新全部）
+        # 前三 = 浅灰 secondary（信息密度低），后二 = accent primary（高权重动作）
+        top_ops = QtWidgets.QHBoxLayout()
+        top_ops.setSpacing(_px(8))
         self.refresh_btn = QtWidgets.QPushButton("刷新列表")
-        self.install_btn = QtWidgets.QPushButton("安装插件")
         self.search_install_btn = QtWidgets.QPushButton("搜索安装")
+        self.install_btn = QtWidgets.QPushButton("URL安装插件")
         self.check_updates_btn = QtWidgets.QPushButton("检查更新")
         self.update_all_btn = QtWidgets.QPushButton("更新全部")
         try:
             self.refresh_btn.setStyleSheet(s.secondary_button_style())
-            self.install_btn.setStyleSheet(s.secondary_button_style())
             self.search_install_btn.setStyleSheet(s.secondary_button_style())
+            self.install_btn.setStyleSheet(s.secondary_button_style())
             self.check_updates_btn.setStyleSheet(s.primary_button_style())
             self.update_all_btn.setStyleSheet(s.primary_button_style())
         except Exception:
             pass
         self.refresh_btn.clicked.connect(self.refresh_requested.emit)
-        # install_btn.clicked 不在 page 内连 —— qt_app 直接连它弹输入框（install 需要用户输入 URL）。
         self.search_install_btn.clicked.connect(self.search_install_requested.emit)
         self.check_updates_btn.clicked.connect(self.check_updates_requested.emit)
         self.update_all_btn.clicked.connect(self.update_all_requested.emit)
-        # 左：刷新 / 安装插件 / 搜索安装；右：检查更新 / 更新全部
-        toolbar.addWidget(self.refresh_btn)
-        toolbar.addWidget(self.install_btn)
-        toolbar.addWidget(self.search_install_btn)
-        toolbar.addStretch()
-        toolbar.addWidget(self.check_updates_btn)
-        toolbar.addWidget(self.update_all_btn)
-        layout.addLayout(toolbar)
+        for b in (self.refresh_btn, self.search_install_btn, self.install_btn,
+                  self.check_updates_btn, self.update_all_btn):
+            top_ops.addWidget(b)
+        titlebar.addLayout(top_ops)
+        layout.addLayout(titlebar)
 
-        # ActionBar：勾选任意项时浮现操作条。为避免显隐导致下方表格上下抖动，
-        # ActionBar 始终占固定高度（不隐藏）：未勾选时显示淡色提示、隐藏操作按钮；
-        # 勾选时显示操作按钮 + 计数。这样表格位置永远固定。
+        # ---- 2. 状态统计卡片（4 张：总数 / 可更新 / 已启用 / 已禁用）----
+        # 每张卡片 = 一行大字数字 + 下方小字语义 + 左侧语义小圆点
+        self._stat_total = _StatCard(
+            theme_manager=self.theme_manager, label="插件总数",
+            dot_color="#7F56D9", accent_color=c["label"])
+        self._stat_outdated = _StatCard(
+            theme_manager=self.theme_manager, label="可更新",
+            dot_color="#9E77ED", accent_color="#9E77ED")
+        self._stat_enabled = _StatCard(
+            theme_manager=self.theme_manager, label="已启用",
+            dot_color="#22C55E", accent_color="#22C55E")
+        self._stat_disabled = _StatCard(
+            theme_manager=self.theme_manager, label="已禁用",
+            dot_color="#9CA3AF", accent_color="#9CA3AF")
+        stat_row = QtWidgets.QHBoxLayout()
+        stat_row.setSpacing(_px(12))
+        for card in (self._stat_total, self._stat_outdated,
+                     self._stat_enabled, self._stat_disabled):
+            stat_row.addWidget(card, 1)
+        layout.addLayout(stat_row)
+
+        # ---- 3. Tab 筛选栏（全部 / Git / CNR / 本地 / 可更新 / 已禁用） + 搜索框 ----
+        filter_row = QtWidgets.QHBoxLayout()
+        filter_row.setSpacing(_px(12))
+        # Tab：QPushButton 自绘（radio-style pill tab），选中 = accent 填充，未选中 = 透明 ghost
+        self._filter_tabs = {}  # key -> btn
+        tabs = [
+            ("all", "全部"),
+            ("git", "Git"),
+            ("cnr", "CNR"),
+            ("local", "本地"),
+            ("outdated", "可更新"),
+            ("disabled", "已禁用"),
+        ]
+        self._tab_container = QtWidgets.QWidget()
+        self._tab_container.setObjectName("PluginFilterTabs")
+        self._tab_container.setFixedHeight(_px(34))
+        tab_l = QtWidgets.QHBoxLayout(self._tab_container)
+        tab_l.setContentsMargins(_px(4), 0, _px(4), 0)
+        tab_l.setSpacing(_px(4))
+        self._tab_layout = tab_l
+        self._current_filter = "all"
+        for k, label in tabs:
+            btn = QtWidgets.QPushButton(label)
+            btn.setCheckable(True)
+            btn.setCursor(QtCore.Qt.PointingHandCursor)
+            if k == "all":
+                btn.setChecked(True)
+            btn.clicked.connect(lambda _c, _k=k: self._set_filter(_k))
+            self._filter_tabs[k] = btn
+            tab_l.addWidget(btn)
+        tab_l.addStretch()
+        filter_row.addWidget(self._tab_container, 3)
+
+        # 搜索框（本地 name/description/author/version 过滤）
+        self._search_edit = QtWidgets.QLineEdit()
+        self._search_edit.setPlaceholderText("搜索插件名 / 作者 / 版本…")
+        self._search_edit.setClearButtonEnabled(True)
+        self._search_edit.textChanged.connect(lambda _t: QtCore.QTimer.singleShot(
+            200, self._apply_filters))
+        filter_row.addWidget(self._search_edit, 2)
+
+        layout.addLayout(filter_row)
+
+        # ---- 4. ActionBar：勾选任意项时浮现操作条；高度固定不抖动 ----
         self._action_bar = QtWidgets.QWidget()
         self._action_bar.setObjectName("PluginActionBar")
         self._action_bar.setStyleSheet(f"""
             QWidget#PluginActionBar {{
                 background-color: {c['group_bg']};
                 border: 1px solid {c['input_border']};
-                border-radius: {_px(6)}px;
+                border-radius: {_px(10)}px;
             }}
         """)
-        self._action_bar.setFixedHeight(_px(44))  # 固定高度，杜绝表格抖动
+        self._action_bar.setFixedHeight(_px(46))
         ab_layout = QtWidgets.QHBoxLayout(self._action_bar)
-        ab_layout.setContentsMargins(_px(10), _px(6), _px(10), _px(6))
+        ab_layout.setContentsMargins(_px(14), _px(6), _px(14), _px(6))
         ab_layout.setSpacing(_px(8))
-        # 未勾选时的提示文字（默认显示）
+        # 未勾选：提示文字胶囊 + 占位
         self._ab_hint_label = QtWidgets.QLabel("勾选插件以显示批量操作")
         self._ab_hint_label.setStyleSheet(
-            f"color: {c['label_dim']}; font: {_pt(9)}pt 'Microsoft YaHei UI';")
-        # 勾选时的标签 + 计数
-        ab_label = QtWidgets.QLabel("已选中：")
-        ab_label.setStyleSheet(f"color: {c['label_muted']}; font: {_pt(9)}pt 'Microsoft YaHei UI';")
+            f"color: {c['label_dim']}; font: {_pt(9.5)}pt 'Microsoft YaHei UI';"
+        )
+        ab_label = QtWidgets.QLabel("已选中")
+        ab_label.setStyleSheet(
+            f"color: {c['label_muted']}; font: {_pt(9.5)}pt 'Microsoft YaHei UI';"
+        )
         self._ab_label = ab_label
+        # 计数 badge（accent pill）
         self._ab_count_label = QtWidgets.QLabel("0")
+        self._ab_count_label.setObjectName("PluginCountBadge")
+        self._ab_count_label.setFixedWidth(_px(34))
+        self._ab_count_label.setAlignment(QtCore.Qt.AlignCenter)
         self._ab_count_label.setStyleSheet(
-            f"color: {c['btn_primary_hover']}; font: bold {_pt(9)}pt 'Microsoft YaHei UI';")
+            f"QFrame, QWidget, QLabel#PluginCountBadge {{ "
+            f" background-color: {c['btn_primary_bg']}; color: #FFFFFF;"
+            f" border-radius: {_px(8)}px;"
+            f" font: bold {_pt(9)}pt 'Microsoft YaHei UI'; }}")
+        # 按钮
         self.update_selected_btn = QtWidgets.QPushButton("更新选中")
         self.enable_btn = QtWidgets.QPushButton("启用选中")
         self.disable_btn = QtWidgets.QPushButton("禁用选中")
@@ -681,51 +877,65 @@ class PluginsPage(BasePage):
         except Exception:
             pass
         self.update_selected_btn.clicked.connect(self._emit_update_selected)
-        self.enable_btn.clicked.connect(lambda: self.enable_selected_requested.emit(self.selected_dir_names()))
-        self.disable_btn.clicked.connect(lambda: self.disable_selected_requested.emit(self.selected_dir_names()))
-        self.uninstall_btn.clicked.connect(lambda: self.uninstall_selected_requested.emit(self.selected_dir_names()))
-        # 装入布局：提示文字（默认可见）+ 勾选态组件（默认隐藏）
+        self.enable_btn.clicked.connect(
+            lambda: self.enable_selected_requested.emit(self.selected_dir_names()))
+        self.disable_btn.clicked.connect(
+            lambda: self.disable_selected_requested.emit(self.selected_dir_names()))
+        self.uninstall_btn.clicked.connect(
+            lambda: self.uninstall_selected_requested.emit(self.selected_dir_names()))
+
+        # --- 默认态：显示「勾选插件…」提示，勾选态组件隐藏 ---
         ab_layout.addWidget(self._ab_hint_label)
         ab_layout.addStretch()
+        # 勾选态组件
         ab_layout.addWidget(ab_label)
         ab_label.hide()
         ab_layout.addWidget(self._ab_count_label)
-        ab_layout.addSpacing(_px(12))
-        for b in (self.update_selected_btn, self.enable_btn, self.disable_btn, self.uninstall_btn):
+        ab_layout.addSpacing(_px(14))
+        for b in (self.update_selected_btn, self.enable_btn,
+                  self.disable_btn, self.uninstall_btn):
             ab_layout.addWidget(b)
             b.hide()
-        ab_layout.addStretch()
-        # 记录勾选态组件，便于 _refresh_action_bar 切换显隐
         self._ab_active_widgets = [ab_label, self._ab_count_label,
                                    self.update_selected_btn, self.enable_btn,
                                    self.disable_btn, self.uninstall_btn]
         self._ab_layout = ab_layout
         layout.addWidget(self._action_bar)
 
-        # 表头 + 列表包进同一容器（spacing=0），消除两者间的视觉断层。
-        list_container = QtWidgets.QVBoxLayout()
-        list_container.setSpacing(0)
-        list_container.setContentsMargins(0, 0, 0, 0)
-
+        # ---- 5. 表头 + 列表包进同一容器（圆角一体卡）----
+        list_container = QtWidgets.QWidget()
+        list_container.setObjectName("PluginListContainer")
+        list_container.setStyleSheet(f"""
+            QWidget#PluginListContainer {{
+                background-color: {c['input_bg']};
+                border: 1px solid {c['input_border']};
+                border-radius: {_px(12)}px;
+            }}
+        """)
+        lc_l = QtWidgets.QVBoxLayout(list_container)
+        lc_l.setContentsMargins(0, 0, 0, 0)
+        lc_l.setSpacing(0)
         self.list_widget = QtWidgets.QListWidget()
         self.list_widget.setItemDelegate(PluginItemDelegate(self.theme_manager, self.list_widget))
-        # 表头在列表上方，传 list_widget 引用以便 paint 时读 item rect 宽度，列位与内容严格对齐
-        self.list_header = _PluginListHeader(self.theme_manager, list_widget=self.list_widget, parent=self)
-        list_container.addWidget(self.list_header)
-        # QSS 只保留外层背景 + 滚动条（item/indicator/选中态全由 delegate 绘制）。
-        # 顶部 border 去掉（表头压在上面接管顶部），底部保留圆角，形成「表头 + 列表」一体的容器观感。
+        self.list_header = _PluginListHeader(self.theme_manager, list_widget=self.list_widget,
+                                             parent=self)
+        lc_l.addWidget(self.list_header)
         self.list_widget.setStyleSheet(self._build_list_qss(c))
-        list_container.addWidget(self.list_widget)
-        # 勾选状态变化 → 刷新 ActionBar 显隐 + 选中计数
+        lc_l.addWidget(self.list_widget)
+
         self.list_widget.itemChanged.connect(lambda _item: self._refresh_action_bar())
-        layout.addLayout(list_container)
+        layout.addWidget(list_container, 1)
+        self._list_container = list_container
         self._root_layout = layout
 
-        # DPI 尺寸清单：DPI / 主题变化时由 _reapply_dpi_sizes 重算
+        # 记住全量 plugins 原始数据，Tab/搜索过滤时不用从 controller 重新拉
+        self._all_plugins_cache = []
+
+        # DPI 尺寸清单
         self._dpi_sized_widgets = [
             (self.refresh_btn, "min_text", "刷新列表"),
-            (self.install_btn, "min_text", "安装插件"),
             (self.search_install_btn, "min_text", "搜索安装"),
+            (self.install_btn, "min_text", "URL安装插件"),
             (self.check_updates_btn, "min_text", "检查更新"),
             (self.update_all_btn, "min_text", "更新全部"),
             (self.update_selected_btn, "min_text", "更新选中"),
@@ -734,40 +944,108 @@ class PluginsPage(BasePage):
             (self.uninstall_btn, "min_text", "卸载选中"),
         ]
         self._reapply_dpi_sizes()
+        # Tab 首次样式初始化
+        self._refresh_tab_styles()
+        # 首次统计数字归 0
+        self._refresh_stats([])
+
 
     # ---- 主题 QSS 构造（与 P0-2 update_theme 共享）----
     def _build_title_qss(self, c):
-        return (f"font: bold {self._pt(16)}pt 'Microsoft YaHei UI';"
-                f" color: {c['label']}; margin-bottom: {self._px(2)}px;")
+        return (f"font: bold {self._pt(18)}pt 'Microsoft YaHei UI';"
+                f" color: {c['label']};"
+                f" letter-spacing: 0.2px;")
+
+    def _build_subtitle_qss(self, c):
+        return (f"color: {c['label_muted']};"
+                f" font: {self._pt(9)}pt 'Microsoft YaHei UI';")
 
     def _build_actionbar_qss(self, c):
         return (f"QWidget#PluginActionBar {{"
                 f" background-color: {c['group_bg']};"
                 f" border: 1px solid {c['input_border']};"
-                f" border-radius: {self._px(6)}px;"
+                f" border-radius: {self._px(10)}px;"
                 f"}}")
+
+    def _build_tab_qss(self, c):
+        px, pt = self._px, self._pt
+        checked_bg = c.get("btn_primary_bg", "#7F56D9")
+        checked_hover = c.get("btn_primary_hover", "#9E77ED")
+        normal_text = c.get("label_muted", "#9CA3AF")
+        hover_bg = c.get("group_bg", "rgba(0,0,0,0.2)")
+        return f"""
+            QWidget#PluginFilterTabs {{
+                background-color: {c.get('group_bg', 'rgba(0,0,0,0.08)')};
+                border: 1px solid {c.get('input_border', '#4B5563')};
+                border-radius: {px(10)}px;
+            }}
+            QWidget#PluginFilterTabs > QPushButton {{
+                background-color: transparent;
+                color: {normal_text};
+                border: none;
+                border-radius: {px(7)}px;
+                padding: {px(4)}px {px(12)}px;
+                font: {pt(9.5)}pt 'Microsoft YaHei UI';
+                height: {px(26)}px;
+            }}
+            QWidget#PluginFilterTabs > QPushButton:hover {{
+                background-color: {hover_bg};
+                color: {c.get('label', '#E5E7EB')};
+            }}
+            QWidget#PluginFilterTabs > QPushButton:checked {{
+                background-color: {checked_bg};
+                color: #FFFFFF;
+                font-weight: bold;
+            }}
+            QWidget#PluginFilterTabs > QPushButton:checked:hover {{
+                background-color: {checked_hover};
+            }}
+        """
+
+    def _build_list_container_qss(self, c):
+        return (f"QWidget#PluginListContainer {{"
+                f" background-color: {c['input_bg']};"
+                f" border: 1px solid {c['input_border']};"
+                f" border-radius: {self._px(12)}px; }}")
+
+    def _build_count_badge_qss(self, c):
+        return (f"QLabel#PluginCountBadge {{ "
+                f" background-color: {c['btn_primary_bg']}; color: #FFFFFF;"
+                f" border-radius: {self._px(8)}px;"
+                f" font: bold {self._pt(9)}pt 'Microsoft YaHei UI'; }}")
+
+    def _build_search_qss(self, c):
+        px, pt = self._px, self._pt
+        return f"""
+            QLineEdit {{
+                background-color: {c['input_bg']}; color: {c['text']};
+                border: 1px solid {c['input_border']};
+                border-radius: {px(10)}px;
+                padding: {px(7)}px {px(12)}px;
+                font: {pt(9.5)}pt "Microsoft YaHei UI";
+            }}
+            QLineEdit:focus {{ border: 1px solid {c['btn_primary_hover']}; }}
+            QLineEdit:disabled {{ color: {c['label_dim']}; }}
+        """
 
     def _build_list_qss(self, c):
         _px, _pt = self._px, self._pt
         return f"""
             QListWidget {{
-                background-color: {c['input_bg']};
+                background-color: transparent;
                 color: {c['text']};
-                border: 1px solid {c['input_border']};
-                border-top: none;
-                border-bottom-left-radius: {_px(6)}px;
-                border-bottom-right-radius: {_px(6)}px;
-                padding: {_px(4)}px;
+                border: none;
+                padding: {_px(6)}px;
                 font: {_pt(10)}pt "Microsoft YaHei UI";
                 outline: none;
             }}
             QScrollBar:vertical {{
-                background: transparent; width: {_px(8)}px; margin: {_px(2)}px;
+                background: transparent; width: {_px(8)}px; margin: {_px(4)}px;
                 border: none; border-radius: {_px(4)}px;
             }}
             QScrollBar::handle:vertical {{
                 background-color: {c['scroll_handle']};
-                border-radius: {_px(4)}px; min-height: {_px(30)}px;
+                border-radius: {_px(4)}px; min-height: {_px(40)}px;
             }}
             QScrollBar::handle:vertical:hover {{
                 background-color: {c['scroll_handle_hover']};
@@ -782,28 +1060,34 @@ class PluginsPage(BasePage):
         # 根 layout 边距 & 间距
         try:
             self._root_layout.setContentsMargins(
-                _px(25), _px(25), _px(25), _px(25))
+                _px(28), _px(24), _px(28), _px(24))
         except Exception:
             pass
         try:
-            self._root_layout.setSpacing(_px(12))
+            self._root_layout.setSpacing(_px(16))
         except Exception:
             pass
-        # ActionBar: 固定高度 + 内部 layout margins/spacing/addSpacing(12)
+        # Tab 容器高度 + layout margin/spacing
         try:
-            self._action_bar.setFixedHeight(_px(44))
+            self._tab_container.setFixedHeight(_px(34))
+            self._tab_layout.setContentsMargins(_px(4), 0, _px(4), 0)
+            self._tab_layout.setSpacing(_px(4))
+        except Exception:
+            pass
+        # ActionBar: 固定高度 + 内部 layout margins/spacing
+        try:
+            self._action_bar.setFixedHeight(_px(46))
         except Exception:
             pass
         try:
             self._ab_layout.setContentsMargins(
-                _px(10), _px(6), _px(10), _px(6))
+                _px(14), _px(6), _px(14), _px(6))
         except Exception:
             pass
         try:
             self._ab_layout.setSpacing(_px(8))
         except Exception:
             pass
-        # ActionBar 中间的 addSpacing(12) 不好改（已经插入 index）；忽略（间距相对次要）
         # 每个按钮 minWidth：测当前文本和 "最长状态文本" 两者 sizeHint，取大的
         for w, kind, aux in getattr(self, "_dpi_sized_widgets", []):
             try:
@@ -816,6 +1100,16 @@ class PluginsPage(BasePage):
                     w.setMinimumWidth(max(w1, w2))
             except Exception:
                 pass
+        # 统计卡片自身有 theme listener 会 update_theme；这里额外保险重算 4 张卡片的数字字级
+        try:
+            for card in (getattr(self, "_stat_total", None),
+                         getattr(self, "_stat_outdated", None),
+                         getattr(self, "_stat_enabled", None),
+                         getattr(self, "_stat_disabled", None)):
+                if card is not None and getattr(card, "update_theme", None):
+                    card.update_theme()
+        except Exception:
+            pass
 
     # ---- 主题 & DPI 变化：重取颜色 token + 重建 QSS + 重算尺寸 ----
     # 注意：BasePage.__init__ 已经 register_listener(self._on_theme_changed)，
@@ -833,9 +1127,23 @@ class PluginsPage(BasePage):
         # 2. 重取颜色 token + 重建 QSS
         try:
             c = self._get_colors()
-            # 标题
+            # 标题 + 副标题
             try:
                 self._title_label.setStyleSheet(self._build_title_qss(c))
+            except Exception:
+                pass
+            try:
+                self._subtitle_label.setStyleSheet(self._build_subtitle_qss(c))
+            except Exception:
+                pass
+            # Tab 栏 QSS
+            try:
+                self._tab_container.setStyleSheet(self._build_tab_qss(c))
+            except Exception:
+                pass
+            # 搜索框 QSS
+            try:
+                self._search_edit.setStyleSheet(self._build_search_qss(c))
             except Exception:
                 pass
             # ActionBar 容器
@@ -843,32 +1151,37 @@ class PluginsPage(BasePage):
                 self._action_bar.setStyleSheet(self._build_actionbar_qss(c))
             except Exception:
                 pass
-            # ActionBar 内三个标签（颜色 + pt 字号）
+            # ActionBar 内标签：hint/已选中/计数 badge
             try:
                 self._ab_hint_label.setStyleSheet(
-                    f"color: {c['label_dim']}; font: {self._pt(9)}pt 'Microsoft YaHei UI';")
+                    f"color: {c['label_dim']};"
+                    f" font: {self._pt(9.5)}pt 'Microsoft YaHei UI';")
             except Exception:
                 pass
             try:
                 self._ab_label.setStyleSheet(
-                    f"color: {c['label_muted']}; font: {self._pt(9)}pt 'Microsoft YaHei UI';")
+                    f"color: {c['label_muted']};"
+                    f" font: {self._pt(9.5)}pt 'Microsoft YaHei UI';")
             except Exception:
                 pass
             try:
-                self._ab_count_label.setStyleSheet(
-                    f"color: {c['btn_primary_hover']}; font: bold {self._pt(9)}pt 'Microsoft YaHei UI';")
+                self._ab_count_label.setStyleSheet(self._build_count_badge_qss(c))
             except Exception:
                 pass
-            # List + scrollbar
+            # List 容器 + list widget QSS
+            try:
+                self._list_container.setStyleSheet(self._build_list_container_qss(c))
+            except Exception:
+                pass
             try:
                 self.list_widget.setStyleSheet(self._build_list_qss(c))
             except Exception:
                 pass
             # 3. DPI 尺寸重算（margin/spacing/高度/按钮 minWidth）
             self._reapply_dpi_sizes()
-            # 4. 通知子 delegate / 子控件各自 update_theme
-            #   - delegate：QAbstractItemDelegate（PluginItemDelegate）
-            #   - 表头：_PluginListHeader（裸 QWidget，额外保险再调一次）
+            # 4. Tab 再刷一次样式（因为颜色 token 变了）
+            self._refresh_tab_styles()
+            # 5. 通知子 delegate / 子控件各自 update_theme
             try:
                 dlg = self.list_widget.itemDelegate()
                 upd = getattr(dlg, "update_theme", None)
@@ -882,6 +1195,184 @@ class PluginsPage(BasePage):
                 pass
         except Exception:
             pass
+
+    # ---- Tab/搜索/统计 helper ----
+    def _refresh_tab_styles(self):
+        """Tab 按钮 QSS 统一由容器级 QWidget#PluginFilterTabs > QPushButton 覆盖，
+        这里只做保险：非 focus/hover/checked 状态下确保按钮无边框与统一高度。
+        _build_tab_qss 已在 update_theme/init 期应用。"""
+        try:
+            c = self._get_colors()
+            self._tab_container.setStyleSheet(self._build_tab_qss(c))
+        except Exception:
+            pass
+
+    def _refresh_stats(self, plugins=None):
+        """刷新 4 张状态卡数字：总数/可更新/已启用/已禁用。
+        plugins 不传则从 self._all_plugins_cache 取（兼容 populate 前后）。"""
+        ps = list(plugins) if plugins is not None else list(
+            getattr(self, "_all_plugins_cache", []))
+        total = len(ps)
+        outdated = sum(1 for p in ps if p.get("_outdated", False))
+        enabled = sum(1 for p in ps if p.get("enabled", True))
+        disabled = total - enabled
+        # 若 mark_outdated 已经给 list 打过标记，优先用那边的 _outdated_dir_names（
+        # populate 之后 mark_outdated 之前，plugins._outdated 会是 False；
+        # mark_outdated 后会再次调用 _refresh_stats 同步）
+        if getattr(self, "_outdated_dir_names", None):
+            try:
+                dir_names = {p.get("dir_name", p.get("name", "")) for p in ps}
+                outdated = len(self._outdated_dir_names & dir_names)
+            except Exception:
+                pass
+        try:
+            self._stat_total.set_value(total)
+            self._stat_outdated.set_value(outdated)
+            self._stat_enabled.set_value(enabled)
+            self._stat_disabled.set_value(disabled)
+        except Exception:
+            pass
+
+    def _set_filter(self, key: str):
+        """点击 Tab → 切换当前过滤器，取消其它 Tab 的 checked 状态，重跑过滤。"""
+        self._current_filter = key
+        # 单选项互斥：当前项 checked=True，其余 False（避免点"已检查"项自己把自己取消）
+        for k, btn in getattr(self, "_filter_tabs", {}).items():
+            try:
+                btn.setChecked(k == key)
+            except Exception:
+                pass
+        self._apply_filters()
+
+    def _apply_filters(self):
+        """综合当前 Tab + 搜索框关键字，从 _all_plugins_cache 过滤出最终列表并渲染。
+        populate() 把全量数据塞进 _all_plugins_cache，之后所有过滤都走本地。"""
+        try:
+            cache = list(getattr(self, "_all_plugins_cache", []))
+        except Exception:
+            cache = []
+        kw = ""
+        try:
+            kw = (getattr(self, "_search_edit", None).text()
+                  if getattr(self, "_search_edit", None) else "").strip().lower()
+        except Exception:
+            kw = ""
+        flt = getattr(self, "_current_filter", "all")
+
+        # 1) Tab 过滤
+        if flt != "all":
+            if flt in ("git", "cnr", "local"):
+                cache = [p for p in cache if (p.get("kind") or "").lower() == flt]
+            elif flt == "outdated":
+                # _outdated_dir_names 是 mark_outdated 设置的；若无 mark_outdated，
+                # 则 fallback 到 plugin dict 里的 _outdated 字段（populate 时回填）
+                od = getattr(self, "_outdated_dir_names", None) or set()
+                cache = [
+                    p for p in cache
+                    if p.get("dir_name", p.get("name", "")) in od
+                    or p.get("_outdated", False)
+                ]
+            elif flt == "disabled":
+                cache = [p for p in cache if not p.get("enabled", True)]
+        # 2) 关键字过滤（name/author/version/description/id/git url 四个维度）
+        if kw:
+            def _hit(p):
+                if kw in (p.get("name") or "").lower():
+                    return True
+                if kw in (p.get("author") or "").lower():
+                    return True
+                if kw in (p.get("version") or "").lower():
+                    return True
+                if kw in (p.get("description") or "").lower():
+                    return True
+                if kw in (p.get("id") or "").lower():
+                    return True
+                if kw in (p.get("remote_url") or "").lower():
+                    return True
+                return False
+            cache = [p for p in cache if _hit(p)]
+        # 3) 渲染。注意：list_widget 要的是 item + UserRole，
+        # 这就是 populate 的后半段，直接抽成 _render_items 共用，但为了不引入太多结构改动，
+        # 这里内联逻辑与 populate 保持等价（除了不清空 outdated 标记，因为是过滤不是刷新）
+        self._render_from_list(cache, preserve_outdated=True)
+
+    def _render_from_list(self, plugins, preserve_outdated=False):
+        """把 plugins 画进 list_widget。
+        - preserve_outdated=False（populate 路径）：清空列表 + 清 old item 的 _OUTDATED_ROLE
+        - preserve_outdated=True（_apply_filters 路径）：保留 _outdated_dir_names 与每个 item
+          插回后根据 dir_name 是否在里面还原 mark_outdated 标志。
+        """
+        lw = self.list_widget
+        if not preserve_outdated:
+            lw.clear()
+        else:
+            # 先摘出所有 item，再按新 filtered 顺序插回，保留原 item 对象上的 _OUTDATED_ROLE / CheckState
+            n_total = lw.count()
+            existing = {}
+            for _i in range(n_total):
+                it = lw.takeItem(0)
+                try:
+                    dn = it.data(QtCore.Qt.UserRole + 1)
+                    if dn:
+                        existing[str(dn)] = it
+                except Exception:
+                    pass
+
+        for p in plugins:
+            name = p.get("name", "?")
+            dir_name = p.get("dir_name", name)
+            enabled = p.get("enabled", True)
+            is_git = p.get("is_git", False)
+            # 保留原 item（若存在）的勾选/过时状态
+            item = None
+            if preserve_outdated:
+                item = existing.get(str(dir_name))
+            if item is None:
+                display = name if enabled else f"{name}（已禁用）"
+                item = QtWidgets.QListWidgetItem(display)
+                item.setData(QtCore.Qt.UserRole, p)
+                item.setData(QtCore.Qt.UserRole + 1, dir_name)
+                item.setFlags(item.flags() | QtCore.Qt.ItemIsUserCheckable)
+                item.setCheckState(QtCore.Qt.Unchecked)
+                # tooltip
+                tip_lines = [f"{name}"]
+                if not enabled:
+                    tip_lines.append("状态: 已禁用")
+                if is_git:
+                    ver = (p.get("version") or "")[:12]
+                    remote = p.get("remote_url") or ""
+                    tip_lines.append(f"版本: {ver or '(未知)'}")
+                    tip_lines.append(f"来源: {remote or '(未知)'}")
+                else:
+                    tip_lines.append("（非 git 插件，无法更新/强制更新）")
+                item.setToolTip("\n".join(tip_lines))
+                if not enabled:
+                    item.setForeground(QtGui.QBrush(QtGui.QColor(
+                        self.theme_manager.colors.get("label_dim", "#9CA3AF"))))
+                # mark_outdated 写的三个 role：若 plugin dict 里有 _outdated/_remote_date/_checked，
+                # 回填到 item（过滤场景，mark_outdated 已经给老 item 写过但现在是新的 item）
+                if p.get("_outdated"):
+                    item.setData(_OUTDATED_ROLE, True)
+                if p.get("_checked") is not None:
+                    item.setData(_CHECKED_ROLE, bool(p["_checked"]))
+                if p.get("_remote_date"):
+                    item.setData(_REMOTE_DATE_ROLE, p["_remote_date"])
+            lw.addItem(item)
+
+        # 如果是 filter 场景且全局 mark_outdated 过，同步插回的 item 的三个 role 标记
+        # （上面只从 plugin dict 回填，对 mark_outdated 后再 filter 的情况需要从
+        #  _outdated_dir_names 比对再写一次 item.data，因为 delegate 只看 item.data）
+        if preserve_outdated:
+            try:
+                od = getattr(self, "_outdated_dir_names", None) or set()
+                for i in range(lw.count()):
+                    it = lw.item(i)
+                    dn = it.data(QtCore.Qt.UserRole + 1)
+                    if str(dn) in od:
+                        it.setData(_OUTDATED_ROLE, True)
+                        it.setData(_CHECKED_ROLE, True)
+            except Exception:
+                pass
 
     def _refresh_action_bar(self):
         """勾选状态变化 → 切换 ActionBar 内容（提示文字 ↔ 操作按钮），ActionBar 本身始终占位。
@@ -905,64 +1396,68 @@ class PluginsPage(BasePage):
     def populate(self, plugins):
         """用 PluginService.list_installed() 的结果填充列表。每项可勾选。
 
-        显示规则：
-        - item 文本 = 纯 name（保持 selected_* 返回可对照的标识，禁用项加后缀区分）
-        - 禁用项：文本加「（已禁用）」、前景灰
-        - git 插件：tooltip 显示版本/来源
-        - 全量重填时清空 outdated 标记（需重新点「检查更新」）
+        显示规则与原版保持一致（兼容旧测试）：
+        - item 文本 = 纯 name（禁用项加「（已禁用）」）
+        - git 插件 tooltip 显示版本/来源
+        - 全量重填后，把 plugins 缓存到 self._all_plugins_cache（便于 Tab/搜索过滤）
+        - mark_outdated 标记清空（和旧行为一致）
         """
+        plugins = list(plugins)
         self._outdated_dir_names = set()
-        self.list_widget.clear()
-        for p in plugins:
-            name = p.get("name", "?")
-            dir_name = p.get("dir_name", name)
-            enabled = p.get("enabled", True)
-            is_git = p.get("is_git", False)
-            display = name if enabled else f"{name}（已禁用）"
-            item = QtWidgets.QListWidgetItem(display)
-            item.setData(QtCore.Qt.UserRole, p)
-            item.setData(QtCore.Qt.UserRole + 1, dir_name)  # dir_name 单独存，便于 selected_dir_names
-            # 必须显式加 ItemIsUserCheckable，否则 setCheckState 后用户点击无法切换勾选态。
-            # QListWidgetItem 默认 flags 只含 IsEnabled|IsSelectable，不含可勾选。
-            item.setFlags(item.flags() | QtCore.Qt.ItemIsUserCheckable)
-            item.setCheckState(QtCore.Qt.Unchecked)
-            # tooltip
-            tip_lines = [f"{name}"]
-            if not enabled:
-                tip_lines.append("状态: 已禁用")
-            if is_git:
-                ver = (p.get("version") or "")[:12]
-                remote = p.get("remote_url") or ""
-                tip_lines.append(f"版本: {ver or '(未知)'}")
-                tip_lines.append(f"来源: {remote or '(未知)'}")
-            else:
-                tip_lines.append("（非 git 插件，无法更新/强制更新）")
-            item.setToolTip("\n".join(tip_lines))
-            # 禁用项灰字
-            if not enabled:
-                item.setForeground(QtGui.QBrush(QtGui.QColor(
-                    self.theme_manager.colors.get("label_dim", "#9CA3AF"))))
-            self.list_widget.addItem(item)
+        self._all_plugins_cache = list(plugins)
+        # 清掉上次 filter 塞进去的 _outdated/_checked/_remote_date 残留，重新 populate 就是干净新列表
+        for p in self._all_plugins_cache:
+            for k in ("_outdated", "_checked", "_remote_date"):
+                if k in p:
+                    try:
+                        del p[k]
+                    except Exception:
+                        p[k] = False if k == "_outdated" else ""
+        self._render_from_list(plugins, preserve_outdated=False)
+        # 首次 populate 后重刷统计 & 重置 Tab/搜索
+        self._refresh_stats(plugins)
+        try:
+            if getattr(self, "_current_filter", None) != "all":
+                self._set_filter("all")
+        except Exception:
+            pass
+        try:
+            if getattr(self, "_search_edit", None):
+                self._search_edit.blockSignals(True)
+                self._search_edit.setText("")
+                self._search_edit.blockSignals(False)
+        except Exception:
+            pass
 
     def mark_outdated(self, dir_names, remote_dates=None):
         """controller 通过 outdated_reported 推回 → 标记对应项并重排（可更新置顶）。
 
-        - UserRole+2 写 True：PluginItemDelegate 读它画「可更新」徽章列。
-        - UserRole+3 写远端日期（若有）：delegate 读它画「远端日期」列。
-        - item.text() 仍写「🔄 ... [可更新]」兼容测试断言（绘制不依赖 text）。
-        - 重排：outdated 项移到列表顶部，便于一眼看到需更新的插件。
-        重新 populate 会重置（新 item 默认无这些标志，恢复 name 排序）。
+        新增：同步把 _outdated/_checked/_remote_date 写回 self._all_plugins_cache，
+        这样 filter 切换 Tab 时，item 上的过时标志不会丢（_render_from_list 在 filter 模式下会
+        从 plugin dict 回填 UserRole）。
         """
         self._outdated_dir_names = {str(d) for d in dir_names}
         remote_dates = remote_dates or {}
+        # 先同步回 _all_plugins_cache
+        dn_to_plugin = {}
+        for p in getattr(self, "_all_plugins_cache", []):
+            dn = str(p.get("dir_name") or p.get("name") or "")
+            if dn:
+                dn_to_plugin[dn] = p
+        for dn, p in dn_to_plugin.items():
+            is_od = dn in self._outdated_dir_names
+            p["_outdated"] = is_od
+            p["_checked"] = True
+            p["_remote_date"] = remote_dates.get(dn, "") if is_od else ""
+        # 再更新 list widget 上每个 item 的三个 role + text
         for i in range(self.list_widget.count()):
             item = self.list_widget.item(i)
             dir_name = item.data(QtCore.Qt.UserRole + 1)
-            is_outdated = dir_name in self._outdated_dir_names
+            is_outdated = str(dir_name) in self._outdated_dir_names
             item.setData(_OUTDATED_ROLE, is_outdated)
-            item.setData(_CHECKED_ROLE, True)  # 标记「已检查」，delegate 据此画无更新/无法检查
-            # 远端日期仅对 outdated 且查到了的插件写入
-            item.setData(_REMOTE_DATE_ROLE, remote_dates.get(dir_name, "") if is_outdated else "")
+            item.setData(_CHECKED_ROLE, True)
+            item.setData(_REMOTE_DATE_ROLE,
+                         remote_dates.get(dir_name, "") if is_outdated else "")
             if is_outdated:
                 accent = self.theme_manager.colors.get("btn_primary_bg", "#6366F1")
                 base = item.data(QtCore.Qt.UserRole) or {}
@@ -971,7 +1466,9 @@ class PluginsPage(BasePage):
                 display = name if enabled else f"{name}（已禁用）"
                 item.setText(f"🔄 {display}  [可更新]")
                 item.setForeground(QtGui.QBrush(QtGui.QColor(accent)))
-        # 重排：outdated 项移到顶部（保留各自组内原有的 name 排序）
+        # 刷新状态卡「可更新」数字
+        self._refresh_stats()
+        # 重排：outdated 项移到顶部
         self._reorder_outdated_first()
 
     def _reorder_outdated_first(self):

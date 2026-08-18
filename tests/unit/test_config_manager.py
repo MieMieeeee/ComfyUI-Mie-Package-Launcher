@@ -33,9 +33,10 @@ class TestConfigManagerCharacterization(unittest.TestCase):
         config_data["custom_top_level"] = {"keep": True}
         config_data["proxy_settings"]["custom_proxy_key"] = "https://example.com/proxy"
         # load_config 会把老 paths 段迁移成 environments，预先迁移让往返等价
-        from config.migrations import migrate_environments
+        from config.migrations import migrate_environments, migrate_window_geometry_fields
 
         migrate_environments(config_data)
+        migrate_window_geometry_fields(config_data)
 
         saved = manager.save_config(config_data)
         loaded = ConfigManager(self.config_file, self.logger).load_config()
@@ -255,6 +256,86 @@ class TestConfigManagerCharacterization(unittest.TestCase):
             self.read_json()["launch_options"]["env_vars"],
             "POLARS_SKIP_CPU_CHECK=1",
         )
+
+
+# =============================================================================
+# render_mode (ui_settings)
+# =============================================================================
+
+
+class TestConfigRenderMode(unittest.TestCase):
+    def setUp(self):
+        self.temp_dir = tempfile.TemporaryDirectory()
+        self.config_file = Path(self.temp_dir.name) / "launcher" / "config.json"
+        self.config_file.parent.mkdir(parents=True, exist_ok=True)
+        self.logger = MagicMock()
+
+    def tearDown(self):
+        self.temp_dir.cleanup()
+
+    def write_json(self, data):
+        self.config_file.write_text(
+            json.dumps(data, ensure_ascii=False, indent=2), encoding="utf-8"
+        )
+
+    def read_json(self):
+        return json.loads(self.config_file.read_text(encoding="utf-8"))
+
+    # ---- default config --------------------------------------------------
+    def test_default_config_has_render_mode_auto(self):
+        manager = ConfigManager(self.config_file, self.logger)
+        cfg = manager.get_default_config()
+        self.assertEqual(
+            cfg.get("ui_settings", {}).get("render_mode"),
+            "auto",
+            "ui_settings.render_mode default must be 'auto'",
+        )
+
+    # ---- setdefault (missing field -> auto) ------------------------------
+    def test_load_config_backfills_missing_render_mode(self):
+        self.write_json(
+            {"ui_settings": {"theme": "dark"}, "proxy_settings": {}}
+        )
+        manager = ConfigManager(self.config_file, self.logger)
+        loaded = manager.load_config()
+        self.assertEqual(loaded["ui_settings"]["render_mode"], "auto")
+        # persisted (load_config saves migrated defaults)
+        self.assertEqual(self.read_json()["ui_settings"]["render_mode"], "auto")
+
+    def test_load_config_backfills_entire_ui_settings_if_absent(self):
+        self.write_json({"proxy_settings": {}})
+        manager = ConfigManager(self.config_file, self.logger)
+        loaded = manager.load_config()
+        self.assertEqual(loaded["ui_settings"]["render_mode"], "auto")
+
+    # ---- illegal value normalization -----------------------------------
+    def test_load_config_normalizes_illegal_render_mode_to_auto(self):
+        for bad in ("", None, "unknown", "software", "SAFE", "AUTO",
+                    "compat-software", "compat,safe", 123):
+            self.write_json(
+                {"ui_settings": {"render_mode": bad}, "proxy_settings": {}}
+            )
+            manager = ConfigManager(self.config_file, self.logger)
+            loaded = manager.load_config()
+            self.assertEqual(
+                loaded["ui_settings"]["render_mode"],
+                "auto",
+                f"render_mode={bad!r} should be normalized to 'auto'",
+            )
+            self.assertEqual(self.read_json()["ui_settings"]["render_mode"], "auto")
+
+    def test_load_config_preserves_legal_values(self):
+        for good in ("auto", "compat", "safe"):
+            self.write_json(
+                {"ui_settings": {"render_mode": good}, "proxy_settings": {}}
+            )
+            manager = ConfigManager(self.config_file, self.logger)
+            loaded = manager.load_config()
+            self.assertEqual(
+                loaded["ui_settings"]["render_mode"], good,
+                f"legal render_mode={good!r} should be preserved"
+            )
+            self.assertEqual(self.read_json()["ui_settings"]["render_mode"], good)
 
 
 if __name__ == "__main__":

@@ -624,14 +624,41 @@ class ThemeStyles:
 
     # ==================== 输入框样式 ====================
     def input_style(self) -> str:
+        # 计算一个不透明的 hover 边框色（把 input_border 提亮 15%，保持可见性）
+        ib = self.c.get("input_border", "#4B5563")
+        try:
+            # 解析 hex color
+            hex_v = ib.lstrip("#")
+            if len(hex_v) == 6:
+                r = max(0, min(255, int(hex_v[0:2], 16) + 38))
+                g = max(0, min(255, int(hex_v[2:4], 16) + 38))
+                b = max(0, min(255, int(hex_v[4:6], 16) + 38))
+                border_hover = f"#{r:02X}{g:02X}{b:02X}"
+            else:
+                border_hover = ib
+        except Exception:
+            border_hover = ib
+
         return f"""
-        QComboBox, QLineEdit, QPushButton {{
+        QComboBox, QLineEdit, QPushButton, QSpinBox, QDoubleSpinBox {{
             min-height: {self._px(28)}px;
             border: 1px solid {self.c.get('input_border')};
             border-radius: {self._px(6)}px;
             padding: {self._px(2)}px {self._px(8)}px;
             color: {self.c.get('input_text')};
             background-color: {self.c.get('input_bg')};
+            selection-background-color: {self.c.get('accent')};
+            selection-color: #FFFFFF;
+        }}
+        QLineEdit:hover, QComboBox:hover, QSpinBox:hover, QDoubleSpinBox:hover {{
+            border: 1px solid {border_hover};
+            background-color: {self.c.get('input_bg')};
+            color: {self.c.get('input_text')};
+        }}
+        QLineEdit:focus, QComboBox:focus, QSpinBox:focus, QDoubleSpinBox:focus {{
+            border: 1px solid {self.c.get('accent')};
+            background-color: {self.c.get('input_bg')};
+            color: {self.c.get('input_text')};
         }}
         QComboBox::drop-down {{
             border: none;
@@ -651,9 +678,54 @@ class ThemeStyles:
             background-color: {self.c.get('input_bg')};
             color: {self.c.get('input_text')};
             border: 1px solid {self.c.get('input_border')};
-            selection-background-color: {self.c.get('input_border')};
+            selection-background-color: {self.c.get('accent')};
             selection-color: #FFFFFF;
             outline: none;
+            padding: {self._px(4)}px {self._px(2)}px;
+        }}
+        /* Spinbox 上/下按钮（深主题 Fusion 原生画黑，必须显式设色） */
+        QSpinBox::up-button, QDoubleSpinBox::up-button {{
+            subcontrol-origin: border;
+            subcontrol-position: top right;
+            width: {self._px(16)}px;
+            height: {self._px(13)}px;
+            border: none;
+            border-left: 1px solid {self.c.get('input_border')};
+            border-bottom: 1px solid {self.c.get('input_border')};
+            border-top-right-radius: {self._px(6)}px;
+            background-color: {self.c.get('input_bg')};
+        }}
+        QSpinBox::down-button, QDoubleSpinBox::down-button {{
+            subcontrol-origin: border;
+            subcontrol-position: bottom right;
+            width: {self._px(16)}px;
+            height: {self._px(13)}px;
+            border: none;
+            border-left: 1px solid {self.c.get('input_border')};
+            border-top: 1px solid {self.c.get('input_border')};
+            border-bottom-right-radius: {self._px(6)}px;
+            background-color: {self.c.get('input_bg')};
+        }}
+        QSpinBox::up-arrow, QDoubleSpinBox::up-arrow {{
+            image: none;
+            border-left: 4px solid transparent;
+            border-right: 4px solid transparent;
+            border-bottom: 5px solid {self.c.get('label_muted')};
+            width: 0;
+            height: 0;
+        }}
+        QSpinBox::down-arrow, QDoubleSpinBox::down-arrow {{
+            image: none;
+            border-left: 4px solid transparent;
+            border-right: 4px solid transparent;
+            border-top: 5px solid {self.c.get('label_muted')};
+            width: 0;
+            height: 0;
+        }}
+        QSpinBox:disabled, QDoubleSpinBox:disabled, QComboBox:disabled, QLineEdit:disabled {{
+            color: {self.c.get('label_dim')};
+            background-color: {self.c.get('input_readonly_bg')};
+            border-color: {self.c.get('input_border')};
         }}
         QLineEdit:read-only {{
             background-color: {self.c.get('input_readonly_bg')};

@@ -255,3 +255,63 @@ def webui_path_from_config(app_config: dict | None, env_id: str | None = None) -
     except Exception:
         return None
     return base / WEBUI_DIR_NAME
+
+
+def resolve_runtime_root() -> Path:
+    """Launcher 自身的运行根目录（用于 crash.log / render_state.json /
+    launcher/ 子目录定位。
+
+    与 ``stable_project_root`` / ``resolve_base_root`` 的关键区别：
+    **绝对不按 ``ComfyUI/main.py`` marker 选目录。当 launcher 和
+    单独安装在 C:\\ 盘而整合包在 D:\\ 盘时，launcher 的配置、日志必须
+    跟着 launcher 自身走，不能追着整合包目录漂移。
+
+    候选顺序逐行移植自 ``utils/logging.py`` install_logging(None)`` 的
+    48-92 行逻辑，三处一致。保证 logging / render_guard / crash reporting
+    对 ``launcher/`` 目录的答案一致。
+    """
+    candidates: list[Path] = []
+
+    # Nuitka: __compiled__ 存在 → sys.argv[0] 主 exe 目录
+    try:
+        __compiled__  # type: ignore[has-type]  # noqa: F821
+        is_nuitka = True
+    except NameError:
+        is_nuitka = False
+    if is_nuitka:
+        try:
+            candidates.append(Path(sys.argv[0]).resolve().parent)
+        except Exception:
+            pass
+
+    # PyInstaller: sys._MEIPASS
+    try:
+        from sys import _MEIPASS  # type: ignore
+        if _MEIPASS:
+            candidates.append(Path(_MEIPASS))
+    except Exception:
+        pass
+
+    # 源码目录（__file__ 父父目录）
+    try:
+        candidates.append(Path(__file__).resolve().parent.parent)
+    except Exception:
+        pass
+
+    # 可执行文件目录（PyInstaller 时是 exe，Nuitka 时是 python.exe）
+    try:
+        candidates.append(Path(sys.executable).resolve().parent)
+    except Exception:
+        pass
+
+    candidates.append(Path.cwd())
+
+    root: Path | None = None
+    for cand in candidates:
+        try:
+            if cand and cand.exists():
+                root = cand
+                break
+        except Exception:
+            pass
+    return root or Path.cwd()

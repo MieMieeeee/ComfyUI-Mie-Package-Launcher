@@ -17,8 +17,9 @@ class ProfileCard(QtWidgets.QFrame):
         self.theme_styles = theme_styles
         self.avatar_pixmap = avatar_pixmap
         self.avatar_size = avatar_size
+        self._min_height_base = 100
         self.setObjectName("ProfileCard")
-        self.setMinimumHeight(theme_styles._px(100))
+        self.setMinimumHeight(theme_styles._px(self._min_height_base))
         self.setAttribute(QtCore.Qt.WA_StyledBackground, True)
         self._apply_style()
         self._setup_shadow(avatar_pixmap)
@@ -29,6 +30,12 @@ class ProfileCard(QtWidgets.QFrame):
 
     def _setup_shadow(self, pixmap):
         """设置阴影效果"""
+        try:
+            from core.render_guard import is_safe_ui as _is_safe_ui
+            if _is_safe_ui():
+                return
+        except Exception:
+            pass
         if pixmap is not None:
             try:
                 glow = QtWidgets.QGraphicsDropShadowEffect(self)
@@ -45,9 +52,12 @@ class ProfileCard(QtWidgets.QFrame):
         outer.setContentsMargins(0, 0, 0, 0)
         outer.addStretch(1)
 
-        # 头像（avatar_size 按 DPI 缩放）
-        avatar = CircleAvatar(pixmap=self.avatar_pixmap, size=self.theme_styles._px(self.avatar_size))
+        # 头像（avatar_size 是 base；CircleAvatar 新契约内部自己 _px）
+        avatar = CircleAvatar(
+            pixmap=self.avatar_pixmap, size=self.avatar_size, theme_styles=self.theme_styles
+        )
         outer.addWidget(avatar)
+        self._avatar = avatar
 
         # 信息
         info_layout = QtWidgets.QVBoxLayout()
@@ -85,9 +95,12 @@ class ProfileCard(QtWidgets.QFrame):
     def update_theme(self, theme_styles: ThemeStyles):
         """更新主题样式"""
         self.theme_styles = theme_styles
+        self.setMinimumHeight(self.theme_styles._px(self._min_height_base))
         self._apply_style()
         try:
             _pt = self.theme_styles._pt
+            if hasattr(self, "_avatar") and hasattr(self._avatar, "update_theme"):
+                self._avatar.update_theme(self.theme_styles)
             if hasattr(self, "_name_label"):
                 self._name_label.setStyleSheet(f"font: bold {_pt(18)}pt \"Microsoft YaHei UI\"; color: {self.theme_styles.c.get('sidebar_text')}; background: transparent;")
             if hasattr(self, "_quote_label"):
@@ -149,6 +162,9 @@ class InfoCard(QtWidgets.QFrame):
         self.theme_styles = theme_styles
         self.setObjectName("InfoCard")
         self.setAttribute(QtCore.Qt.WA_StyledBackground, True)
+        # base margins & spacing（DPI 变化时 update_theme 里 _px 折算）
+        self._margins_base = (15, 22, 15, 12)
+        self._spacing_base = 8
         self._apply_style()
         self._setup_content(title)
 
@@ -157,9 +173,11 @@ class InfoCard(QtWidgets.QFrame):
 
     def _setup_content(self, title: str):
         """设置卡片内容"""
+        _px = self.theme_styles._px
         layout = QtWidgets.QVBoxLayout(self)
-        layout.setContentsMargins(15, 22, 15, 12)
-        layout.setSpacing(8)
+        ml, mt, mr, mb = self._margins_base
+        layout.setContentsMargins(_px(ml), _px(mt), _px(mr), _px(mb))
+        layout.setSpacing(_px(self._spacing_base))
         layout.setAlignment(QtCore.Qt.AlignVCenter)
         self._title_labels = []
         _pt = self.theme_styles._pt
@@ -178,11 +196,17 @@ class InfoCard(QtWidgets.QFrame):
                 self._title_labels.append(label)
 
     def update_theme(self, theme_styles: ThemeStyles):
-        """更新主题样式"""
+        """更新主题样式（含字号/margins/spacing/DPI 缩放重算）"""
         self.theme_styles = theme_styles
         self._apply_style()
         try:
+            _px = self.theme_styles._px
             _pt = self.theme_styles._pt
+            lo = self.layout()
+            if lo is not None:
+                ml, mt, mr, mb = self._margins_base
+                lo.setContentsMargins(_px(ml), _px(mt), _px(mr), _px(mb))
+                lo.setSpacing(_px(self._spacing_base))
             for label in getattr(self, "_title_labels", []):
                 label.setStyleSheet(
                     f"color: {self.theme_styles.c.get('label')}; "

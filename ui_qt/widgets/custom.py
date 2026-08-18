@@ -5,15 +5,33 @@ from PyQt5.QtCore import Qt
 class CircleAvatar(QtWidgets.QLabel):
     """
     自定义圆形头像控件，解决 QSS border-radius 锯齿及大图裁剪问题
+
+    新契约（DPI 跟随）：
+      - 构造参数 size 传 base 尺寸（像素数，按 1x = 1.0 scale）；
+      - 内部按传入的 ThemeStyles._px 折算到当前 DPI 并 setFixedSize；
+      - 暴露 update_theme(theme_styles) 方法，主题/缩放变化时重算尺寸并重绘。
     """
-    def __init__(self, pixmap=None, size=80, parent=None):
+    def __init__(self, pixmap=None, size=80, theme_styles=None, parent=None):
         super().__init__(parent)
         self._pix = pixmap
-        # size 由调用方负责 DPI 缩放（传入 _px 后的值）；这里只接受最终像素尺寸。
-        self.setFixedSize(size, size)
+        self._base_size = size
+        self._theme_styles = theme_styles
+        # 若传入 theme_styles 就按 scale 折算；否则兼容旧调用方（传已 _px 后的值）
+        if self._theme_styles is not None:
+            s = self._theme_styles._px(size)
+        else:
+            s = size
+        self.setFixedSize(s, s)
 
     def set_pixmap(self, pix):
         self._pix = pix
+        self.update()
+
+    def update_theme(self, theme_styles):
+        """主题/缩放变化时：重算尺寸 + 重绘。"""
+        self._theme_styles = theme_styles
+        s = theme_styles._px(self._base_size)
+        self.setFixedSize(s, s)
         self.update()
 
     def paintEvent(self, event):
@@ -22,7 +40,6 @@ class CircleAvatar(QtWidgets.QLabel):
         painter.setRenderHint(QtGui.QPainter.SmoothPixmapTransform)
 
         if not self._pix or self._pix.isNull():
-            # 绘制占位底色
             painter.setBrush(QtGui.QColor("#EEF2F7"))
             painter.setPen(Qt.NoPen)
             painter.drawEllipse(0, 0, self.width(), self.height())
@@ -33,10 +50,6 @@ class CircleAvatar(QtWidgets.QLabel):
         path.addEllipse(0, 0, d, d)
         painter.setClipPath(path)
 
-        # 比例模式填满圆形区域 (类似 CSS object-fit: cover)。
-        # 直接 scale 到 widget 的逻辑尺寸即可 —— 在 AA_UseHighDpiPixmaps 开启时
-        # Qt 会在内部按物理像素渲染，无需手动乘 devicePixelRatio（之前那样做会让
-        # QPixmap.width() 仍报物理像素，导致居中坐标算错、头像只显示四分之一）。
         scaled_pixmap = self._pix.scaled(
             self.size(), Qt.KeepAspectRatioByExpanding, Qt.SmoothTransformation
         )

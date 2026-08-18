@@ -87,7 +87,9 @@ class VersionPage(BasePage):
 
         self.pv_proxy_combo = NoWheelComboBox()
         self.pv_proxy_combo.addItems(["不使用", "gh-proxy", "自定义"])
-        self.pv_proxy_combo.setFixedWidth(self._px(140))
+        self._pv_proxy_combo_width_base = 140
+        self.pv_proxy_combo.setFixedWidth(self._px(self._pv_proxy_combo_width_base))
+        self._dpi_sized_widgets.append((self.pv_proxy_combo, "setFixedWidth", self._pv_proxy_combo_width_base))
         self.pv_proxy_combo.setStyleSheet(self.theme_manager.styles.input_style())
 
         if hasattr(self.app, 'version_manager'):
@@ -135,7 +137,9 @@ class VersionPage(BasePage):
 
         self.timeout_combo = NoWheelComboBox()
         self.timeout_combo.addItems(["60秒", "120秒", "180秒", "300秒", "600秒"])
-        self.timeout_combo.setFixedWidth(self._px(85))
+        self._timeout_combo_width_base = 85
+        self.timeout_combo.setFixedWidth(self._px(self._timeout_combo_width_base))
+        self._dpi_sized_widgets.append((self.timeout_combo, "setFixedWidth", self._timeout_combo_width_base))
         self.timeout_combo.setStyleSheet(self.theme_manager.styles.input_style())
 
         # 设置当前值
@@ -214,7 +218,9 @@ class VersionPage(BasePage):
         self.history_table = StyledTableWidget(self.theme_manager.styles)
         self.history_table.setColumnCount(4)
         self.history_table.setHorizontalHeaderLabels(["提交哈希", "日期", "作者", "提交信息"])
-        self.history_table.setMinimumHeight(self._px(400))
+        self._history_table_min_height_base = 400
+        self.history_table.setMinimumHeight(self._px(self._history_table_min_height_base))
+        self._dpi_sized_widgets.append((self.history_table, "setMinimumHeight", self._history_table_min_height_base))
 
         header = self.history_table.horizontalHeader()
         header.setSectionResizeMode(0, QtWidgets.QHeaderView.ResizeToContents)

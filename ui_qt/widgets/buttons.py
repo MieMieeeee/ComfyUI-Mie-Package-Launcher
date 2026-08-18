@@ -65,7 +65,8 @@ class LinkButton(QtWidgets.QPushButton):
         super().__init__(text, parent)
         self.theme_styles = theme_styles
         self.setObjectName("LinkButton")
-        self.setMinimumHeight(theme_styles._px(40))
+        self._min_height_base = 40
+        self.setMinimumHeight(theme_styles._px(self._min_height_base))
         self.setCursor(QtCore.Qt.PointingHandCursor)
         try:
             self.setFlat(False)
@@ -91,6 +92,12 @@ class LinkButton(QtWidgets.QPushButton):
         graphics scene 拓扑.
         """
         try:
+            from core.render_guard import is_safe_ui as _is_safe_ui
+            if _is_safe_ui():
+                return
+        except Exception:
+            pass
+        try:
             effect = QtWidgets.QGraphicsDropShadowEffect(self)
             effect.setBlurRadius(15)
             effect.setOffset(0, 4)
@@ -103,6 +110,7 @@ class LinkButton(QtWidgets.QPushButton):
 
     def update_theme(self, theme_styles: ThemeStyles):
         self.theme_styles = theme_styles
+        self.setMinimumHeight(self.theme_styles._px(self._min_height_base))
         self._apply_style()
 
     def _set_effect(self, show: bool):
@@ -149,8 +157,10 @@ class ThemeButton(QtWidgets.QPushButton):
         self.theme_value = theme_value
         self.setObjectName("ThemeBtn")
         self.setCheckable(True)
-        self.setFixedWidth(theme_styles._px(70))
-        self.setMinimumHeight(theme_styles._px(60))
+        self._width_base = 70
+        self._min_height_base = 60
+        self.setFixedWidth(theme_styles._px(self._width_base))
+        self.setMinimumHeight(theme_styles._px(self._min_height_base))
         self.setCursor(QtCore.Qt.PointingHandCursor)
         self.setProperty("theme_value", theme_value)
         self._apply_style()
@@ -161,6 +171,8 @@ class ThemeButton(QtWidgets.QPushButton):
     def update_theme(self, theme_styles: ThemeStyles):
         """更新主题样式"""
         self.theme_styles = theme_styles
+        self.setFixedWidth(self.theme_styles._px(self._width_base))
+        self.setMinimumHeight(self.theme_styles._px(self._min_height_base))
         self._apply_style()
 
 
@@ -191,3 +203,9 @@ class IconButton(QtWidgets.QPushButton):
                 color: {self.theme_styles.c.get('sidebar_text')};
             }}
         """)
+
+    def update_theme(self, theme_styles: ThemeStyles):
+        """更新主题样式，按 scale 重算几何尺寸 & 字号 & 圆角"""
+        self.theme_styles = theme_styles
+        self.setFixedSize(self.theme_styles._px(self._size), self.theme_styles._px(self._size))
+        self._apply_style()
