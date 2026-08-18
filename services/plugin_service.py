@@ -29,6 +29,8 @@ from __future__ import annotations
 import os
 import logging
 import itertools
+import json
+import re
 import sys
 import threading
 import time
@@ -63,6 +65,9 @@ _DEFAULT_TIMEOUT = 3600
 _LOG_LIMIT = 4000
 # cm_fast 包装器约定退出码：install(CNR) 时 registry 缓存文件缺失，需转原生 cm-cli。
 _CM_FAST_EXIT_CACHE_MISSING = 3
+# Manager HTTP API 探测缓存 TTL（秒）；轮询间隔（秒）。
+_API_PROBE_TTL = 30.0
+_API_POLL_INTERVAL = 1.0
 
 logger = logging.getLogger("comfyui_launcher")
 # 流式执行 cm-cli 时的日志序号（便于在 launcher.log 检索某次 install 的完整原始输出）
@@ -122,6 +127,10 @@ class PluginService:
         # key: (str(path), mtime_ns)，value: parsed list[dict]
         # 每次调用先找最文件，mtime 同则直接返回上次解析结果，避免每次搜索重扫 2MB JSON。
         self._reg_cache: tuple = (None, None, None)  # (path_str, mtime_ns, result)
+        # CNR registry 双索引缓存（id → entry / repo url → entry），同样 mtime 失效
+        self._reg_index_cache: tuple = (None, None, None)
+        # Manager API 可用性探测缓存 (port, ts, ok)，TTL 见 _API_PROBE_TTL
+        self._api_probe_cache: tuple = (None, 0.0, False)
 
     # ---- 缓存辅助（P1-3 meta-review）----
     def _evict_git_info_cache(self, target: Any = None) -> None:
@@ -1028,19 +1037,366 @@ class PluginService:
                 # 契约说明：stderr 并入 stdout 流式返回，这里返回空串。所有文本都能在 stdout 拿到。
                 "stderr": "", "error": None}
 
+    # ---- Manager HTTP 队列 API（ComfyUI 在跑时的快路径，与网页版同一代码路径）----
+    # 路由挂在 ComfyUI server 的 aiohttp 上（manager_server.py 注册到 PromptServer.routes），
+    # 无鉴权（install/uninstall 系列要求 security_level ∈ {weak, normal, normal-}，本包 weak 通过）。
+    # API 免子进程冷启动（服务端内存里 cnr_map 全热，安装速度=网页版）；要求 ComfyUI 在跑。
+    # 分发规则：API 前置失败（没跑/Manager 缺/队列忙/构造不出 payload）→ 返回 None，
+    # 调用方降级 cm_fast 包装器；POST 已成功后不降级（避免重复执行同一操作）。
+
+    def _manager_port(self) -> Optional[int]:
+        try:
+            port = (self.app.custom_port.get() or "8188").strip()
+            return int(port)
+        except Exception:
+            return None
+
+    def _http_json(self, method: str, path: str, body=None, timeout: float = 5.0):
+        """对 127.0.0.1:<port> 发 JSON 请求。返回 (status, data, err)；status=0=连不上。"""
+        import urllib.request
+        import urllib.error
+        port = self._manager_port()
+        if port is None:
+            return 0, None, "端口无效"
+        url = f"http://127.0.0.1:{port}{path}"
+        headers = {"Accept": "application/json", "User-Agent": "ComfyUI-Launcher"}
+        data = None
+        if body is not None:
+            data = json.dumps(body).encode("utf-8")
+            headers["Content-Type"] = "application/json"
+        req = urllib.request.Request(url, data=data, headers=headers, method=method)
+        try:
+            with urllib.request.urlopen(req, timeout=timeout) as resp:
+                raw = resp.read()
+                try:
+                    parsed = json.loads(raw.decode("utf-8")) if raw else None
+                except Exception:
+                    parsed = raw.decode("utf-8", "replace")
+                return resp.status, parsed, None
+        except urllib.error.HTTPError as e:
+            try:
+                txt = e.read().decode("utf-8", "replace")[:200]
+            except Exception:
+                txt = ""
+            return e.code, txt, None
+        except Exception as e:
+            return 0, None, str(e)
+
+    def _manager_api_available(self) -> bool:
+        """ComfyUI 在跑且 Manager queue API 在（GET /manager/version 2xx）。
+
+        结果缓存 (port, _API_PROBE_TTL)；失败也缓存，避免每次操作白等超时。
+        Manager 被禁用/版本过旧 → 404 → False；ComfyUI 停了 → 连接失败 → False。
+        """
+        port = self._manager_port()
+        if port is None:
+            return False
+        p, ts, ok = self._api_probe_cache
+        if p == port and (time.time() - ts) < _API_PROBE_TTL:
+            return ok
+        status, _, err = self._http_json("GET", "/manager/version", timeout=2.0)
+        ok = 200 <= status < 300
+        if not ok:
+            logger.debug("manager-api 探测失败: status=%s err=%s", status, err)
+        self._api_probe_cache = (port, time.time(), ok)
+        return ok
+
+    def _api_queue_idle(self) -> bool:
+        """GET /manager/queue/status：队列空闲才走 API。
+
+        队列忙 = 用户正在网页端批量操作 → 不 reset 不等待，调用方降级包装器，
+        绝不干扰网页端队列（reset 会清掉对方未处理的项）。
+        """
+        status, data, _ = self._http_json("GET", "/manager/queue/status", timeout=3.0)
+        if not (200 <= status < 300) or not isinstance(data, dict):
+            return False
+        return not data.get("is_processing", False)
+
+    def _api_run_queue(self, posts, on_progress=None, cancel_event=None,
+                       timeout: float = float(_DEFAULT_TIMEOUT)) -> Optional[dict[str, Any]]:
+        """提交一组 queue 操作并等队列跑完（镜像网页前端流程）。
+
+        posts: [(path, body)]。流程：探测+队列空闲检查 → 逐项 POST（任一非 2xx →
+        返回 None 降级，此时尚未 start，服务端不会跑）→ POST /manager/queue/start
+        （201=已在跑也当成功）→ 轮询 /manager/queue/status 至 is_processing=false。
+        POST 全部成功后不再降级（重跑同一操作有副作用），轮询超时/取消按错误返回。
+
+        返回：None=前置失败（调用方降级包装器）；{ok, log, error}=API 路径已执行。
+        逐项结果只在 websocket 事件里（HTTP 拿不到）——装没装上由上层 rescan
+        （plugins_page 的 finally _populate_from_service）呈现。
+        """
+        if not posts:
+            return None
+        if not self._manager_api_available() or not self._api_queue_idle():
+            return None
+        for path, body in posts:
+            status, data, _ = self._http_json("POST", path, body=body)
+            if not (200 <= status < 300):
+                logger.info("manager-api: POST %s -> %s（降级包装器）data=%s", path, status, data)
+                return None
+        status, _, _ = self._http_json("POST", "/manager/queue/start", timeout=3.0)
+        if not (200 <= status < 300):
+            # POST 已成功但 start 失败：条目还挂在队列里，不降级避免重跑，按错误返回
+            return {"ok": False, "log": "", "error": f"Manager API queue/start 状态码 {status}"}
+        deadline = time.monotonic() + timeout
+        last_done = -1
+        while time.monotonic() < deadline:
+            time.sleep(_API_POLL_INTERVAL)
+            if cancel_event is not None and cancel_event.is_set():
+                return {"ok": False, "log": "", "error": "用户取消（服务端队列可能仍在处理）"}
+            status, data, _ = self._http_json("GET", "/manager/queue/status", timeout=3.0)
+            if not (200 <= status < 300) or not isinstance(data, dict):
+                continue  # 瞬时网络抖动：继续轮询
+            if not data.get("is_processing", False):
+                return {"ok": True, "log": f"Manager API 队列完成（{len(posts)} 项）", "error": None}
+            done = data.get("done_count")
+            if isinstance(done, int) and done != last_done:
+                last_done = done
+                if on_progress:
+                    try:
+                        on_progress(done, data.get("total_count") or len(posts))
+                    except Exception:
+                        pass
+        return {"ok": False, "log": "", "error": f"Manager API 队列超时（{int(timeout)}s）"}
+
+    def _cnr_lookup(self, key: str) -> Optional[dict[str, str]]:
+        """按 CNR id 或 repository url 查 registry 条目 → {id, version, repository}。
+
+        数据源同 _cnr_registry_map（user/__manager/cache/*_nodes.json，mtime 缓存）。
+        version 取 latest_version.version——与网页版默认「装 CNR 最新版」一致。
+        """
+        key = (key or "").strip()
+        if not key:
+            return None
+        try:
+            cache_dir = self._comfyui_dir() / "user" / "__manager" / "cache"
+            if not cache_dir.exists():
+                return None
+            candidates = sorted(cache_dir.glob("*_nodes.json"),
+                                key=lambda p: p.stat().st_mtime, reverse=True)
+            if not candidates:
+                return None
+            path = candidates[0]
+            try:
+                mtime_ns = path.stat().st_mtime_ns
+            except Exception:
+                mtime_ns = None
+            cached_path, cached_mtime, cached = self._reg_index_cache
+            if (cached_path == str(path) and cached_mtime == mtime_ns
+                    and cached is not None):
+                by_id, by_repo = cached
+            else:
+                data = json.loads(path.read_text(encoding="utf-8"))
+                by_id: dict[str, dict] = {}
+                by_repo: dict[str, dict] = {}
+                for n in data.get("nodes", []):
+                    if not isinstance(n, dict):
+                        continue
+                    nid = (n.get("id") or "").strip()
+                    repo = (n.get("repository") or "").strip().rstrip("/")
+                    lv = n.get("latest_version")
+                    ver = str(lv.get("version", "") or "") if isinstance(lv, dict) else ""
+                    entry = {"id": nid, "version": ver, "repository": repo}
+                    if nid:
+                        by_id[nid] = entry
+                    if repo:
+                        by_repo[repo] = entry
+                self._reg_index_cache = (str(path), mtime_ns, (by_id, by_repo))
+            norm = key.rstrip("/")
+            if norm.endswith(".git"):
+                norm = norm[:-4]
+            hit = by_id.get(key) or by_repo.get(norm)
+            return hit or None
+        except Exception:
+            logger.debug("cnr_lookup(%r) 失败", key, exc_info=True)
+            return None
+
+    @staticmethod
+    def _plugin_git_url(plugin_dir: Path) -> Optional[str]:
+        """读 <plugin>/.git/config 第一个 remote url（无子进程，Manager git_url 同款）。"""
+        cfg = plugin_dir / ".git" / "config"
+        if not cfg.is_file():
+            return None  # .git 是文件（worktree/submodule）或无 .git → None（降级）
+        try:
+            import configparser
+            cp = configparser.ConfigParser(strict=False)
+            cp.read(cfg, encoding="utf-8")
+            for sec in cp.sections():
+                if sec.lower().startswith("remote ") and cp.has_option(sec, "url"):
+                    return cp.get(sec, "url").strip()
+        except Exception:
+            return None
+        return None
+
+    @staticmethod
+    def _pyproject_version(plugin_dir: Path) -> Optional[str]:
+        """读 pyproject.toml [project] 段的 version（逐行扫描，避免 toml 依赖）。"""
+        try:
+            text = (plugin_dir / "pyproject.toml").read_text(encoding="utf-8", errors="ignore")
+        except Exception:
+            return None
+        cur = None
+        for line in text.splitlines():
+            s = line.strip()
+            if s.startswith("[") and s.endswith("]"):
+                cur = s[1:-1].strip().lower()
+            elif cur == "project":
+                m = re.match(r'version\s*=\s*["\']([^"\']+)', s)
+                if m:
+                    return m.group(1).strip()
+        return None
+
+    def _plugin_queue_identity(self, name: str) -> Optional[dict[str, Any]]:
+        """为已安装插件构造 queue API 身份 payload（分类与 Manager 自身一致：
+        InstalledNodePackage.from_fullpath → resolve_from_path）。
+
+        - .tracking/ + pyproject.toml → CNR 固定版：{id, version=semver}
+        - .git url 命中 registry      → nightly：{id, version='nightly'}
+        - 其他 .git                    → unknown：{version='unknown', files=[url]}
+        - 都凑不出（无 git / worktree）→ None（调用方降级包装器，cm-cli 原生鲁棒）
+        """
+        try:
+            plugin_dir = PATHS.plugins_dir(self._comfyui_dir()) / str(name)
+            if not plugin_dir.is_dir():
+                return None
+            cnr_id = None
+            id_file = plugin_dir / ".git" / ".cnr-id"
+            if id_file.is_file():
+                try:
+                    cnr_id = id_file.read_text(encoding="utf-8", errors="ignore").strip() or None
+                except Exception:
+                    cnr_id = None
+            if (plugin_dir / ".tracking").is_dir() and (plugin_dir / "pyproject.toml").is_file():
+                ver = self._pyproject_version(plugin_dir)
+                if ver and cnr_id:
+                    return {"id": cnr_id, "version": ver}
+            url = self._plugin_git_url(plugin_dir)
+            if url:
+                entry = self._cnr_lookup(url)
+                nid = cnr_id or (entry or {}).get("id") or ""
+                if nid:
+                    return {"id": nid, "version": "nightly"}
+                return {"version": "unknown", "files": [url]}
+            return None
+        except Exception:
+            logger.debug("plugin identity 构造失败: %s", name, exc_info=True)
+            return None
+
+    def _api_try_install(self, node_spec, on_stage=None,
+                         cancel_event=None) -> Optional[dict[str, Any]]:
+        """install 的 API 快路径（CNR id）。None=不适用/前置失败（降级包装器）。"""
+        spec = str(node_spec or "").strip()
+        if not spec or spec.lower().startswith(("http://", "https://")):
+            return None  # git URL：listen_all 下 API 高风险分支必被安全门拒 → 包装器
+        entry = self._cnr_lookup(spec)
+        if not entry or not entry.get("id") or not entry.get("version"):
+            return None  # registry 查不到（非 CNR id / 缓存缺失）→ cm-cli 解析更全
+        body = {"id": entry["id"], "version": entry["version"],
+                "selected_version": entry["version"],
+                "channel": "default", "mode": "cache"}
+        logger.info("manager-api: install %s@%s", entry["id"], entry["version"])
+
+        def _prog(done, tot):
+            if on_stage:
+                on_stage(f"正在安装...（Manager 队列 {done}/{tot}）")
+
+        if on_stage:
+            on_stage("开始安装...")
+        res = self._api_run_queue([("/manager/queue/install", body)],
+                                  on_progress=_prog, cancel_event=cancel_event)
+        if res is not None and res.get("ok"):
+            try:
+                self._evict_git_info_cache(None)  # 结果目录名未知 → 全清（对齐 _lifecycle install 分支）
+            except Exception:
+                pass
+        return res
+
+    def _api_try_lifecycle(self, op: str, target) -> Optional[dict[str, Any]]:
+        """uninstall/disable/enable 的 API 快路径。"""
+        ident = self._plugin_queue_identity(str(target))
+        if ident is None:
+            return None
+        body: dict[str, Any] = dict(ident)
+        body.update({"channel": "default", "mode": "cache"})
+        if op == "enable":
+            # enable 复用 install 接口 + skip_post_install：已禁用的 CNR/nightly 节点
+            # 走服务端同步快路径（manager_server.py:1439-1462）；unknown 禁用节点走
+            # unknown 分支由 install_by_id 返回 enable action。
+            body["skip_post_install"] = True
+            if body.get("version") != "unknown":
+                body["selected_version"] = body["version"]
+        path = {"uninstall": "/manager/queue/uninstall",
+                "disable": "/manager/queue/disable"}.get(op, "/manager/queue/install")
+        logger.info("manager-api: %s %s（与网页版同路径）", op, body.get("id") or target)
+        res = self._api_run_queue([(path, body)])
+        if res is not None and res.get("ok"):
+            try:
+                self._evict_git_info_cache(str(target))
+            except Exception:
+                pass
+        return res
+
+    def _api_try_update_selected(self, nodes: list[str]) -> Optional[dict[str, Any]]:
+        """update_selected 的 API 快路径。任一插件身份构造失败 → 整批降级。"""
+        posts = []
+        for n in nodes:
+            ident = self._plugin_queue_identity(str(n))
+            if ident is None:
+                return None
+            body = dict(ident)
+            body.update({"channel": "default", "mode": "cache"})
+            posts.append(("/manager/queue/update", body))
+        logger.info("manager-api: update ×%d（与网页版同路径）", len(posts))
+        res = self._api_run_queue(posts)
+        if res is None:
+            return None
+        if res.get("ok"):
+            try:
+                self._evict_git_info_cache(list(nodes))
+            except Exception:
+                pass
+            return {"updated": True, "up_to_date": False, "log": res["log"], "error": None}
+        return {"updated": False, "up_to_date": False, "log": res.get("log", ""),
+                "error": res.get("error") or "Manager API 更新失败"}
+
+    def _api_try_update_all(self) -> Optional[dict[str, Any]]:
+        """update_all 的 API 快路径。body 必须带 mode=cache：服务端 reload(mode) 未传
+        dont_wait（默认 True → 过期缓存本地读），但 mode 非 'cache' 时
+        get_cnr_data(cache_mode=False) 会跳过全部缓存分支 → 同步全量拉取 5 分钟。
+        401（worker 占用）等非 2xx → None 降级包装器。
+        """
+        logger.info("manager-api: update_all（mode=cache，与网页版同路径）")
+        res = self._api_run_queue([("/manager/queue/update_all", {"mode": "cache"})])
+        if res is None:
+            return None
+        if res.get("ok"):
+            try:
+                self._evict_git_info_cache(None)
+            except Exception:
+                pass
+            return {"updated": True, "up_to_date": False, "log": res["log"], "error": None}
+        return {"updated": False, "up_to_date": False, "log": res.get("log", ""),
+                "error": res.get("error") or "Manager API 更新失败"}
+
     # ---- 更新操作 ----
     def update_all(self) -> dict[str, Any]:
-        """更新全部插件（cm-cli update all，含 pip 依赖修复）。
+        """更新全部插件（优先 Manager API，降级 cm-cli update all，含 pip 依赖修复）。
 
         返回契约（对齐 services.update_service）：{updated, up_to_date, log, error}
         """
+        api = self._api_try_update_all()
+        if api is not None:
+            return api
         return self._do_update(["all"])
 
     def update_selected(self, nodes: list[str]) -> dict[str, Any]:
-        """更新指定插件（cm-cli update <node>...）。"""
+        """更新指定插件（优先 Manager API，降级 cm-cli update <node>...）。"""
         if not nodes:
             return {"updated": False, "up_to_date": False, "log": "",
                     "error": "未指定要更新的插件"}
+        api = self._api_try_update_selected([str(n) for n in nodes])
+        if api is not None:
+            return api
         return self._do_update([str(n) for n in nodes])
 
     def uninstall(self, target):
@@ -1056,7 +1412,10 @@ class PluginService:
         return self._lifecycle("enable", target)
 
     def install(self, node_spec):
-        """安装插件（cm-cli install <CNR id | git url>）。"""
+        """安装插件（优先 Manager API，降级 cm-cli install <CNR id | git url>）。"""
+        api = self._api_try_install(node_spec)
+        if api is not None:
+            return api
         return self._lifecycle("install", node_spec)
 
     def install_streaming(self, node_spec, on_stage=None, cancel_event=None) -> dict[str, Any]:
@@ -1073,6 +1432,10 @@ class PluginService:
         再对应杀；若 owner_map 还没注册（极端时序 race），兜底只杀自己 cmd_id 注册到
         _active_streaming_procs 的最后一个（避免空扫）。
         """
+        # 优先 Manager API（ComfyUI 在跑时与网页版同路径；不适用自动落回下方包装器路径）
+        api = self._api_try_install(node_spec, on_stage=on_stage, cancel_event=cancel_event)
+        if api is not None:
+            return api
         # cancel_event 包装：set 时立刻 tree-kill 自己 event 归属的 cmd_id 对应 proc，不等 readline
         if cancel_event is not None:
             _orig_set = cancel_event.set
@@ -1127,7 +1490,15 @@ class PluginService:
                 "error": None if rc == 0 else f"cm-cli install 退出码 {rc}"}
 
     def _lifecycle(self, op: str, target) -> dict[str, Any]:
-        """uninstall/disable/enable/install 共用：跑 cm-cli <op> <target>。"""
+        """uninstall/disable/enable/install 共用：跑 cm-cli <op> <target>。
+
+        uninstall/disable/enable 先试 Manager API（ComfyUI 在跑时秒级），
+        不适用/前置失败自动降级本路径（cm_fast 包装器 → 原生 cm-cli）。
+        """
+        if op in ("uninstall", "disable", "enable"):
+            api = self._api_try_lifecycle(op, target)
+            if api is not None:
+                return api
         res = self._run_cmcli([op, str(target)])
         if res["error"]:
             return {"ok": False, "log": "", "error": res["error"]}

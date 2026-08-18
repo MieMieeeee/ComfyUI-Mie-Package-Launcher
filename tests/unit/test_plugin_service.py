@@ -1020,3 +1020,210 @@ def test_run_cmcli_streaming_normal_path_cleans_up_without_nameerror():
     assert "Installation was successful" in res["stdout"]
     # cmd_id 已从活跃映射清掉
     assert not getattr(svc, "_active_streaming_procs", {1: 1})
+
+
+# ---- Manager HTTP 队列 API 分发 ----
+
+class _FakeHttp:
+    """_http_json 替身：按 (method, path) 返回预设 (status, data)。可记录 POST body。"""
+
+    def __init__(self, routes):
+        self.routes = routes          # {(method, path): (status, data) | callable}
+        self.posts = []               # [(path, body)]
+        self.gets = []
+
+    def __call__(self, method, path, body=None, timeout=5.0):
+        if method == "POST":
+            self.posts.append((path, body))
+        else:
+            self.gets.append(path)
+        hit = self.routes.get((method, path))
+        if callable(hit):
+            hit = hit(body)
+        status, data = hit if hit else (404, {})
+        return status, data, None
+
+
+def _svc_for_api(tmp_path=None):
+    svc = PluginService(_app())
+    svc.app.custom_port.get.return_value = "8188"
+    if tmp_path is not None:
+        svc._comfyui_dir = lambda: tmp_path
+    return svc
+
+
+def _api_route_installed(extra=None):
+    """「Manager 在跑且队列空闲」的默认路由表；各操作 POST 默认 200。"""
+    routes = {
+        ("GET", "/manager/version"): (200, "V3.41"),
+        ("GET", "/manager/queue/status"): (200, {"is_processing": False,
+                                                 "total_count": 0, "done_count": 0}),
+        ("POST", "/manager/queue/start"): (200, None),
+        ("POST", "/manager/queue/install"): (200, None),
+        ("POST", "/manager/queue/uninstall"): (200, None),
+        ("POST", "/manager/queue/disable"): (200, None),
+        ("POST", "/manager/queue/update"): (200, None),
+        ("POST", "/manager/queue/update_all"): (200, None),
+    }
+    routes.update(extra or {})
+    return routes
+
+
+def test_api_try_install_url_spec_skips_api():
+    svc = _svc_for_api()
+    fake = _FakeHttp({})
+    with patch.object(svc, "_http_json", fake):
+        assert svc._api_try_install("https://github.com/x/y") is None
+    assert fake.posts == []
+
+
+def test_api_try_install_unknown_id_skips_api(tmp_path):
+    svc = _svc_for_api(tmp_path)  # 无 CNR 缓存文件
+    fake = _FakeHttp({})
+    with patch.object(svc, "_http_json", fake):
+        assert svc._api_try_install("not-a-cnr-id") is None
+    assert fake.posts == []
+
+
+def test_api_try_install_cnr_id_posts_latest_version(tmp_path):
+    svc = _svc_with_cnr_cache(tmp_path, [
+        {"id": "comfyui-foo", "repository": "https://github.com/a/foo",
+         "latest_version": {"version": "1.2.3"}},
+    ])
+    svc.app.custom_port.get.return_value = "8188"
+    fake = _FakeHttp(_api_route_installed())
+    stages = []
+    with patch.object(svc, "_http_json", fake), \
+         patch.object(svc, "_evict_git_info_cache") as evict:
+        res = svc._api_try_install("comfyui-foo", on_stage=stages.append)
+
+    assert res == {"ok": True, "log": "Manager API 队列完成（1 项）", "error": None}
+    path, body = fake.posts[0]
+    assert path == "/manager/queue/install"
+    assert body == {"id": "comfyui-foo", "version": "1.2.3",
+                    "selected_version": "1.2.3", "channel": "default", "mode": "cache"}
+    evict.assert_called_once_with(None)
+    assert "开始安装" in stages[0]
+
+
+def test_api_run_queue_busy_returns_none(tmp_path):
+    svc = _svc_for_api(tmp_path)
+    fake = _FakeHttp({("GET", "/manager/version"): (200, "V3.41"),
+                      ("GET", "/manager/queue/status"):
+                          (200, {"is_processing": True})})
+    with patch.object(svc, "_http_json", fake):
+        assert svc._api_run_queue([("/manager/queue/install", {"id": "x"})]) is None
+    assert fake.posts == []  # 队列忙绝不 POST
+
+
+def test_api_run_queue_post_rejected_returns_none(tmp_path):
+    svc = _svc_for_api(tmp_path)
+    fake = _FakeHttp(_api_route_installed(
+        extra={("POST", "/manager/queue/install"): (404, "not found")}))
+    with patch.object(svc, "_http_json", fake):
+        assert svc._api_run_queue([("/manager/queue/install", {"id": "x"})]) is None
+
+
+def test_api_run_queue_probe_unavailable_returns_none(tmp_path):
+    svc = _svc_for_api(tmp_path)
+    fake = _FakeHttp({("GET", "/manager/version"): (0, None)})
+    with patch.object(svc, "_http_json", fake):
+        assert svc._api_run_queue([("/manager/queue/install", {"id": "x"})]) is None
+
+
+def test_api_try_lifecycle_cnr_tracking_identity(tmp_path):
+    svc = _svc_for_api(tmp_path)
+    pdir = tmp_path / "custom_nodes" / "ComfyUI-Foo"
+    (pdir / ".tracking").mkdir(parents=True)
+    (pdir / ".git").mkdir()
+    (pdir / ".git" / ".cnr-id").write_text("comfyui-foo", encoding="utf-8")
+    (pdir / "pyproject.toml").write_text(
+        '[project]\nname = "foo"\nversion = "2.1.0"\n', encoding="utf-8")
+
+    fake = _FakeHttp(_api_route_installed())
+    with patch.object(svc, "_http_json", fake), \
+         patch.object(svc, "_evict_git_info_cache") as evict:
+        res = svc._api_try_lifecycle("uninstall", "ComfyUI-Foo")
+
+    assert res["ok"] is True
+    path, body = fake.posts[0]
+    assert path == "/manager/queue/uninstall"
+    assert body["id"] == "comfyui-foo" and body["version"] == "2.1.0"
+    evict.assert_called_once_with("ComfyUI-Foo")
+
+
+def test_api_try_lifecycle_unknown_git_identity(tmp_path):
+    svc = _svc_for_api(tmp_path)  # 无 registry 缓存 → url 不命中 → unknown
+    pdir = tmp_path / "custom_nodes" / "ComfyUI-Bar"
+    (pdir / ".git").mkdir(parents=True)
+    (pdir / ".git" / "config").write_text(
+        '[remote "origin"]\n\turl = https://github.com/b/bar.git\n', encoding="utf-8")
+
+    fake = _FakeHttp(_api_route_installed())
+    with patch.object(svc, "_http_json", fake):
+        res = svc._api_try_lifecycle("disable", "ComfyUI-Bar")
+
+    assert res["ok"] is True
+    path, body = fake.posts[0]
+    assert path == "/manager/queue/disable"
+    assert body["version"] == "unknown"
+    assert body["files"] == ["https://github.com/b/bar.git"]
+
+
+def test_api_try_lifecycle_no_identity_returns_none(tmp_path):
+    svc = _svc_for_api(tmp_path)
+    (tmp_path / "custom_nodes" / "Plain").mkdir(parents=True)  # 无 .git 无 tracking
+    fake = _FakeHttp({})
+    with patch.object(svc, "_http_json", fake):
+        assert svc._api_try_lifecycle("uninstall", "Plain") is None
+    assert fake.posts == []
+
+
+def test_api_try_update_all_uses_cache_mode(tmp_path):
+    svc = _svc_for_api(tmp_path)
+    fake = _FakeHttp(_api_route_installed())
+    with patch.object(svc, "_http_json", fake), \
+         patch.object(svc, "_evict_git_info_cache") as evict:
+        res = svc._api_try_update_all()
+
+    assert res["updated"] is True
+    path, body = fake.posts[0]
+    assert path == "/manager/queue/update_all" and body == {"mode": "cache"}
+    evict.assert_called_once_with(None)
+
+
+def test_lifecycle_uninstall_uses_api_when_available(tmp_path):
+    """公开方法 _lifecycle：uninstall 先走 API，成功即返回不再跑 cm-cli。"""
+    svc = _svc_for_api(tmp_path)
+    pdir = tmp_path / "custom_nodes" / "ComfyUI-Foo"
+    (pdir / ".tracking").mkdir(parents=True)
+    (pdir / ".git").mkdir()
+    (pdir / ".git" / ".cnr-id").write_text("comfyui-foo", encoding="utf-8")
+    (pdir / "pyproject.toml").write_text('[project]\nversion = "2.1.0"\n', encoding="utf-8")
+
+    fake = _FakeHttp(_api_route_installed())
+    with patch.object(svc, "_http_json", fake), \
+         patch.object(svc, "_run_cmcli") as run_cmcli:
+        res = svc.uninstall("ComfyUI-Foo")
+
+    assert res["ok"] is True
+    run_cmcli.assert_not_called()
+
+
+def test_pyproject_version_parses_project_section(tmp_path):
+    (tmp_path / "pyproject.toml").write_text(
+        '[tool.comfy]\nversion = "9.9.9"\n[project]\nname = "x"\nversion = "1.2.3"\n',
+        encoding="utf-8")
+    assert PluginService._pyproject_version(tmp_path) == "1.2.3"
+    (tmp_path / "pyproject.toml").write_text("[project]\nname = 'x'\n", encoding="utf-8")
+    assert PluginService._pyproject_version(tmp_path) is None
+
+
+def test_plugin_git_url_reads_first_remote(tmp_path):
+    gd = tmp_path / ".git"
+    gd.mkdir()
+    (gd / "config").write_text(
+        '[core]\n\trepositoryformatversion = 0\n'
+        '[remote "origin"]\n\turl = https://github.com/a/foo\n'
+        '[remote "upstream"]\n\turl = https://github.com/b/foo\n', encoding="utf-8")
+    assert PluginService._plugin_git_url(tmp_path) == "https://github.com/a/foo"
