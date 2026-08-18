@@ -803,6 +803,10 @@ class PluginService:
                 return False
 
         targets = [
+            # dev=仓库根（config.json 所在 launcher/），Nuitka 打包=dist 根（exe 旁
+            # launcher/），都取 __file__ 上两级优先——stable_project_root 在无
+            # ComfyUI/main.py marker 时会退到 exe 目录（dev 的系统 python 目录）
+            Path(__file__).resolve().parent.parent / "launcher" / "plugins" / "cm_fast.py",
             PATHS.stable_project_root() / "launcher" / "plugins" / "cm_fast.py",
             Path(tempfile.gettempdir()) / "cm_fast.py",
         ]
