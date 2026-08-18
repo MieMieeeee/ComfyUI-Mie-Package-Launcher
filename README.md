@@ -502,7 +502,8 @@ pytest --cov=. --cov-report=html
 - `build_parameters.json` 自动 bump 时间戳；`version_preferences` 在 config.json 里调。
 
 </details>
-</parameters>
+
+</parameters>
 <a id="faq-9"></a>
 <details>
 <summary><strong>启动器 GUI 闪退（混合显卡 / 核显驱动崩溃）</strong></summary>

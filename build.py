@@ -46,8 +46,12 @@ RELEASE_DOC_FILES = [
 def _locate_opengl32sw_dll():
     """搜索当前 Python 环境 PyQt5 wheel 内的 opengl32sw.dll。
 
-    Windows DLL 搜索顺序：exe 同级目录 > PATH。把它放 exe 旁即可让
-    QT_OPENGL=software 生效，无需 Enigma 虚拟化 / 注册表。
+    DLL 绝对不裸放在 exe 旁或 release 顶层目录（用户拿到的是「单 exe + 文档」）。
+    我们把 DLL 藏进 Nuitka onedir 产物的 ``_internal/PyQt5/Qt5/bin/``：
+    - 用户看不到；
+    - render_guard._locate_opengl32sw() 的候选 2 已覆盖此路径；
+    - Windows DLL 搜索会在 onedir run 时把 _internal 下 PyQt5 Qt5/bin 正常解析
+     （Enigma box 会把整个 dist_dir 虚拟化进去，_internal 也在内）。
 
     Returns
     -------
@@ -73,23 +77,25 @@ def _locate_opengl32sw_dll():
     return None
 
 
-def _copy_opengl32sw_to(target_dir):
-    """把 opengl32sw.dll 拷到 target_dir（dist / release 子目录）；找不到返回 False。"""
+def _stash_opengl32sw_into_internal(dist_dir):
+    """把 opengl32sw.dll 藏进 Nuitka onedir 产物的 ``_internal/PyQt5/Qt5/bin/``。
+
+    用户看不到顶层 DLL，但运行时 render_guard 能在 _internal 子树找到。
+    找不到 / 写失败返回 False，不中断构建。
+    """
     src = _locate_opengl32sw_dll()
     if src is None:
         return False
     try:
-        if not os.path.isdir(target_dir):
-            os.makedirs(target_dir, exist_ok=True)
+        target_dir = os.path.join(dist_dir, "_internal", "PyQt5", "Qt5", "bin")
+        os.makedirs(target_dir, exist_ok=True)
         dst = os.path.join(target_dir, "opengl32sw.dll")
         if os.path.abspath(src) == os.path.abspath(dst):
             return True
         shutil.copy2(src, dst)
-        if os.path.isfile(dst):
-            return True
+        return bool(os.path.isfile(dst))
     except Exception:
         return False
-    return False
 
 
 def parse_args():
@@ -376,12 +382,17 @@ def step_nuitka_compile(is_test):
             print(f"[输出] EXE: {exe_path}")
             print(f"[体积] 总计: {size_mb:.1f} MB")
 
-            # 复制 opengl32sw.dll 到 dist（exe 旁）—— Windows 搜索顺序里 exe 同级最高优先
-            dll_ok = _copy_opengl32sw_to(dist_dir)
+            # 把 opengl32sw.dll 藏进 _internal/PyQt5/Qt5/bin/（用户在顶层/发布子目录
+            # 里完全看不到 DLL）。release 顶层不放任何 DLL，保证「单 exe + 文档」。
+            dll_ok = _stash_opengl32sw_into_internal(dist_dir)
             if dll_ok:
-                print("[渲染] opengl32sw.dll 已复制到 dist（软件渲染 fallback 就绪）")
+                internal_dll_path = os.path.join(
+                    dist_dir, "_internal", "PyQt5", "Qt5", "bin", "opengl32sw.dll"
+                )
+                size_kb = os.path.getsize(internal_dll_path) / 1024
+                print(f"[渲染] opengl32sw.dll 已藏入 _internal/PyQt5/Qt5/bin ({size_kb:.0f} KB)")
             else:
-                print("[警告] 未找到 opengl32sw.dll（跳过；compat/safe 模式将缺 DLL）")
+                print("[警告] 未找到 opengl32sw.dll（跳过；compat/safe 模式将缺软件渲染 DLL）")
 
             print(f"\n[下一步] 使用 Enigma Virtual Box 打包 {output_name}.dist 目录")
             print(f"[提示] 内部 exe 已命名为 {internal_name}.exe，避免与外层同名冲突")
@@ -527,12 +538,9 @@ def step_finalize_release(boxed_exe, version, is_test):
     # 3) 操作文档（让 agent / 用户拿到 release 包就能读到 CLI 介绍）
     step_copy_release_docs(sub_dir, project_dir)
 
-    # 4) opengl32sw.dll：box exe 旁，与 ComfyUI启动器.exe 同子目录
-    release_dll_ok = _copy_opengl32sw_to(sub_dir)
-    if release_dll_ok:
-        print(f"[渲染] opengl32sw.dll 已复制到发布目录: {sub_dir}")
-    else:
-        print("[警告] 未复制 opengl32sw.dll 到发布目录（跳过；compat/safe 模式将缺 DLL）")
+    # 4) 不裸放任何 DLL：opengl32sw.dll 已藏进 dist/_internal/PyQt5/Qt5/bin/，
+    #    Enigma box 会把整个 dist_dir（含 _internal 子树）虚拟化进单 exe，
+    #    发布子目录保持「单 exe + wrapper + 文档」零 DLL。
 
     return sub_dir
 
@@ -632,14 +640,18 @@ def main():
     print(f"  输出目录:  {os.path.relpath(final_path, project_dir)}")
     print(f"  目录大小:  {size_mb:.1f} MB")
 
-    # 构建尾部 sanity：确认发布子目录里 opengl32sw.dll / wrapper / build_parameters 就位
-    release_dll = os.path.join(final_path, "opengl32sw.dll")
+    # 构建尾部 sanity：发布子目录内绝对不能有任何 DLL（用户要「单 exe + 文档」）。
+    # 同时确认 wrapper / build_parameters 就位；opengl32sw.dll 已在 Enigma box 里。
     release_wrapper = os.path.join(final_path, CLI_WRAPPER_NAME)
-    if os.path.isfile(release_dll):
-        release_dll_size_kb = os.path.getsize(release_dll) / 1024
-        print(f"  [渲染 DLL] opengl32sw.dll 就位，{release_dll_size_kb:.0f} KB")
+    has_any_dll = any(
+        f.lower().endswith(".dll") for f in os.listdir(final_path)
+        if os.path.isfile(os.path.join(final_path, f))
+    )
+    if has_any_dll:
+        print("  [警告] 发布顶层发现 DLL 文件（请排查 step_finalize_release 是否遗漏清理）!")
     else:
-        print("  [渲染 DLL] 缺 opengl32sw.dll（compat/safe 模式 fallback 不生效）")
+        print("  [发布顶层无 DLL（符合「单 exe + 文档」要求")
+    print(f"  [渲染 DLL] opengl32sw.dll 藏在 box 内部（Enigma box 内（dist/_internal/PyQt5/Qt5/bin/opengl32sw.dll）")
     if os.path.isfile(release_wrapper):
         print(f"  [CLI Wrapper] {CLI_WRAPPER_NAME} 就位")
     else:

@@ -517,5 +517,32 @@ class TestLocateDLL:
         assert found is not None
         assert Path(found) == dll
 
+    def test_finds_dll_inside_internal_pyqt5_bin(self, sandbox, monkeypatch):
+        """Nuitka onedir path: DLL 藏在 exe/_internal/PyQt5/Qt5/bin/。
+        顶层（exe 旁）没有 DLL，必须命中 _internal 子路径。"""
+        internal_dir = sandbox.root / "_internal" / "PyQt5" / "Qt5" / "bin"
+        internal_dir.mkdir(parents=True)
+        dll = internal_dir / "opengl32sw.dll"
+        dll.write_bytes(b"internal dll placeholder")
+        # exe 旁故意不放，确保只走 _internal 分支
+        exe_sibling = sandbox.root / "opengl32sw.dll"
+        assert not exe_sibling.exists()
+        monkeypatch.setattr(sys, "executable", str(sandbox.root / "launcher.exe"))
+        # 必须也屏蔽 PyQt5 开发 wheel 路径，否则 find_spec 命中了会走候选 3
+        import importlib.util as _iu
+        def _mocked_find_spec(name, *a, **k):
+            if name == "PyQt5":
+                return None
+            return _real_iu_find_spec(name, *a, **k)
+        _real_iu_find_spec = _iu.find_spec
+        monkeypatch.setattr(_iu, "find_spec", _mocked_find_spec)
+        import core.render_guard as rg
+        rg._dll_cached = False
+        rg._dll_path = None
+        found = rg._locate_opengl32sw()
+        assert found is not None, (
+            "_internal/PyQt5/Qt5/bin/opengl32sw.dll 必须被命中")
+        assert Path(found).resolve() == dll.resolve()
+
 
 import sys  # noqa: E402  (used in test above, import here to keep style clean)

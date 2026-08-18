@@ -2,7 +2,8 @@ from pathlib import Path
 import sys
 import os
 
-def stable_project_root() -> Path:
+
+def stable_project_root() -> Path:
     """Return a stable project root for resolving relative config paths.
 
     Why this exists: a relative ``comfyui_root`` like "." historically
