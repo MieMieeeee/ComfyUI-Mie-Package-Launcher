@@ -898,7 +898,7 @@ class PluginService:
             # 读线程仍在跑 = 超时：tree-kill 进程树，给 reader 一点时间收尾
             PluginService._tree_kill_pid(proc.pid)
             t.join(timeout=5)
-            active_procs.pop(cmd_id, None)
+            self._active_streaming_procs.pop(cmd_id, None)
             return {"returncode": -1, "stdout": "".join(out_parts), "stderr": "",
                     "error": f"cm-cli 超时（{timeout}s）"}
         try:
@@ -910,10 +910,10 @@ class PluginService:
             # 保险：如果 reader 命中 cancel 但 kill 还没成功，再 tree-kill 一次
             if proc.poll() is None:
                 PluginService._tree_kill_pid(proc.pid)
-            active_procs.pop(cmd_id, None)
+            self._active_streaming_procs.pop(cmd_id, None)
             return {"returncode": -1, "stdout": "".join(out_parts), "stderr": "",
                     "error": "用户取消"}
-        active_procs.pop(cmd_id, None)
+        self._active_streaming_procs.pop(cmd_id, None)
         return {"returncode": proc.returncode, "stdout": "".join(out_parts),
                 # 契约说明：stderr 并入 stdout 流式返回，这里返回空串。所有文本都能在 stdout 拿到。
                 "stderr": "", "error": None}

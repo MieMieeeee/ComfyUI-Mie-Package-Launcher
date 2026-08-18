@@ -926,3 +926,42 @@ def test_fill_git_info_noop_when_no_git_plugins():
     svc._fill_git_info(results, [])  # 不抛、不改
     assert results[0]["version"] == ""
 
+
+
+# ---- _run_cmcli_streaming 清理回归（096bc2a 曾引入 active_procs NameError）----
+
+class _FakeProc:
+    """Popen 替身：输出两行后正常退出（正常完成路径）。"""
+
+    def __init__(self):
+        self.pid = 424242
+        self.returncode = 0
+        self.stdout = iter(["Install: https://github.com/x/y\n",
+                            "Installation was successful.\n"])
+
+    def wait(self, timeout=None):
+        return 0
+
+    def poll(self):
+        return 0
+
+
+def test_run_cmcli_streaming_normal_path_cleans_up_without_nameerror():
+    """回归：正常完成路径必须清掉 _active_streaming_procs 且不抛 NameError。
+
+    096bc2a 曾把清理写成未定义的局部名 active_procs（901/913/916 三处），
+    导致每次流式安装完成后必抛 NameError → UI 误报"安装失败"。
+    """
+    svc = PluginService(_app())
+    import sys as _sys
+    svc._python_exec = lambda: _sys.executable
+    svc._cm_cli_path = lambda: Path(__file__)
+
+    with patch("services.plugin_service.subprocess.Popen", return_value=_FakeProc()):
+        res = svc._run_cmcli_streaming(["install", "x"])
+
+    assert res["returncode"] == 0
+    assert res["error"] is None
+    assert "Installation was successful" in res["stdout"]
+    # cmd_id 已从活跃映射清掉
+    assert not getattr(svc, "_active_streaming_procs", {1: 1})
