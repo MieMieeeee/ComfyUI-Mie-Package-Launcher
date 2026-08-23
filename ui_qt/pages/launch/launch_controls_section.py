@@ -493,25 +493,32 @@ class LaunchControlsSection(QtWidgets.QWidget):
             ))
         cb_console.setToolTip("启动时是否显示ComfyUI的命令行窗口（关闭后ComfyUI在后台运行）")
 
-        # 同一行 checkbox 起始点对齐：按 6 个 label 中最长字串算 setMinimumWidth，
-        # 短文字的 cb 内部左对齐 indicator + 右边留白，长文字的刚好撑满。
-        _opt_labels = [cb_fast.text(), cb_dynamic_vram.text(), cb_fast_disk.text(),
-                       cb_api.text(), cb_nodes.text(), cb_console.text()]
+        # 同一行 checkbox 起始点对齐：setMinimumWidth 不够（QCheckBox 内部 indicator 不一定严格左对齐）。
+        # 改成把 cb 包到 fixed-width 容器 + AlignLeft，强制 indicator 落在容器左边缘。
         _opt_fm = QtGui.QFontMetrics(self.font())
-        _opt_max_w = max(_opt_fm.horizontalAdvance(t) for t in _opt_labels)
-        for _cb in (cb_fast, cb_dynamic_vram, cb_fast_disk, cb_api, cb_nodes, cb_console):
-            _cb.setMinimumWidth(_opt_max_w + 30)
+        _opt_max_w = max(_opt_fm.horizontalAdvance(cb.text()) for cb in
+                         (cb_fast, cb_dynamic_vram, cb_fast_disk, cb_api, cb_nodes, cb_console))
+        _opt_uniform_w = _opt_max_w + 30
+
+        def _align_wrap(cb):
+            box = QtWidgets.QWidget()
+            box.setFixedWidth(_opt_uniform_w)
+            lay = QtWidgets.QHBoxLayout(box)
+            lay.setContentsMargins(0, 0, 0, 0)
+            lay.setSpacing(0)
+            lay.addWidget(cb, 0, Qt.AlignLeft | Qt.AlignVCenter)
+            return box
 
         hbox_opts_row1 = QtWidgets.QHBoxLayout()
-        hbox_opts_row1.addWidget(cb_fast)
-        hbox_opts_row1.addWidget(cb_dynamic_vram)
-        hbox_opts_row1.addWidget(cb_fast_disk)
+        hbox_opts_row1.addWidget(_align_wrap(cb_fast))
+        hbox_opts_row1.addWidget(_align_wrap(cb_dynamic_vram))
+        hbox_opts_row1.addWidget(_align_wrap(cb_fast_disk))
         hbox_opts_row1.addStretch(1)
 
         hbox_opts_row2 = QtWidgets.QHBoxLayout()
-        hbox_opts_row2.addWidget(cb_api)
-        hbox_opts_row2.addWidget(cb_nodes)
-        hbox_opts_row2.addWidget(cb_console)
+        hbox_opts_row2.addWidget(_align_wrap(cb_api))
+        hbox_opts_row2.addWidget(_align_wrap(cb_nodes))
+        hbox_opts_row2.addWidget(_align_wrap(cb_console))
         hbox_opts_row2.addStretch(1)
 
         form_layout.addLayout(hbox_opts_row1, 4, 0, 1, 4)
