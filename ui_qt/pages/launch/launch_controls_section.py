@@ -150,6 +150,7 @@ class LaunchControlsSection(QtWidgets.QWidget):
             ("PyTorch (SDPA)", "--use-pytorch-cross-attention"),
             ("Flash Attention", "--use-flash-attention"),
             ("Sage Attention", "--use-sage-attention"),
+            ("Kitchen Attention (Built-in)", "--use-ck-attention"),
             ("Split Attention", "--use-split-cross-attention"),
             ("Quad Attention", "--use-quad-cross-attention"),
         ]
