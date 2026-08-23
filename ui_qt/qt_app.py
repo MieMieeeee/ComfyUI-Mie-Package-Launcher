@@ -837,6 +837,8 @@ class PyQtLauncher(QtWidgets.QMainWindow, process_events.ProcessCallback):
         self.custom_port = Var("8188")
         self.disable_all_custom_nodes = BoolVar(False)
         self.disable_api_nodes = BoolVar(False)
+        self.disable_dynamic_vram = BoolVar(False)
+        self.fast_disk = BoolVar(False)
         self.use_new_manager = BoolVar(False)
         self.extra_launch_args = Var("")
         self.attention_mode = Var("")
@@ -874,6 +876,12 @@ class PyQtLauncher(QtWidgets.QMainWindow, process_events.ProcessCallback):
             )
             self.disable_api_nodes.set(
                 bool(launch_cfg.get("disable_api_nodes", self.disable_api_nodes.get()))
+            )
+            self.disable_dynamic_vram.set(
+                bool(launch_cfg.get("disable_dynamic_vram", self.disable_dynamic_vram.get()))
+            )
+            self.fast_disk.set(
+                bool(launch_cfg.get("fast_disk", self.fast_disk.get()))
             )
             self.use_new_manager.set(
                 bool(launch_cfg.get("use_new_manager", self.use_new_manager.get()))
@@ -3366,6 +3374,8 @@ class PyQtLauncher(QtWidgets.QMainWindow, process_events.ProcessCallback):
             self.vram_mode.set("")
             self.use_fast_mode.set(False)
             self.disable_api_nodes.set(False)
+            self.disable_dynamic_vram.set(False)
+            self.fast_disk.set(False)
             self.enable_cors.set(True)
             self.listen_all.set(True)
             self.custom_port.set("8188")

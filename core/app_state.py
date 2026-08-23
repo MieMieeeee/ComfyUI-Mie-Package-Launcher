@@ -17,6 +17,8 @@ class AppState:
     comfyui_path: Optional[Path] = None
     enable_fast_mode: bool = False
     disable_all_custom_nodes: bool = False
+    disable_dynamic_vram: bool = False
+    fast_disk: bool = False
     extra_args: str = ""
     attention_mode: str = ""
     listen_all: bool = True

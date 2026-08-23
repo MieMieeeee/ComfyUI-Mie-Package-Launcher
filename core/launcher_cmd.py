@@ -70,6 +70,10 @@ def build_launch_params(app, env_id=None):
             cmd.append("--disable-all-custom-nodes")
         if getattr(app, 'disable_api_nodes', None) and app.disable_api_nodes.get():
             cmd.append("--disable-api-nodes")
+        if getattr(app, 'disable_dynamic_vram', None) and app.disable_dynamic_vram.get():
+            cmd.append("--disable-dynamic-vram")
+        if getattr(app, 'fast_disk', None) and app.fast_disk.get():
+            cmd.append("--fast-disk")
         # Manager UI mode
         try:
             use_new_manager = getattr(app, 'use_new_manager', None)

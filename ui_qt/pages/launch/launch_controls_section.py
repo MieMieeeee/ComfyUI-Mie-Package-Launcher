@@ -466,6 +466,18 @@ class LaunchControlsSection(QtWidgets.QWidget):
             cb_api.toggled.connect(lambda v: (self.app.disable_api_nodes.set(v), self._save_config()))
         cb_api.setToolTip("禁用ComfyUI的API节点，不使用API节点可选择，能减少启动资源占用")
 
+        cb_dynamic_vram = QtWidgets.QCheckBox("禁用动态显存")
+        if hasattr(self.app, 'disable_dynamic_vram'):
+            cb_dynamic_vram.setChecked(self.app.disable_dynamic_vram.get())
+            cb_dynamic_vram.toggled.connect(lambda v: (self.app.disable_dynamic_vram.set(v), self._save_config()))
+        cb_dynamic_vram.setToolTip("关闭 ComfyUI 动态显存管理。配合 --lowvram / --novram 使用效果更佳，OOM 时可勾选")
+
+        cb_fast_disk = QtWidgets.QCheckBox("快速磁盘加载")
+        if hasattr(self.app, 'fast_disk'):
+            cb_fast_disk.setChecked(self.app.fast_disk.get())
+            cb_fast_disk.toggled.connect(lambda v: (self.app.fast_disk.set(v), self._save_config()))
+        cb_fast_disk.setToolTip("动态加载优先走 NVMe 磁盘而非 unpinned RAM。NVMe 用户 OOM 时可勾选")
+
         cb_nodes = QtWidgets.QCheckBox("禁用所有插件(DEBUG)")
         if hasattr(self.app, 'disable_all_custom_nodes'):
             cb_nodes.setChecked(self.app.disable_all_custom_nodes.get())
@@ -483,6 +495,8 @@ class LaunchControlsSection(QtWidgets.QWidget):
 
         hbox_opts.addWidget(cb_fast)
         hbox_opts.addWidget(cb_api)
+        hbox_opts.addWidget(cb_dynamic_vram)
+        hbox_opts.addWidget(cb_fast_disk)
         hbox_opts.addWidget(cb_nodes)
         hbox_opts.addWidget(cb_console)
         hbox_opts.addStretch(1)
