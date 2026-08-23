@@ -498,7 +498,8 @@ class LaunchControlsSection(QtWidgets.QWidget):
         _opt_fm = QtGui.QFontMetrics(self.font())
         _opt_max_w = max(_opt_fm.horizontalAdvance(cb.text()) for cb in
                          (cb_fast, cb_dynamic_vram, cb_fast_disk, cb_api, cb_nodes, cb_console))
-        _opt_uniform_w = _opt_max_w + 30
+        _opt_uniform_w = _opt_max_w + 50  # 30=indicator+4 padding 太小，
+                                                 # 最长 label "显示ComfyUI命令行窗口" 末尾被裁。加大到 50。
 
         def _align_wrap(cb):
             box = QtWidgets.QWidget()
