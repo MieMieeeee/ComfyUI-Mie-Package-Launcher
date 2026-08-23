@@ -495,13 +495,17 @@ class LaunchControlsSection(QtWidgets.QWidget):
 
         hbox_opts_row1 = QtWidgets.QHBoxLayout()
         hbox_opts_row1.addWidget(cb_fast)
+        hbox_opts_row1.addSpacing(20)
         hbox_opts_row1.addWidget(cb_dynamic_vram)
+        hbox_opts_row1.addSpacing(20)
+        hbox_opts_row1.addWidget(cb_fast_disk)
         hbox_opts_row1.addStretch(1)
 
         hbox_opts_row2 = QtWidgets.QHBoxLayout()
-        hbox_opts_row2.addWidget(cb_fast_disk)
         hbox_opts_row2.addWidget(cb_api)
+        hbox_opts_row2.addSpacing(20)
         hbox_opts_row2.addWidget(cb_nodes)
+        hbox_opts_row2.addSpacing(20)
         hbox_opts_row2.addWidget(cb_console)
         hbox_opts_row2.addStretch(1)
 
