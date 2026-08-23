@@ -921,8 +921,10 @@ class SystemSettingsPage(BasePage):
             if eff <= 0:
                 eff = 1.0
             DEFAULT_BASE_W, DEFAULT_BASE_H = 1350, 900
-            pw = int(round(DEFAULT_BASE_W * eff))
-            ph = int(round(DEFAULT_BASE_H * eff))
+            # 与 _setup_ui 保持一致：scale<1 不回缩到 base×scale 以下（避免 ui_scale=0.8 等场景
+            # 下用户看到 1080×720 把启动页快捷目录裁掉），scale>1 正常放大（HIDPI）。
+            pw = max(DEFAULT_BASE_W, int(round(DEFAULT_BASE_W * eff)))
+            ph = max(DEFAULT_BASE_H, int(round(DEFAULT_BASE_H * eff)))
             try:
                 is_max_fn = getattr(self.app, "isMaximized", None)
                 show_n_fn = getattr(self.app, "showNormal", None)
