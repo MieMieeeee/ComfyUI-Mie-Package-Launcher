@@ -493,14 +493,20 @@ class LaunchControlsSection(QtWidgets.QWidget):
             ))
         cb_console.setToolTip("启动时是否显示ComfyUI的命令行窗口（关闭后ComfyUI在后台运行）")
 
-        hbox_opts.addWidget(cb_fast)
-        hbox_opts.addWidget(cb_api)
-        hbox_opts.addWidget(cb_dynamic_vram)
-        hbox_opts.addWidget(cb_fast_disk)
-        hbox_opts.addWidget(cb_nodes)
-        hbox_opts.addWidget(cb_console)
-        hbox_opts.addStretch(1)
-        form_layout.addLayout(hbox_opts, 4, 0, 1, 4)
+        hbox_opts_row1 = QtWidgets.QHBoxLayout()
+        hbox_opts_row1.addWidget(cb_fast)
+        hbox_opts_row1.addWidget(cb_dynamic_vram)
+        hbox_opts_row1.addStretch(1)
+
+        hbox_opts_row2 = QtWidgets.QHBoxLayout()
+        hbox_opts_row2.addWidget(cb_fast_disk)
+        hbox_opts_row2.addWidget(cb_api)
+        hbox_opts_row2.addWidget(cb_nodes)
+        hbox_opts_row2.addWidget(cb_console)
+        hbox_opts_row2.addStretch(1)
+
+        form_layout.addLayout(hbox_opts_row1, 4, 0, 1, 4)
+        form_layout.addLayout(hbox_opts_row2, 5, 0, 1, 4)
 
         # ============== 额外选项（左）==============
         extra_label = QtWidgets.QLabel("额外选项：")
