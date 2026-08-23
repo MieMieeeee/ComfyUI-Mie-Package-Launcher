@@ -1416,6 +1416,9 @@ class PluginsPage(BasePage):
         self._render_from_list(plugins, preserve_outdated=False)
         # 首次 populate 后重刷统计 & 重置 Tab/搜索
         self._refresh_stats(plugins)
+        # 列表重建后 checkbox 全 unchecked（批量替换不触发 itemChanged），
+        # 必须重刷 ActionBar 计数 badge + 按钮显隐，否则 badge 残留旧数字。
+        self._refresh_action_bar()
         try:
             if getattr(self, "_current_filter", None) != "all":
                 self._set_filter("all")
