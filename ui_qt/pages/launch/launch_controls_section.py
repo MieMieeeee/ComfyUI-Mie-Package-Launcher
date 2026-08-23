@@ -13,7 +13,7 @@ class LaunchControlsSection(QtWidgets.QWidget):
     启动控制区块控件
     
     包含：GPU/CPU模式、端口设置、局域网访问、显存策略、
-    注意力优化、浏览器选择、FP16/API/插件DEBUG选项、额外启动参数
+    注意力优化、浏览器选择、FP16/API/插件选项、额外启动参数
     """
 
     def __init__(self, app_context, theme_manager=None, parent=None):
@@ -478,7 +478,7 @@ class LaunchControlsSection(QtWidgets.QWidget):
             cb_fast_disk.toggled.connect(lambda v: (self.app.fast_disk.set(v), self._save_config()))
         cb_fast_disk.setToolTip("动态加载优先走 NVMe 磁盘而非 unpinned RAM。NVMe 用户 OOM 时可勾选")
 
-        cb_nodes = QtWidgets.QCheckBox("禁用所有插件(DEBUG)")
+        cb_nodes = QtWidgets.QCheckBox("禁用所有插件")
         if hasattr(self.app, 'disable_all_custom_nodes'):
             cb_nodes.setChecked(self.app.disable_all_custom_nodes.get())
             cb_nodes.toggled.connect(lambda v: (self.app.disable_all_custom_nodes.set(v), self._save_config()))
