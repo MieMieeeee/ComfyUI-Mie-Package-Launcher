@@ -191,6 +191,7 @@ class HeadlessAppContext:
         self.disable_api_nodes = BoolVar(launch_opts.get("disable_api_nodes", False))
         self.disable_dynamic_vram = BoolVar(launch_opts.get("disable_dynamic_vram", False))
         self.fast_disk = BoolVar(launch_opts.get("fast_disk", False))
+        self.disable_pinned_memory = BoolVar(launch_opts.get("disable_pinned_memory", False))
         self.use_new_manager = BoolVar(False)
         self.extra_launch_args = StringVar(launch_opts.get("extra_args", ""))
         self.user_env_vars = StringVar(launch_opts.get("env_vars", ""))

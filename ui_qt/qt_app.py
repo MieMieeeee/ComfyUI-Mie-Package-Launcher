@@ -839,6 +839,7 @@ class PyQtLauncher(QtWidgets.QMainWindow, process_events.ProcessCallback):
         self.disable_api_nodes = BoolVar(False)
         self.disable_dynamic_vram = BoolVar(False)
         self.fast_disk = BoolVar(False)
+        self.disable_pinned_memory = BoolVar(False)
         self.use_new_manager = BoolVar(False)
         self.extra_launch_args = Var("")
         self.attention_mode = Var("")
@@ -882,6 +883,9 @@ class PyQtLauncher(QtWidgets.QMainWindow, process_events.ProcessCallback):
             )
             self.fast_disk.set(
                 bool(launch_cfg.get("fast_disk", self.fast_disk.get()))
+            )
+            self.disable_pinned_memory.set(
+                bool(launch_cfg.get("disable_pinned_memory", self.disable_pinned_memory.get()))
             )
             self.use_new_manager.set(
                 bool(launch_cfg.get("use_new_manager", self.use_new_manager.get()))
@@ -3376,6 +3380,7 @@ class PyQtLauncher(QtWidgets.QMainWindow, process_events.ProcessCallback):
             self.disable_api_nodes.set(False)
             self.disable_dynamic_vram.set(False)
             self.fast_disk.set(False)
+            self.disable_pinned_memory.set(False)
             self.enable_cors.set(True)
             self.listen_all.set(True)
             self.custom_port.set("8188")
@@ -5415,26 +5420,32 @@ class PyQtLauncher(QtWidgets.QMainWindow, process_events.ProcessCallback):
                 detail = _detail_fn()  # type: tuple | None
                 if detail and len(detail) >= 2:
                     from_mode, to_mode = detail[0], detail[1]
-                    try:
-                        from ui_qt.widgets.dialog_helper import DialogHelper
-                        if to_mode == "safe":
-                            DialogHelper.show_info(
-                                self,
-                                "提示：界面已切换到安全模式",
-                                "检测到上次启动时图形渲染崩溃，为保证可用已自动切换到「安全模式」"
-                                "（关闭所有视觉特效 + 软件渲染）。\n\n"
-                                "如果您想改回自动模式，可前往 系统设置 → 界面与窗口 → "
-                                "界面渲染模式 选择后重启即可。",
-                            )
-                        else:  # compat
-                            DialogHelper.show_info(
-                                self,
-                                "提示：界面已切换到兼容模式",
-                                "检测到上次启动时图形渲染不稳定，已自动启用软件渲染（兼容模式）。\n"
-                                "视觉上基本无感，若仍有闪退会进一步升级到安全模式。",
-                            )
-                    except Exception:
-                        pass
+                    # v9 D: 仅当 from != to（真切换）才弹窗。封顶 (from==to) 静默,
+                    # 避免模式没变却报"已切换"的文案失真。
+                    if from_mode != to_mode:
+                        try:
+                            from ui_qt.widgets.dialog_helper import DialogHelper
+                            if to_mode == "safe":
+                                DialogHelper.show_info(
+                                    self,
+                                    "提示：界面已切换到安全模式",
+                                    "检测到上次启动时图形渲染崩溃，为保证可用已自动切换到「安全模式」"
+                                    "（关闭所有视觉特效 + 软件渲染）。\n\n"
+                                    "如果您想改回自动模式，可前往 系统设置 → 界面与窗口 → "
+                                    "界面渲染模式 → 自动 → 重启。\n" +
+                                 "驱动修复后系统也会自动尝试回升（正常关闭累计 5 次后）。",
+                                )
+                            else:  # compat
+                                DialogHelper.show_info(
+                                    self,
+                                    "提示：界面已切换到兼容模式",
+                                    "检测到上次启动时图形渲染不稳定，已自动启用软件渲染（兼容模式）。\n"
+                                    "视觉上基本无感，若仍有闪退会进一步升级到安全模式。\n\n" +
+                                 "改回自动模式：系统设置 → 界面与窗口 → 界面渲染模式 → 自动 → 重启。\n" +
+                                 "驱动修复后系统也会自动尝试回升（正常关闭累计 5 次后）。",
+                                )
+                        except Exception:
+                            pass
         except Exception:
             pass
 

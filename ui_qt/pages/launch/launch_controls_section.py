@@ -478,6 +478,12 @@ class LaunchControlsSection(QtWidgets.QWidget):
             cb_fast_disk.toggled.connect(lambda v: (self.app.fast_disk.set(v), self._save_config()))
         cb_fast_disk.setToolTip("动态加载优先走 NVMe 磁盘而非 unpinned RAM。NVMe 用户 OOM 时可勾选")
 
+        cb_disable_pinned_memory = QtWidgets.QCheckBox("禁用pinned内存")
+        if hasattr(self.app, 'disable_pinned_memory'):
+            cb_disable_pinned_memory.setChecked(self.app.disable_pinned_memory.get())
+            cb_disable_pinned_memory.toggled.connect(lambda v: (self.app.disable_pinned_memory.set(v), self._save_config()))
+        cb_disable_pinned_memory.setToolTip("禁用 CUDA pinned (page-locked) host memory。pinned 分配失败或 WSL/容器受限环境可勾；与快速磁盘加载可同时启用")
+
         cb_nodes = QtWidgets.QCheckBox("禁用所有插件")
         if hasattr(self.app, 'disable_all_custom_nodes'):
             cb_nodes.setChecked(self.app.disable_all_custom_nodes.get())
@@ -497,7 +503,7 @@ class LaunchControlsSection(QtWidgets.QWidget):
         # 改成把 cb 包到 fixed-width 容器 + AlignLeft，强制 indicator 落在容器左边缘。
         _opt_fm = QtGui.QFontMetrics(self.font())
         _opt_max_w = max(_opt_fm.horizontalAdvance(cb.text()) for cb in
-                         (cb_fast, cb_dynamic_vram, cb_fast_disk, cb_api, cb_nodes, cb_console))
+                         (cb_fast, cb_fast_disk, cb_disable_pinned_memory, cb_dynamic_vram, cb_api, cb_nodes, cb_console))
         _opt_uniform_w = _opt_max_w + 50  # 30=indicator+4 padding 太小，
                                                  # 最长 label "显示ComfyUI命令行窗口" 末尾被裁。加大到 50。
 
@@ -512,8 +518,9 @@ class LaunchControlsSection(QtWidgets.QWidget):
 
         hbox_opts_row1 = QtWidgets.QHBoxLayout()
         hbox_opts_row1.addWidget(_align_wrap(cb_fast))
-        hbox_opts_row1.addWidget(_align_wrap(cb_dynamic_vram))
         hbox_opts_row1.addWidget(_align_wrap(cb_fast_disk))
+        hbox_opts_row1.addWidget(_align_wrap(cb_disable_pinned_memory))
+        hbox_opts_row1.addWidget(_align_wrap(cb_dynamic_vram))
         hbox_opts_row1.addStretch(1)
 
         hbox_opts_row2 = QtWidgets.QHBoxLayout()

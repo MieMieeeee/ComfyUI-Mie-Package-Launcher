@@ -74,6 +74,8 @@ def build_launch_params(app, env_id=None):
             cmd.append("--disable-dynamic-vram")
         if getattr(app, 'fast_disk', None) and app.fast_disk.get():
             cmd.append("--fast-disk")
+        if getattr(app, 'disable_pinned_memory', None) and app.disable_pinned_memory.get():
+            cmd.append("--disable-pinned-memory")
         # Manager UI mode
         try:
             use_new_manager = getattr(app, 'use_new_manager', None)

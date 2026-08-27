@@ -63,6 +63,7 @@ class ConfigManager:
                 "disable_api_nodes": False,
                 "disable_dynamic_vram": False,
                 "fast_disk": False,
+                "disable_pinned_memory": False,
                 "enable_cors": True,
                 "listen_all": True,
                 "extra_args": "",
