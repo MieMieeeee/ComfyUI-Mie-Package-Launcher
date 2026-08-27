@@ -248,6 +248,9 @@ class UpdateService:
                 except Exception:
                     pass
                 if core_res:
+                    # 记录更新前版本（issue 9：CLI 输出 from_version）
+                    if pre_core:
+                        core_res["before"] = pre_core
                     results.append(core_res)
                 # 在内核升级后执行 requirements*.txt 安装，确保前端与模板库等依赖一致
                 if needs_consistency:
@@ -265,6 +268,8 @@ class UpdateService:
                                 index_url=idx,
                                 upgrade=False,
                                 logger=self.app.logger,
+                                on_progress=on_progress,
+                                ignore_pkgs=FROZEN_PKGS,
                             )
                             ok = res.get("success") and not res.get("error")
                             sync_summary.append(f"{rf.name}: {'OK' if ok else 'FAIL'}")
@@ -272,8 +277,8 @@ class UpdateService:
                                 installed_all.append(item)
                             for item in res.get("satisfied") or []:
                                 satisfied_all.append(item)
-                        except Exception:
-                            sync_summary.append(f"{rf.name}: FAIL")
+                        except Exception as e:
+                            sync_summary.append(f"{rf.name}: FAIL ({str(e)[:200]})")
                     results.append(
                         {
                             "component": "requirements",
@@ -283,20 +288,21 @@ class UpdateService:
                             "satisfied": satisfied_all,
                         }
                     )
-            except Exception:
-                results.append({"component": "core", "error": "update failed"})
+            except Exception as e:
+                # 截断前 300 字符避免超长消息（issue 5：排查时需要有效线索）
+                results.append({"component": "core", "error": "update failed: " + str(e)[:300]})
         if do_frontend:
             try:
                 fr = self.update_frontend(False)
                 results.append(fr)
-            except Exception:
-                results.append({"component": "frontend", "error": "update failed"})
+            except Exception as e:
+                results.append({"component": "frontend", "error": "update failed: " + str(e)[:300]})
         if do_templates:
             try:
                 tp = self.update_templates(False)
                 results.append(tp)
-            except Exception:
-                results.append({"component": "templates", "error": "update failed"})
+            except Exception as e:
+                results.append({"component": "templates", "error": "update failed: " + str(e)[:300]})
         lines: List[str] = []
         for res in results:
             comp = res.get("component")
@@ -414,7 +420,7 @@ class UpdateService:
                 if ok:
                     any_success = True
             except Exception as e:
-                sync_summary.append(f"{rf.name}: FAIL")
+                sync_summary.append(f"{rf.name}: FAIL ({str(e)[:200]})")
         return {
             "component": "requirements",
             "updated": any_success and not error_parts,

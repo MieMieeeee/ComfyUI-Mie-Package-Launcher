@@ -1,3 +1,5 @@
+import gzip
+import zlib
 from pathlib import Path
 from urllib.parse import urlparse
 
@@ -284,3 +286,39 @@ def apply_pip_proxy_settings(python_exec: str, pypi_proxy_mode: str, pypi_proxy_
                 logger.exception("应用 PyPI 代理到 pip.ini 时出错")
             except Exception:
                 pass
+
+
+def read_response_raw(resp) -> bytes:
+    """读取 urllib response 的原始 bytes，自动处理 gzip / deflate Content-Encoding。
+
+    Python 的 urllib 不像 requests 那样自动解 Content-Encoding（issue 11），
+    CDN 强制返 gzip 时 json.loads(resp.read()) 会因 zlib header 失败而崩。
+    本函数集中处理：调用方传 ``urllib.response.addinfourl`` 实例进来，
+    拿到解压后的 bytes 用于后续 JSON 解析。
+
+    Args:
+        resp: 有 ``headers`` dict 和 ``read() -> bytes`` 方法的对象
+             （urllib response / MagicMock 都可）。
+
+    Returns:
+        解压后的原始 bytes（Content-Encoding 不是 gzip/deflate 时原样返回）。
+    """
+    raw = resp.read()
+    encoding = (resp.headers.get("Content-Encoding") or "").strip().lower()
+    if not encoding:
+        return raw
+    if encoding == "gzip":
+        return gzip.decompress(raw)
+    if encoding == "deflate":
+        # 一些老旧 CDN 把 deflate 直接发 zlib 流（无 header），
+        # 另一些用 raw deflate（无 zlib header，wbits=-MAX_WBITS）。
+        # 两种都 try，失败回退 raw。
+        try:
+            return zlib.decompress(raw)
+        except zlib.error:
+            try:
+                return zlib.decompress(raw, -zlib.MAX_WBITS)
+            except zlib.error:
+                return raw
+    # brotli / identity / 其它未实现：原样返回，让上层 JSON 解析自己处理
+    return raw

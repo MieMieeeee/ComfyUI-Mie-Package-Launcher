@@ -10,9 +10,7 @@ PackageApplyWorker：把同步的 PackageUpdateService.apply() 包成异步 work
 """
 from __future__ import annotations
 
-import json
 import os
-from pathlib import Path
 from typing import Any
 
 from PyQt5 import QtCore, QtWidgets
@@ -239,6 +237,12 @@ class PackageUpdatePage(BasePage):
         except ValueError as e:
             DialogHelper.show_error(self, "加载失败", str(e))
             return
+        # 与 _on_load_url / _on_load_paste 入口对齐：本地文件也要 validate
+        # 否则篡改 / 损坏的本地 manifest 一路走到 apply 阶段才报错（issue 3）
+        ok, err = self._svc().validate(manifest)
+        if not ok:
+            DialogHelper.show_error(self, "manifest 无效", err or "")
+            return
         self._set_manifest(manifest, f"文件: {resolved}")
 
     def _on_load_url(self):
@@ -400,11 +404,23 @@ class PackageUpdatePage(BasePage):
 
     def _open_first_link(self, links: list):
         from services.model_service import ModelService
+        from ui_qt.widgets.dialog_helper import DialogHelper
+        if not links:
+            return
+        url = links[0].get("url", "")
+        # 安全护栏（issue 7）：page 层先过一次协议白名单，file:/javascript:/ms-windows-store:
+        # 一律拦截（model_service 内部还会再校验一次，深层防御）。
+        if not url.startswith(("http://", "https://")):
+            DialogHelper.show_warning(
+                self,
+                "链接协议不安全",
+                f"已阻止打开非 HTTP(S) 链接：{url[:80]}",
+            )
+            return
         ms = getattr(self.app.services, "model", None)
         if ms is None:
             ms = ModelService(self.app)
-        if links:
-            ms.open_link(links[0].get("url", ""))
+        ms.open_link(url)
 
     def _on_model_verified(self, item_id: str, checked: bool):
         """「我已下载」勾选 → 调 verify_manual → 显示徽章。"""
@@ -543,16 +559,14 @@ class PackageUpdatePage(BasePage):
         self._report_label.setVisible(True)
 
     def _persist_report(self, report: dict):
-        """把 report 写到 launcher/manifests/runs/<run_id>.json（plan §6.7）。"""
+        """落盘 report 到 launcher/manifests/runs/<run_id>.json（plan §6.7）。
+
+        复用 PackageUpdateService.save_report（review 遗留 2），消除两处重复的
+        json 序列化 + 路径拼接逻辑。失败时仅写 logger.warning，不抛。
+        """
         try:
-            run_id = report.get("run_id", "unknown")
-            runs_dir = Path("launcher/manifests/runs")
-            runs_dir.mkdir(parents=True, exist_ok=True)
-            (runs_dir / f"{run_id}.json").write_text(
-                json.dumps(report, ensure_ascii=False, indent=2, default=str),
-                encoding="utf-8")
+            self._svc().save_report(report)
         except Exception as e:
-            # 持久化失败不影响 UI，但要留痕（别完全静默，排查时能看到）
             logger = getattr(self.app, "logger", None)
             if logger is not None:
                 try:

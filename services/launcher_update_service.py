@@ -7,6 +7,7 @@ from urllib.request import urlopen, Request
 from urllib.parse import urlsplit, urlunsplit, quote
 import concurrent.futures
 import json
+from utils.net import read_response_raw
 import hashlib
 import sys
 import os
@@ -189,9 +190,12 @@ class LauncherUpdateService:
     def _fetch_update_payload(self, url: str, headers: dict):
         self._log("debug", "launcher_update: checking %s", url)
         url = _encode_url(url)
-        req = Request(url, headers=headers)
+        # 加 Accept-Encoding 让 CDN 主动压缩响应（issue 11）
+        fetch_headers = dict(headers)
+        fetch_headers.setdefault("Accept-Encoding", "gzip, deflate")
+        req = Request(url, headers=fetch_headers)
         with urlopen(req, timeout=5) as resp:
-            raw = resp.read()
+            raw = read_response_raw(resp)  # 自动解 gzip/deflate
             return json.loads(raw.decode("utf-8", errors="ignore"))
 
     def _build_update_info(

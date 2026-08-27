@@ -27,12 +27,15 @@ GUI 必须丢工作线程跑（PackageApplyWorker），CLI 直接主线程调。
 """
 from __future__ import annotations
 
+import json
 import os
+import threading
+import re
 import time
 import urllib.request
 import uuid
 from pathlib import Path
-from typing import Any, Callable
+from typing import Any, Callable, Optional
 from urllib.error import URLError
 
 from core.package_manifest import (
@@ -73,7 +76,8 @@ class PackageUpdateService:
 
     def __init__(self, app):
         self.app = app
-        self._cancelled = False
+        # 取消信号用 threading.Event，跨线程原子读 / 写（issue 12）。
+        self._cancel_event = threading.Event()
         self._last_report: dict | None = None
 
     # ------------------------------------------------------------------
@@ -161,11 +165,19 @@ class PackageUpdateService:
             cache_path.parent.mkdir(parents=True, exist_ok=True)
         except Exception:
             pass
-        # 拉取（默认严格 TLS，plan §6.4）
+        # 拉取（默认严格 TLS，plan §6.4）。
+        # 加 Accept-Encoding 让 CDN 主动压缩（issue 11）；read_response_raw 自动解 gzip/deflate。
         try:
-            req = urllib.request.Request(url, headers={"User-Agent": "ComfyUI-Launcher"})
+            req = urllib.request.Request(
+                url,
+                headers={
+                    "User-Agent": "ComfyUI-Launcher",
+                    "Accept-Encoding": "gzip, deflate",
+                },
+            )
             with urllib.request.urlopen(req, timeout=30) as resp:
-                data = resp.read()
+                from utils.net import read_response_raw
+                data = read_response_raw(resp)
         except URLError as e:
             raise ValueError(f"URL 拉取失败: {e}") from e
         except Exception as e:
@@ -372,7 +384,8 @@ class PackageUpdateService:
         Returns:
             report dict（plan §3.1.1 schema + exit_hint 字段供调用方判退出码）
         """
-        self._cancelled = False
+        # 复位 cancel 事件（旧任务残留的 set 不影响新一次 apply）
+        self._cancel_event.clear()
         manual_decisions = manual_decisions or {}
         run_id = time.strftime("%Y%m%dT%H-%M-%S") + "-" + uuid.uuid4().hex[:6]
         started = time.strftime("%Y-%m-%dT%H:%M:%S")
@@ -413,7 +426,7 @@ class PackageUpdateService:
 
         # 3. 逐项执行
         for item in items_to_run:
-            if self._cancelled:
+            if self._cancel_event.is_set():
                 report_items.append(self._mk_item_report(item, STATUS_PENDING, error="cancelled"))
                 continue
             decision = manual_decisions.get(item.id)
@@ -624,8 +637,10 @@ class PackageUpdateService:
             env = self._active_env()
             env_name = str(self._current_env_name()).lower()
             root = str(env.get("comfyui_root", "")).lower()
-            needle = channel.replace("v", "")  # "v9" → "9"
-            return needle in env_name or channel in env_name or channel in root or needle in root
+            # token 边界匹配：按 [\s\-_\/]+ 分词后逐 token 比对 channel，
+            # 避免 v9 朴素子串匹配误命中 V19 / V90 / 99 / abc9def。
+            tokens = re.split(r"[\s\-_\/]+", env_name + " " + root)
+            return channel in tokens
         except Exception:
             return True  # 判不了 → 放行（不阻断）
 
@@ -674,6 +689,32 @@ class PackageUpdateService:
             except Exception:
                 pass
 
+    def save_report(self, report: dict) -> Optional["Path"]:
+        """把 report 落盘到 launcher/manifests/runs/<run_id>.json（plan §6.7，issue 10）。
+
+        CLI / GUI 共用：消除两处重复的 persist 逻辑（之前在 ui_qt/pages/package_update_page.py _persist_report）。
+
+        Returns:
+            写入的 Path；IO 异常返回 None（不抛）。
+        """
+        try:
+            run_id = report.get("run_id", "unknown")
+            runs_dir = Path("launcher/manifests/runs")
+            runs_dir.mkdir(parents=True, exist_ok=True)
+            out = runs_dir / f"{run_id}.json"
+            out.write_text(
+                json.dumps(report, ensure_ascii=False, indent=2, default=str),
+                encoding="utf-8",
+            )
+            return out
+        except Exception as e:
+            try:
+                if hasattr(self.app, "logger") and self.app.logger:
+                    self.app.logger.warning("save_report failed: %s", str(e)[:200])
+            except Exception:
+                pass
+            return None
+
     def _empty_summary(self) -> dict:
         return {"total": 0, "ok": 0, "ok_at_alt_path": 0, "skipped": 0,
                 "not_applicable": 0, "failed": 0, "manual_required": 0}
@@ -711,7 +752,8 @@ class PackageUpdateService:
 
     def cancel(self):
         """请求取消（安全停；当前 item 跑完才生效）。"""
-        self._cancelled = True
+        # 用 threading.Event.set()，原子跨线程（issue 12）
+        self._cancel_event.set()
 
     def build_report(self) -> dict | None:
         """返回最近一次 apply 的 report（供 GUI 历史记录 / 持久化用）。"""

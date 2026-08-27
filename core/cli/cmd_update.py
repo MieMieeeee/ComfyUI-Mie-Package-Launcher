@@ -45,10 +45,22 @@ def _do_update(app, target: str) -> dict:
         # perform_batch_update returns (results_list, summary_str)
         items, summary = result
         updated = any(bool(it.get("updated", False)) for it in items) if items else False
+        # 从 items 中抽 core 项的 from_version / to_version（issue 9）。
+        # _run_batch 已把 pre_core 存进 core_res["before"]，这里读 tag/commit。
+        core_item = next((it for it in items if it.get("component") == "core"), None)
+        to_version = None
+        from_version = None
+        if core_item:
+            to_version = core_item.get("tag") or core_item.get("commit")
+            before = core_item.get("before") or {}
+            from_version = before.get("tag") or before.get("commit") or None
         return {
             "updated": updated,
             "up_to_date": not updated and bool(items),
-            "version": None,
+            "version": to_version,
+            "from_version": from_version,
+            "to_version": to_version,
+            "items": items,
             "log": summary,
             "error": None,
         }
@@ -93,12 +105,21 @@ def run(args, app) -> int:
 
     result = _do_update(app, target)
 
+    # 兜底：如果 _do_update 没填 from_version/to_version，从 items 里抽（issue 9）
+    items = result.get("items") or []
+    if result.get("from_version") is None and items:
+        core_item = next((it for it in items if it.get("component") == "core"), None)
+        if core_item:
+            before = core_item.get("before") or {}
+            result["from_version"] = before.get("tag") or before.get("commit") or None
+            result["to_version"] = core_item.get("tag") or core_item.get("commit") or None
+
     if result.get("error"):
         data = {
             "component": target,
             "updated": False,
-            "from_version": None,
-            "to_version": None,
+            "from_version": result.get("from_version"),
+            "to_version": result.get("to_version"),
             "log": result.get("log") or "",
             "error": result["error"],
         }
@@ -112,8 +133,8 @@ def run(args, app) -> int:
         data = {
             "component": target,
             "updated": False,
-            "from_version": None,
-            "to_version": None,
+            "from_version": result.get("from_version"),
+            "to_version": result.get("to_version"),
             "log": result.get("log") or "already up to date",
         }
         if as_json:
@@ -125,8 +146,8 @@ def run(args, app) -> int:
     data = {
         "component": target,
         "updated": bool(result.get("updated")),
-        "from_version": None,
-        "to_version": result.get("version"),
+        "from_version": result.get("from_version"),
+        "to_version": result.get("to_version"),
         "log": result.get("log") or "",
     }
     if as_json:

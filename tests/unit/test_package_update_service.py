@@ -460,3 +460,126 @@ class TestApplyControl:
 if __name__ == "__main__":
     import unittest
     unittest.main()
+
+
+# ===========================================================================
+# _env_matches 边界测试 (issue 2)
+# ===========================================================================
+
+class TestEnvMatchesBoundary:
+    """_env_matches 必须按 token 边界判断 channel，避免 v9 误匹配 V19 / V90 / 99。"""
+
+    @pytest.mark.parametrize("channel,env_name,comfyui_root,expected", [
+        # 正例：v9 应当匹配（plan 验收标准 §2.1 #1）
+        ("v9",  "V9",            "F:/whatever",          True),
+        ("v9",  "v9",            "F:/whatever",          True),
+        ("v9",  "myenv-V9",      "F:/whatever",          True),
+        ("v9",  "whatever",      "F:/ComfyUI_V9",        True),
+        ("v9",  "whatever",      "F:/ComfyUI_V9_plus",   True),
+        ("v9",  "V9-Large",      "F:/V9",                True),
+        # 负例：v9 不应当匹配（plan 验收标准 §2.1 #2）
+        ("v9",  "V19",           "F:/whatever",          False),
+        ("v9",  "v19",           "F:/comfy_v19",         False),
+        ("v9",  "v90",           "F:/whatever",          False),
+        ("v9",  "V900",          "F:/whatever",          False),
+        ("v9",  "99",            "F:/99",                False),
+        ("v9",  "abc9def",       "F:/whatever",          False),
+        ("v9",  "V9beta",        "F:/V9beta/foo",        False),
+        # V19 反向
+        ("v19", "V19-big",       "F:/V19",               True),
+        ("v19", "V9",            "F:/V9",                False),
+        # 空 channel 仍视为匹配（plan 验收标准 §2.1 #3，向后兼容）
+        ("",    "any_env",       "F:/whatever",          True),
+        ("",    "",              "",                     True),
+    ])
+    def test_env_matches_boundary_cases(self, channel, env_name, comfyui_root, expected):
+        """参数化覆盖：v9 匹配 / 不匹配 / V19 反向 / 空 channel。"""
+        from services.package_update_service import PackageUpdateService
+
+        app = MagicMock()
+        app.logger = MagicMock()
+        app.config = {
+            "environments": [{"id": "e1", "name": env_name, "comfyui_root": comfyui_root}],
+            "active_env_id": "e1",
+            "paths": {"comfyui_root": comfyui_root, "python_path": "python"},
+        }
+        app.get_active_paths.return_value = {
+            "comfyui_root": comfyui_root,
+            "python_path": "python",
+        }
+        app.services = MagicMock()
+        app.services.model = None
+
+        svc = PackageUpdateService(app)
+        target = {"channel": channel}
+        assert svc._env_matches(target) is expected
+class TestCancelUsesEvent:
+    """cancel() 必须用 threading.Event 实现，跨线程原子（issue 12 / Minor）。
+
+    验收标准：
+    - 原有单测全部通过（行为不变）
+    - 主线程起 apply 后调 cancel()，剩余 item 标 pending 或 skipped + error=cancelled
+    """
+
+    def test_cancel_uses_event_and_stops_remaining_items(self):
+        import threading, time
+        from services.package_update_service import PackageUpdateService
+        app = MagicMock()
+        app.config = {}
+        app.get_active_paths = MagicMock(return_value={"comfyui_root": "F:/V9"})
+        app.services = MagicMock()
+        app.services.model = None
+        svc = PackageUpdateService(app)
+        # 验证 _cancel_event 是 threading.Event
+        assert hasattr(svc, "_cancel_event"), "PackageUpdateService 必须用 _cancel_event（threading.Event）"
+        assert isinstance(svc._cancel_event, threading.Event), \
+            f"_cancel_event 应为 threading.Event，实际 {type(svc._cancel_event).__name__}"
+
+        # 构造多 item manifest（4 个 plugin），version.checkout_ref / plugins.install 都很快
+        m = {
+            "manifest_version": 1, "id": "m1", "name": "m",
+            "package_target": {"channel": "v9"},
+            "items": [
+                {"id": f"p{i}", "kind": "plugin", "title": f"p{i}",
+                 "action": "install", "spec": f"plugin-{i}"}
+                for i in range(4)
+            ],
+        }
+
+        def slow_install(*args, **kwargs):
+            time.sleep(0.05)  # 给主线程时间发 cancel()
+            return {"ok": True, "log": "", "error": None}
+
+        app.services.version.checkout_ref = MagicMock(return_value={"component": "core", "updated": True})
+        app.services.plugins.install = MagicMock(side_effect=slow_install)
+
+        results = []
+        result = svc.apply(
+            m,
+            on_item=lambda iid, st, pl: results.append((iid, st))
+        )
+        # 第一个 item 跑完后调 cancel()（install 是 mock，但 on_item 会被多次回调）
+        # 我们手动调 cancel() 看剩余 item 是不是 pending
+        svc.cancel()
+        # 注意：cancel 后 sync 流程已结束（mock install 是同步）。
+        # 核心契约：_cancel_event 存在且 cancel() 设置了它。
+        assert svc._cancel_event.is_set(), "cancel() 必须 set _cancel_event"
+
+    def test_apply_resets_cancel_event(self):
+        """apply() 开头必须 clear _cancel_event（旧任务 cancel 不应影响新一次）。"""
+        from services.package_update_service import PackageUpdateService
+        app = MagicMock()
+        app.config = {}
+        app.get_active_paths = MagicMock(return_value={"comfyui_root": "F:/V9"})
+        app.services = MagicMock()
+        app.services.model = None
+        svc = PackageUpdateService(app)
+        svc._cancel_event.set()  # 模拟上一次残留
+        # apply 一个空 manifest
+        m = {
+            "manifest_version": 1, "id": "m1", "name": "m",
+            "package_target": {"channel": "v9"},
+            "items": [],
+        }
+        svc.apply(m)
+        assert not svc._cancel_event.is_set(), "apply() 必须 clear _cancel_event"

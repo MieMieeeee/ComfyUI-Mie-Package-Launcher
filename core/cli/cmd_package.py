@@ -139,11 +139,16 @@ def _apply(svc, app, args, want_json: bool) -> int:
         confirm_env_mismatch=None,  # CLI 不弹窗
     )
     exit_hint = report.get("exit_hint", EXIT_OK)
+    # 持久化 report（issue 10）：与 GUI 行为一致，CLI 也要写 runs/<run_id>.json。
+    # save_report 内部 catch IO 异常并只写 logger.warning，不影响 exit code（与 GUI 一致）。
+    try:
+        svc.save_report(report)
+    except Exception:
+        pass
     if want_json:
         print(format_json(report))
     else:
         _print_apply_human(report)
-    # stderr 提示 report 落盘位置（持久化由 service 层或 GUI 做，CLI 这里只提示）
     return int(exit_hint)
 
 

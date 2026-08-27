@@ -237,3 +237,96 @@ def test_unknown_action_exit1(capsys):
     app, _ = _app()
     rc = cmd_package.run(_args(package_action="frobnicate"), app)
     assert rc == EXIT_ERROR
+
+
+class TestPackageApplyPersistsReport:
+    """CLI package apply 跑完后必须把 report 落盘到 launcher/manifests/runs/<run_id>.json（issue 10）。
+
+    验收标准：
+    - CLI 跑完后存在 launcher/manifests/runs/{report.run_id}.json 文件
+    - 文件内容与 report dict 等价（json.dumps 往返后相等）
+    - 持久化 IO 异常不影响 exit code（catch 后只写 logger.warning）
+    """
+
+    def test_save_report_writes_json_file(self, tmp_path, monkeypatch):
+        """PackageUpdateService.save_report 把 report 写到 runs/<run_id>.json。"""
+        import json
+        from services.package_update_service import PackageUpdateService
+        monkeypatch.chdir(tmp_path)
+        app = MagicMock()
+        app.config = {}
+        app.get_active_paths = MagicMock(return_value={"comfyui_root": "F:/V9"})
+        app.services = MagicMock()
+        app.services.model = None
+        svc = PackageUpdateService(app)
+        report = {"run_id": "test-run-001", "manifest_id": "m1", "items": [], "summary": {}}
+        path = svc.save_report(report)
+        assert path is not None
+        assert path.exists()
+        # 内容等价
+        loaded = json.loads(path.read_text(encoding="utf-8"))
+        assert loaded["run_id"] == "test-run-001"
+        assert loaded["manifest_id"] == "m1"
+
+    def test_cli_apply_persists_report(self, tmp_path, monkeypatch, capsys):
+        """CLI package apply 跑完应写 runs/<run_id>.json。"""
+        from core.cli import cmd_package
+        from services.package_update_service import PackageUpdateService
+        monkeypatch.chdir(tmp_path)
+        report = {
+            "run_id": "cli-run-001", "manifest_id": "m1",
+            "started_at": "2026-08-19T00:00:00", "finished_at": "2026-08-19T00:00:01",
+            "env_id": "env_v9", "items": [], "summary": {"ok": 0, "failed": 0},
+            "exit_hint": 0, "error": None,
+        }
+        # 构造真实 svc，patch 它
+        app = MagicMock()
+        app.config = {}
+        app.services = MagicMock()
+        app.services.model = None
+        app.get_active_paths = MagicMock(return_value={"comfyui_root": "F:/V9"})
+        svc = PackageUpdateService(app)
+        with patch.object(cmd_package, "_load_and_validate", return_value=({"id": "m1"}, True, None, 0)), \
+             patch.object(svc, "apply", return_value=report), \
+             patch.object(svc, "save_report") as mock_save:
+            args = MagicMock()
+            args.source = "x.json"
+            args.items = None
+            args.manual_yes = False
+            args.manual_skip = False
+            args.auto_yes = True
+            args.json = True
+            rc = cmd_package._apply(svc, app, args, want_json=True)
+        assert rc == 0, f"rc 应为 0, 实际 {rc}"
+        assert mock_save.call_count == 1, f"save_report 应被 CLI 调一次，实际 {mock_save.call_count}"
+        assert mock_save.call_args.args[0]["run_id"] == "cli-run-001"
+
+    def test_persist_io_error_does_not_change_exit_code(self, tmp_path, monkeypatch, capsys):
+        """持久化 IO 异常不应影响 CLI 退出码（plan 验收标准 #3）。"""
+        from core.cli import cmd_package
+        from services.package_update_service import PackageUpdateService
+        monkeypatch.chdir(tmp_path)
+        report = {
+            "run_id": "io-err-run", "manifest_id": "m1",
+            "started_at": "x", "finished_at": "y",
+            "env_id": "e", "items": [], "summary": {},
+            "exit_hint": 0, "error": None,
+        }
+        app = MagicMock()
+        app.config = {}
+        app.services = MagicMock()
+        app.services.model = None
+        app.get_active_paths = MagicMock(return_value={"comfyui_root": "F:/V9"})
+        svc = PackageUpdateService(app)
+        with patch.object(cmd_package, "_load_and_validate", return_value=({"id": "m1"}, True, None, 0)), \
+             patch.object(svc, "apply", return_value=report), \
+             patch.object(svc, "save_report", side_effect=OSError("disk full")):
+            args = MagicMock()
+            args.source = "x.json"
+            args.items = None
+            args.manual_yes = False
+            args.manual_skip = False
+            args.auto_yes = True
+            args.json = True
+            rc = cmd_package._apply(svc, app, args, want_json=True)
+        assert rc == 0, f"IO 异常时 rc 应保持 0, 实际 {rc}"

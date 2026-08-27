@@ -362,3 +362,195 @@ class TestSyncRequirementsFilesFrozenPropagation(unittest.TestCase):
                 "numpy",
             },
         )
+
+
+class TestRunBatchForwardsFrozenPkgs(unittest.TestCase):
+    """GUI 路径（perform_batch_update -> _run_batch）在 core + requirements_sync 隐含触发时，
+    必须把 FROZEN_PKGS 透传给 PIPUTILS.install_requirements_file。
+    否则用户在 GUI 点 "更新内核 + 同步依赖" 会把 torch / numpy 等 CUDA 耦合依赖升级掉，破坏兼容性。
+    """
+
+    def setUp(self):
+        from services.update_service import UpdateService
+
+        self.app = MagicMock()
+        self.app.logger = MagicMock()
+        self.app.config.get.return_value = {}
+        self.app.pypi_proxy_mode.get.return_value = "none"
+        self.app.pypi_proxy_url.get.return_value = ""
+        # GUI 选择: core + 同步依赖
+        self.app.update_core_var.get.return_value = True
+        self.app.update_frontend_var.get.return_value = False
+        self.app.update_template_var.get.return_value = False
+        self.app.auto_update_deps_var.get.return_value = True
+        self.app.stable_only_var.get.return_value = False
+        self.svc = UpdateService(self.app)
+
+    def _build_upgrade_mock(self):
+        version_svc = MagicMock()
+        version_svc.get_current_kernel_version.return_value = {"commit": "abc", "tag": None}
+        version_svc.upgrade_latest.return_value = {
+            "component": "core",
+            "updated": True,
+            "tag": "v0.3.0",
+            "commit": "def",
+            "branch": "master",
+        }
+        self.app.services.version = version_svc
+        return version_svc
+
+    def test_run_batch_passes_frozen_ignore_to_pip_install(self):
+        from services import update_service as svc_mod
+
+        self._build_upgrade_mock()
+        ok_res = {
+            "success": True,
+            "error": None,
+            "installed": ["requests-2.28.0"],
+            "satisfied": ["torch"],
+            "missing": [],
+            "failed": [],
+            "frozen": [{"name": "torch", "spec": "torch==2.1.0"}],
+        }
+        with tempfile.TemporaryDirectory() as tmp:
+            req_file = Path(tmp) / "requirements.txt"
+            req_file.write_text("requests==2.28.0\ntorch==2.1.0\n", encoding="utf-8")
+            with patch.object(self.svc, "_resolve_comfy_root", return_value=Path(tmp)), \
+                 patch.object(self.svc, "_collect_requirement_files", return_value=[req_file]), \
+                 patch.object(self.svc, "_resolve_python_exec", return_value="python"), \
+                 patch("services.update_service.PIPUTILS.install_requirements_file", return_value=ok_res) as mock_install:
+                results, _summary = self.svc.perform_batch_update()
+
+        self.assertEqual(mock_install.call_count, 1)
+        kwargs = mock_install.call_args.kwargs
+        self.assertIn("ignore_pkgs", kwargs)
+        self.assertIs(kwargs["ignore_pkgs"], svc_mod.FROZEN_PKGS)
+        self.assertIs(kwargs["upgrade"], False)
+        self.assertEqual(kwargs["index_url"], "https://pypi.org/simple/")
+        comps = [r.get("component") for r in results]
+        self.assertIn("core", comps)
+        self.assertIn("requirements", comps)
+
+    def test_run_batch_passes_frozen_ignore_when_frontend_implies_consistency(self):
+        """GUI 只勾 frontend 时，_run_batch 因 consistency 隐含 core 先跑，
+        同样必须把 FROZEN_PKGS 透传给 install_requirements_file。"""
+        from services import update_service as svc_mod
+
+        self.app.update_core_var.get.return_value = False
+        self.app.update_frontend_var.get.return_value = True
+        self.app.update_template_var.get.return_value = False
+
+        self._build_upgrade_mock()
+        ok_res = {
+            "success": True,
+            "error": None,
+            "installed": [],
+            "satisfied": ["torch"],
+            "missing": [],
+            "failed": [],
+        }
+        with tempfile.TemporaryDirectory() as tmp:
+            req_file = Path(tmp) / "requirements.txt"
+            req_file.write_text("torch==2.1.0\n", encoding="utf-8")
+            with patch.object(self.svc, "_resolve_comfy_root", return_value=Path(tmp)), \
+                 patch.object(self.svc, "_collect_requirement_files", return_value=[req_file]), \
+                 patch.object(self.svc, "_resolve_python_exec", return_value="python"), \
+                 patch("services.update_service.PIPUTILS.install_requirements_file", return_value=ok_res) as mock_install:
+                self.svc.perform_batch_update()
+
+        self.assertEqual(mock_install.call_count, 1)
+        kwargs = mock_install.call_args.kwargs
+        self.assertIn("ignore_pkgs", kwargs)
+        self.assertIs(kwargs["ignore_pkgs"], svc_mod.FROZEN_PKGS)
+
+
+class TestRunBatchCatchAllPreservesExceptionDetails(unittest.TestCase):
+    """_run_batch 的 catch-all except 必须保留异常细节，
+    否则三条更新链路（core/frontend/templates）失败时排查完全无线索（issue 5 / Major）。"""
+
+    def setUp(self):
+        from services.update_service import UpdateService
+
+        self.app = MagicMock()
+        self.app.logger = MagicMock()
+        self.app.config.get.return_value = {}
+        self.app.pypi_proxy_mode.get.return_value = "none"
+        self.app.pypi_proxy_url.get.return_value = ""
+        self.app.update_core_var.get.return_value = True
+        self.app.update_frontend_var.get.return_value = False
+        self.app.update_template_var.get.return_value = False
+        self.app.auto_update_deps_var.get.return_value = False  # 关闭 requirements_sync 走最短路径
+        self.app.stable_only_var.get.return_value = False
+        self.svc = UpdateService(self.app)
+
+    def test_core_failure_includes_exception_detail(self):
+        """core 链路抛 ValueError("网络超时") → results 里 core 项的 error 字段必须含 "网络超时"。"""
+        version_svc = MagicMock()
+        version_svc.get_current_kernel_version.return_value = {"commit": "a", "tag": None}
+        version_svc.upgrade_latest.side_effect = ValueError("网络超时")
+        self.app.services.version = version_svc
+
+        results, _summary = self.svc.perform_batch_update()
+        core_res = next((r for r in results if r.get("component") == "core"), None)
+        assert core_res is not None, f"应该有 core 结果，实际 {results}"
+        assert "网络超时" in core_res.get("error", ""), f"core error 应含异常详情，实际 {core_res}"
+        assert core_res["error"].startswith("update failed"), f"前缀应是 update failed: ...，实际 {core_res}"
+
+    def test_frontend_failure_includes_exception_detail(self):
+        """frontend 链路抛 RuntimeError → error 字段含 RuntimeError 信息。"""
+        self.app.update_core_var.get.return_value = False
+        self.app.update_frontend_var.get.return_value = True
+        version_svc = MagicMock()
+        version_svc.get_current_kernel_version.return_value = {"commit": "a", "tag": None}
+        version_svc.upgrade_latest.return_value = {"component": "core", "updated": False}
+        self.app.services.version = version_svc
+        # 不跑 requirements，所以只需要 frontend 抛错
+        self.svc.update_frontend = MagicMock(side_effect=RuntimeError("frontend fetch 失败"))
+
+        results, _ = self.svc.perform_batch_update()
+        fr_res = next((r for r in results if r.get("component") == "frontend"), None)
+        assert fr_res is not None, f"应该有 frontend 结果，实际 {results}"
+        assert "frontend fetch 失败" in fr_res.get("error", "")
+
+    def test_templates_failure_includes_exception_detail(self):
+        """templates 链路抛 OSError → error 字段含 OSError 信息。"""
+        self.app.update_core_var.get.return_value = False
+        self.app.update_template_var.get.return_value = True
+        version_svc = MagicMock()
+        version_svc.get_current_kernel_version.return_value = {"commit": "a", "tag": None}
+        version_svc.upgrade_latest.return_value = {"component": "core", "updated": False}
+        self.app.services.version = version_svc
+        self.svc.update_templates = MagicMock(side_effect=OSError("disk full"))
+
+        results, _ = self.svc.perform_batch_update()
+        tpl_res = next((r for r in results if r.get("component") == "templates"), None)
+        assert tpl_res is not None, f"应该有 templates 结果，实际 {results}"
+        assert "disk full" in tpl_res.get("error", "")
+
+    def test_sync_requirements_loop_catchall_includes_exception(self):
+        """requirements 循环内 catch-all 必须把异常细节带进 sync_summary。"""
+        from services import update_service as svc_mod
+
+        self.app.auto_update_deps_var.get.return_value = True
+        version_svc = MagicMock()
+        version_svc.get_current_kernel_version.return_value = {"commit": "a", "tag": None}
+        version_svc.upgrade_latest.return_value = {"component": "core", "updated": False}
+        self.app.services.version = version_svc
+
+        with tempfile.TemporaryDirectory() as tmp:
+            req_file = Path(tmp) / "requirements.txt"
+            req_file.write_text("requests==1\n", encoding="utf-8")
+            with patch.object(self.svc, "_resolve_comfy_root", return_value=Path(tmp)), \
+                 patch.object(self.svc, "_collect_requirement_files", return_value=[req_file]), \
+                 patch.object(self.svc, "_resolve_python_exec", return_value="python"), \
+                 patch(
+                     "services.update_service.PIPUTILS.install_requirements_file",
+                     side_effect=ValueError("pip subprocess crashed"),
+                 ):
+                results, _ = self.svc.perform_batch_update()
+
+        req_res = next((r for r in results if r.get("component") == "requirements"), None)
+        assert req_res is not None
+        summary = req_res.get("summary", "")
+        assert "FAIL" in summary
+        assert "pip subprocess crashed" in summary, f"sync_summary 应带异常详情，实际 {summary}"

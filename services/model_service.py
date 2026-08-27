@@ -181,17 +181,33 @@ class ModelService:
     # open_link
     # ------------------------------------------------------------------
 
+    # open_link 白名单：http/https。其它协议（file:/javascript:/ms-windows-store: 等）一律拦截，
+    # 否则 webbrowser.open 可能唤起系统 shell 或执行 script（issue 7）。
+    _SAFE_SCHEMES = ("http://", "https://")
+
     def open_link(self, url: str) -> bool:
-        """``webbrowser.open(url)``，接受 http/https（不阻断）。
+        """``webbrowser.open(url)``，接受 http/https。
 
         HTTPS-only 规则仅适用于 **manifest 源 URL**（load_source 那一层，plan §6.4）；
         model ``links[].url`` 因网盘短链经常是 HTTP，必须放行（plan §3.1.2 / §6.4）。
         UI 调本方法前若 url 是 http，按 plan §6.4 给「非 HTTPS」徽章提示，但本方法正常打开。
 
+        安全护栏（issue 7）：白名单 http/https；file:/javascript:/ms-windows-store: 等
+        一律拦截，避免 webbrowser.open 唤起系统 shell / 执行 script。
+
         Returns:
             True 表示 webbrowser 返回成功（不保证浏览器真打开了）
         """
         if not url:
+            return False
+        if not url.startswith(self._SAFE_SCHEMES):
+            try:
+                import logging
+                logging.getLogger(__name__).error(
+                    "open_link blocked unsafe url: %r", url[:80]
+                )
+            except Exception:
+                pass
             return False
         try:
             return bool(webbrowser.open(url))

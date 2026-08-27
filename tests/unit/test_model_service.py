@@ -266,3 +266,43 @@ class TestOpenLink:
         svc = ModelService(_app())
         with patch("services.model_service.webbrowser.open", side_effect=Exception("no browser")):
             assert svc.open_link("https://x") is False
+
+class TestOpenLinkProtocolWhitelist:
+    """open_link 必须白名单 http/https，拦截 javascript:/file:/ms-windows-store: 等（issue 7 / Minor）。
+
+    验收标准：
+    - https://example.com → 正常放行（已由 TestOpenLink 覆盖）
+    - http://short.link → 放行（plan §6.4 网盘短链）
+    - file:///C:/Windows/System32/calc.exe → 拦截
+    - javascript:alert(1) → 拦截
+    - 空字符串 → 仍按原本处理（不变现有空值分支行为，return False）
+    """
+
+    def test_blocks_file_scheme(self):
+        svc = ModelService(_app())
+        with patch("services.model_service.webbrowser.open") as m:
+            r = svc.open_link("file:///C:/Windows/System32/calc.exe")
+        assert r is False, "file:// 必须被拦截"
+        m.assert_not_called()
+
+    def test_blocks_javascript_scheme(self):
+        svc = ModelService(_app())
+        with patch("services.model_service.webbrowser.open") as m:
+            r = svc.open_link("javascript:alert(1)")
+        assert r is False, "javascript: 必须被拦截"
+        m.assert_not_called()
+
+    def test_blocks_ms_windows_store_scheme(self):
+        svc = ModelService(_app())
+        with patch("services.model_service.webbrowser.open") as m:
+            r = svc.open_link("ms-windows-store://pdp/?ProductId=xxx")
+        assert r is False, "ms-windows-store: 必须被拦截"
+        m.assert_not_called()
+
+    def test_empty_url_still_returns_false_without_calling_webbrowser(self):
+        """空 url：保持原行为（return False），不调 webbrowser。"""
+        svc = ModelService(_app())
+        with patch("services.model_service.webbrowser.open") as m:
+            r = svc.open_link("")
+        assert r is False
+        m.assert_not_called()

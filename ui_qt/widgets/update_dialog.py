@@ -110,33 +110,36 @@ class UpdateDialog(FramelessDraggableDialog):
         version_layout.setContentsMargins(0, 0, 0, 0)
         version_layout.setSpacing(_px(8))
 
-        current_label = QtWidgets.QLabel(f"当前: {current_ver}")
-        current_label.setStyleSheet(f"color: {badge_text}; font: {_pt(10)}pt 'Microsoft YaHei UI';")
+        self.current_label = QtWidgets.QLabel(f"当前: {current_ver}")
+        self.current_label.setStyleSheet(f"color: {badge_text}; font: {_pt(10)}pt 'Microsoft YaHei UI';")
 
-        arrow_label = QtWidgets.QLabel("→")
-        arrow_label.setStyleSheet(f"color: {text}; font: {_pt(10)}pt 'Microsoft YaHei UI';")
+        self.arrow_label = QtWidgets.QLabel("→")
+        self.arrow_label.setStyleSheet(f"color: {text}; font: {_pt(10)}pt 'Microsoft YaHei UI';")
 
-        latest_label = QtWidgets.QLabel(f"最新: {latest_ver}")
-        latest_label.setStyleSheet(f"color: {accent}; font: bold {_pt(10)}pt 'Microsoft YaHei UI';")
+        self.latest_label = QtWidgets.QLabel(f"最新: {latest_ver}")
+        self.latest_label.setStyleSheet(f"color: {accent}; font: bold {_pt(10)}pt 'Microsoft YaHei UI';")
 
         version_layout.addStretch()
-        version_layout.addWidget(current_label)
-        version_layout.addWidget(arrow_label)
-        version_layout.addWidget(latest_label)
+        version_layout.addWidget(self.current_label)
+        version_layout.addWidget(self.arrow_label)
+        version_layout.addWidget(self.latest_label)
+        self.date_label = None
         if release_date:
-            date_label = QtWidgets.QLabel(f"  ({release_date})")
-            date_label.setStyleSheet(f"color: {badge_text}; font: {_pt(9)}pt 'Microsoft YaHei UI';")
-            version_layout.addWidget(date_label)
+            self.date_label = QtWidgets.QLabel(f"  ({release_date})")
+            self.date_label.setStyleSheet(f"color: {badge_text}; font: {_pt(9)}pt 'Microsoft YaHei UI';")
+            version_layout.addWidget(self.date_label)
         version_layout.addStretch()
 
         inner_layout.addWidget(version_widget)
 
+        self.changelog_label = None
+
         # 更新日志
         changelog = self._update_info.get("changelog", "")
         if changelog:
-            changelog_label = QtWidgets.QLabel("更新日志")
-            changelog_label.setStyleSheet(f"color: {badge_text}; font: {_pt(9)}pt 'Microsoft YaHei UI';")
-            inner_layout.addWidget(changelog_label)
+            self.changelog_label = QtWidgets.QLabel("更新日志")
+            self.changelog_label.setStyleSheet(f"color: {badge_text}; font: {_pt(9)}pt 'Microsoft YaHei UI';")
+            inner_layout.addWidget(self.changelog_label)
 
             self.changelog_edit = QtWidgets.QTextEdit()
             self.changelog_edit.setReadOnly(True)
@@ -189,19 +192,11 @@ class UpdateDialog(FramelessDraggableDialog):
         self.btn_layout = QtWidgets.QHBoxLayout()
         self.btn_layout.setSpacing(12)
 
-        self.btn_later = QtWidgets.QLabel("稍后提醒")
-        self.btn_later.setStyleSheet(f"""
-            QLabel {{
-                color: {badge_text};
-                font: {_pt(10)}pt "Microsoft YaHei UI";
-                padding: {_px(10)}px {_px(20)}px;
-            }}
-            QLabel:hover {{
-                color: {text};
-            }}
-        """)
+        # issue 8（无障碍）：btn_later 从 QLabel 改 QPushButton，Tab 可聚焦 + Space/Enter 触发
+        self.btn_later = QtWidgets.QPushButton("稍后提醒")
         self.btn_later.setCursor(QtCore.Qt.PointingHandCursor)
-        self.btn_later.mousePressEvent = lambda e: self._on_later()
+        self.btn_later.setFlat(True)  # 视觉上仍像标签，无边框背景
+        self.btn_later.clicked.connect(self._on_later)
 
         self.btn_update = QtWidgets.QPushButton("立即更新")
         self.btn_update.setObjectName("PrimaryBtn")
@@ -219,6 +214,106 @@ class UpdateDialog(FramelessDraggableDialog):
 
         self.setFixedWidth(_px(480))
         self.adjustSize()
+
+        # 注册主题切换监听（issue 6：切深/浅主题时 UpdateDialog 颜色刷新）
+        if self.theme_manager:
+            try:
+                # ThemeManager 用 _theme_listeners + register_listener（自定义）
+                # 不是 pyqtSignal，所以 theme_changed.connect 不可用。
+                self.theme_manager.register_listener(self.update_theme)
+            except AttributeError:
+                pass  # 老 theme_manager 没 register_listener，忽略
+
+    def update_theme(self, theme_styles=None):
+        """重新应用主题样式（theme_changed 信号触发）。
+
+        重构自原 __init__ 内的颜色 / QSS 块：构造时一次性取色导致切主题后颜色冻结，
+        违反 AGENTS.md 主题规范。
+
+        Args:
+            theme_styles: 可选 ThemeStyles 实例；不传则用 self.theme_manager.styles。
+        """
+        if not self.theme_manager:
+            return  # 调试场景无 theme_manager，跳过刷新
+        styles = theme_styles or self.theme_manager.styles
+        try:
+            _px = styles._px
+            _pt = styles._pt
+        except AttributeError:
+            _px = lambda b: b
+            _pt = lambda b: b
+        c = self.theme_manager.colors
+        bg = c.get("content_bg", "#1F2937")
+        border = c.get("group_border", "#374151")
+        text = c.get("text", "#E5E7EB")
+        btn_bg = c.get("btn_secondary_bg", "#374151")
+        btn_hover = c.get("btn_ghost_bg", "#4B5563")
+        accent = c.get("btn_primary_bg", "#6366F1")
+        accent_hover = c.get("btn_primary_hover", "#818CF8")
+        badge_text = c.get("badge_text", "#9CA3AF")
+        # container + btn_update（#PrimaryBtn 在 container QSS 里覆盖）
+        self.container.setStyleSheet(
+            "QFrame#UpdateContainer { background-color: " + bg + "; border: 1px solid " + border + "; border-radius: " + str(_px(16)) + "px; }"
+            + " QLabel { background: transparent; }"
+            + " QPushButton { background-color: " + btn_bg + "; color: " + text + "; border: none; border-radius: " + str(_px(8)) + "px; padding: " + str(_px(10)) + "px " + str(_px(20)) + "px; font: bold " + str(_pt(10)) + "pt \"Microsoft YaHei UI\"; }"
+            + " QPushButton:hover { background-color: " + btn_hover + "; }"
+            + " QPushButton#PrimaryBtn { background-color: " + accent + "; color: #FFFFFF; }"
+            + " QPushButton#PrimaryBtn:hover { background-color: " + accent_hover + "; }"
+            + " QPushButton:disabled { background-color: " + btn_bg + "; color: " + badge_text + "; }"
+        )
+
+        # title（review 遗留 1：必须重刷，否则冻结）
+        self.lbl_title.setStyleSheet(
+            "font: bold " + str(_pt(16)) + "pt 'Microsoft YaHei UI'; color: " + c.get("label", "#F3F4F6") + ";"
+        )
+
+        # 版本信息三个 label（review 遗留 1）
+        self.current_label.setStyleSheet(
+            "color: " + badge_text + "; font: " + str(_pt(10)) + "pt 'Microsoft YaHei UI';"
+        )
+        self.arrow_label.setStyleSheet(
+            "color: " + text + "; font: " + str(_pt(10)) + "pt 'Microsoft YaHei UI';"
+        )
+        self.latest_label.setStyleSheet(
+            "color: " + accent + "; font: bold " + str(_pt(10)) + "pt 'Microsoft YaHei UI';"
+        )
+        if self.date_label is not None:
+            self.date_label.setStyleSheet(
+                "color: " + badge_text + "; font: " + str(_pt(9)) + "pt 'Microsoft YaHei UI';"
+            )
+
+        # 更新日志标题 + 输入框（review 遗留 1：QTextEdit 必须刷）
+        if self.changelog_label is not None:
+            self.changelog_label.setStyleSheet(
+                "color: " + badge_text + "; font: " + str(_pt(9)) + "pt 'Microsoft YaHei UI';"
+            )
+        if hasattr(self, "changelog_edit") and self.changelog_edit is not None:
+            self.changelog_edit.setStyleSheet(
+                "QTextEdit {"
+                " background-color: rgba(0,0,0,0.2);"
+                " color: " + text + ";"
+                " border: 1px solid " + border + ";"
+                " border-radius: " + str(_px(8)) + "px;"
+                " padding: " + str(_px(10)) + "px;"
+                " font: " + str(_pt(9)) + "pt \"Microsoft YaHei UI\";"
+                " }"
+            )
+
+        # 进度条 + 状态文字（review 遗留 1：之前未刷）
+        self.lbl_status.setStyleSheet(
+            "color: " + text + "; font: " + str(_pt(10)) + "pt 'Microsoft YaHei UI';"
+        )
+        self.progress_bar.setStyleSheet(
+            "QProgressBar {"
+            " background-color: rgba(0,0,0,0.2);"
+            " border-radius: " + str(_px(3)) + "px;"
+            " border: none;"
+            " }"
+            " QProgressBar::chunk {"
+            " background-color: " + accent + ";"
+            " border-radius: " + str(_px(3)) + "px;"
+            " }"
+        )
 
     def _on_update(self):
         """立即更新"""

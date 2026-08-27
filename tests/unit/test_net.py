@@ -600,3 +600,75 @@ class TestResolvePypiIndexUrl:
         app = _App(mode=_StrVar("custom"), url=_ExplodingVar())
         # 不抛异常即算通过; custom 无内置 URL 故 None
         assert resolve_pypi_index_url(app) is None
+
+
+class TestReadResponseRaw:
+    """utils.net.read_response_raw 必须处理 gzip / deflate Content-Encoding（issue 11 / Minor）。
+
+    Python 的 urllib 不自动解 gzip（requests 才会），CDN 强制返 gzip 时 json.loads 直接崩。
+    """
+
+    def test_plain_response_passes_through(self):
+        """未压缩响应：bytes 原样返回。"""
+        from utils.net import read_response_raw
+        from unittest.mock import MagicMock
+        resp = MagicMock()
+        resp.headers = {}
+        resp.read.return_value = b'{"ok":1}'
+        out = read_response_raw(resp)
+        assert out == b'{"ok":1}'
+
+    def test_gzip_response_is_decompressed(self):
+        """gzip 响应：自动解压。"""
+        import gzip, json
+        from utils.net import read_response_raw
+        from unittest.mock import MagicMock
+        payload = json.dumps({"key": "value", "n": 42}).encode("utf-8")
+        compressed = gzip.compress(payload)
+        resp = MagicMock()
+        resp.headers = {"Content-Encoding": "gzip"}
+        resp.read.return_value = compressed
+        out = read_response_raw(resp)
+        assert out == payload, f"应解压回原始 bytes，实际 {out!r}"
+        assert json.loads(out.decode("utf-8")) == {"key": "value", "n": 42}
+
+    def test_deflate_response_is_decompressed(self):
+        """deflate 响应：zlib 解压。"""
+        import zlib, json
+        from utils.net import read_response_raw
+        from unittest.mock import MagicMock
+        payload = json.dumps({"k": "v"}).encode("utf-8")
+        compressed = zlib.compress(payload)
+        resp = MagicMock()
+        resp.headers = {"Content-Encoding": "deflate"}
+        resp.read.return_value = compressed
+        out = read_response_raw(resp)
+        assert out == payload
+
+    def test_no_content_encoding_header_returns_raw(self):
+        """没 Content-Encoding 头：原样。"""
+        from utils.net import read_response_raw
+        from unittest.mock import MagicMock
+        resp = MagicMock()
+        resp.headers = {"Content-Type": "application/json"}
+        resp.read.return_value = b'{"x":1}'
+        out = read_response_raw(resp)
+        assert out == b'{"x":1}'
+    def test_raw_deflate_response_is_decompressed(self):
+        """raw deflate（无 zlib header，wbits=-MAX_WBITS）也能解。
+
+        一些老 CDN 把 HTTP Content-Encoding: deflate 当成 raw deflate 发，
+        默认 zlib.decompress(raw) 会因 zlib header 失败。本函数应回退到 raw deflate。
+        """
+        import zlib
+        from utils.net import read_response_raw
+        from unittest.mock import MagicMock
+        payload = b'{"k":"raw_deflate"}'
+        # 用 wbits=-MAX_WBITS 压缩（无 zlib header）模拟 raw deflate
+        compressor = zlib.compressobj(zlib.Z_DEFAULT_COMPRESSION, zlib.DEFLATED, -zlib.MAX_WBITS)
+        compressed = compressor.compress(payload) + compressor.flush()
+        resp = MagicMock()
+        resp.headers = {"Content-Encoding": "deflate"}
+        resp.read.return_value = compressed
+        out = read_response_raw(resp)
+        assert out == payload, f"raw deflate 应被正确解压，实际 {out!r}"
