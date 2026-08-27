@@ -406,6 +406,9 @@ def launch_gui():
         splash.set_status("正在初始化...")
         window = PyQtLauncher()
 
+        # 标记 starting → running（mark_running 不参与升级判定, 仅诊断信号）
+        render_guard.mark_running()
+
         # 关闭启动画面并显示主窗口
         splash.close()
         window.run()

@@ -91,6 +91,7 @@ class _TmpSandbox:
         self.config_path = self.root / "launcher" / "config.json"
         self.state_path = self.root / "launcher" / "render_state.json"
         self.crash_path = self.root / "launcher" / "crash.log"
+        self.counter_path = self.root / "launcher" / "render_clean_counter.json"
         (self.root / "build_parameters.json").write_text(
             json.dumps({"version": "UT-v1.0.0"}), encoding="utf-8"
         )
@@ -112,6 +113,19 @@ class _TmpSandbox:
         if not self.state_path.exists():
             return None
         return json.loads(self.state_path.read_text(encoding="utf-8"))
+
+    def write_counter(self, data: dict):
+        self.counter_path.write_text(
+            json.dumps(data, ensure_ascii=False, indent=2), encoding="utf-8"
+        )
+
+    def read_counter(self) -> dict | None:
+        if not self.counter_path.exists():
+            return None
+        return json.loads(self.counter_path.read_text(encoding="utf-8"))
+
+    def write_crash_log(self, text: str):
+        self.crash_path.write_text(text, encoding="utf-8")
 
 
 @pytest.fixture
@@ -253,8 +267,47 @@ class TestPrepare:
 # TEST GROUP: begin() escalation + state
 # ---------------------------------------------------------------------------
 
+# ---------------------------------------------------------------------------
+# TEST GROUP: begin() (v9 分类器驱动)
+# ---------------------------------------------------------------------------
+# v9 算法: 升级依据是 crash.log 段分类（graphics_crash 才升级）, 不是 state
+# 文件。state 损坏 / state=running / state=clean 都不再触发升级。begin 永远
+# 写 state="starting" (mark_running() 后才转 running)。
+
+# 构造 graphics_crash 段（v3 算法): Windows fatal exception 行 + 当前 [startup]
+_GRAPHICS_CRASH_SEG = """\
+[startup] ts=prev
+[render_guard] mode=auto escalated=False version=v
+Windows fatal exception: access violation (0xC0000005)
+Current thread 0x0000abcd (most recent call first):
+File "C:\\foo\\bar.py", line 42 in some_func
+[no Python frame]
+[startup] ts=now
+"""
+
+# python_exception 段: [uncaught_exception] 块
+_PY_EXCEPTION_SEG = """\
+[startup] ts=prev
+[uncaught_exception] ts=...
+Traceback (most recent call last):
+  File "C:\\foo\\bar.py", line 10, in <module>
+    raise ValueError("x")
+ValueError: x
+[startup] ts=now
+"""
+
+# clean_or_user 段: 仅 marker
+_CLEAN_SEG = """\
+[startup] ts=prev
+[render_guard] mode=auto escalated=False version=v
+[startup] ts=now
+"""
+
+
 class TestBegin:
-    def test_begin_no_state_no_escalation_auto(self, sandbox):
+    def test_begin_no_state_no_log_no_escalation_auto(self, sandbox):
+        """state 不存在 + crash.log 不存在 → unknown → 不升级。
+        v6 勘误: state["state"] == "starting"（不再是 running）"""
         sandbox.write_config({"ui_settings": {"render_mode": "auto"}})
         from core.render_guard import begin, finish
         try:
@@ -265,51 +318,25 @@ class TestBegin:
             state = sandbox.read_state()
             assert state is not None
             assert state["mode"] == "auto"
-            assert state["state"] == "running"
-        finally:
-            # finish to avoid os._exit on guard re-init with stale state
-            try:
-                finish()
-            except Exception:
-                pass
-
-    def test_begin_state_file_exists_but_corrupt_triggers_escalation(self, sandbox):
-        """Mark exists but not valid JSON → signal of abnormal exit → escalate.
-
-        Atomic writes in begin()/finish() never produce such a file, so its
-        presence means the previous run died mid-write (eg power loss,
-        taskkill /F, AV interference). Must treat like state=running.
-        """
-        sandbox.write_config({"ui_settings": {"render_mode": "auto"}})
-        st = sandbox.state_path
-        st.write_text("{not valid json garbage \x00\x01\xff", encoding="utf-8")
-        assert st.exists()
-        from core.render_guard import begin, finish, escalated_this_run, escalated_detail
-        try:
-            begin()
-            assert escalated_this_run(), (
-                "corrupt state file must trigger escalation")
-            assert escalated_detail() == ("auto", "compat"), (
-                f"expected auto→compat, got {escalated_detail()}")
+            assert state["state"] == "starting"
         finally:
             try:
                 finish()
             except Exception:
                 pass
 
-    def test_begin_state_is_running_triggers_escalation_auto_compat(self, sandbox):
+    def test_begin_graphics_crash_escalates_auto_compat(self, sandbox):
+        """crash.log 段 graphics_crash + state=auto → 升 compat。
+        v9: state 文件是什么不影响升级, crash.log 内容才是依据。"""
         sandbox.write_config({"ui_settings": {"render_mode": "auto"}})
-        sandbox.write_state(
-            {"mode": "auto", "pid": 9999, "started_at": 0, "version": "old",
-             "state": "running"}
-        )
+        sandbox.write_crash_log(_GRAPHICS_CRASH_SEG)
+        sandbox.write_state({"mode": "auto", "pid": 9999, "started_at": 0, "version": "old", "state": "running"})
         from core.render_guard import begin, finish
         try:
             begin()
             assert escalated_this_run() is True
             assert escalated_detail() == ("auto", "compat")
             assert current_mode() == "compat"
-            # config should be updated atomically
             cfg = sandbox.read_config()
             assert cfg["ui_settings"]["render_mode"] == "compat"
         finally:
@@ -318,12 +345,10 @@ class TestBegin:
             except Exception:
                 pass
 
-    def test_begin_state_is_running_triggers_escalation_compat_safe(self, sandbox):
+    def test_begin_graphics_crash_escalates_compat_safe(self, sandbox):
         sandbox.write_config({"ui_settings": {"render_mode": "compat"}})
-        sandbox.write_state(
-            {"mode": "compat", "pid": 9999, "started_at": 0, "version": "old",
-             "state": "running"}
-        )
+        sandbox.write_crash_log(_GRAPHICS_CRASH_SEG)
+        sandbox.write_state({"mode": "compat", "pid": 9999, "started_at": 0, "version": "old", "state": "running"})
         from core.render_guard import begin, finish
         try:
             begin()
@@ -337,18 +362,17 @@ class TestBegin:
             except Exception:
                 pass
 
-    def test_begin_safe_is_capped_no_further_escalation(self, sandbox):
+    def test_begin_graphics_crash_safe_capped(self, sandbox):
+        """graphics_crash + state=safe → detail=(safe,safe), mode 不变。
+        v9: from==to 时弹窗静默（from != to 才弹）。"""
         sandbox.write_config({"ui_settings": {"render_mode": "safe"}})
-        sandbox.write_state(
-            {"mode": "safe", "pid": 9999, "started_at": 0, "version": "old",
-             "state": "running"}
-        )
+        sandbox.write_crash_log(_GRAPHICS_CRASH_SEG)
+        sandbox.write_state({"mode": "safe", "pid": 9999, "started_at": 0, "version": "old", "state": "running"})
         from core.render_guard import begin, finish
         try:
             begin()
-            # safe capped: escalated_this_run True because signal exists, but
-            # mode stays at safe. Implementation may choose either boolean;
-            # the only strong contract is mode didn't go beyond safe.
+            assert escalated_this_run() is True
+            assert escalated_detail() == ("safe", "safe")
             assert current_mode() == "safe"
         finally:
             try:
@@ -356,22 +380,38 @@ class TestBegin:
             except Exception:
                 pass
 
-    def test_begin_clean_sentinel_does_not_escalate(self, sandbox):
-        """finish() wrote state=clean (or remove failed, fell back).
-        begin() sees clean -> NO escalation, rewrite as running."""
+    def test_begin_python_exception_does_not_escalate(self, sandbox):
+        """crash.log 段含 [uncaught_exception] 块 → python_exception → 不升级。
+        v9: Python 异常与渲染模式无关, 不应升级。
+        v11 R4b: state=running 前置, 走分类器路径（区分门跳过 vs 分类不升级）"""
         sandbox.write_config({"ui_settings": {"render_mode": "auto"}})
-        sandbox.write_state(
-            {"mode": "auto", "started_at": 0, "version": "old",
-             "cleaned_at": 1, "state": "clean"}
-        )
+        sandbox.write_state({"mode": "auto", "pid": 9999, "started_at": 0, "version": "old", "state": "running"})
+        sandbox.write_crash_log(_PY_EXCEPTION_SEG)
         from core.render_guard import begin, finish
         try:
             begin()
             assert escalated_this_run() is False
             assert escalated_detail() is None
             assert current_mode() == "auto"
+        finally:
+            try:
+                finish()
+            except Exception:
+                pass
+
+    def test_begin_clean_or_user_does_not_escalate(self, sandbox):
+        """crash.log 段仅 marker → clean_or_user → 不升级（tray-resident / 关机）。
+        v11 R4b: state=running 前置, 走分类器路径"""
+        sandbox.write_config({"ui_settings": {"render_mode": "auto"}})
+        sandbox.write_state({"mode": "auto", "pid": 9999, "started_at": 0, "version": "old", "state": "running"})
+        sandbox.write_crash_log(_CLEAN_SEG)
+        from core.render_guard import begin, finish
+        try:
+            begin()
+            assert escalated_this_run() is False
+            assert current_mode() == "auto"
             state = sandbox.read_state()
-            assert state["state"] == "running"
+            assert state["state"] == "starting"
         finally:
             try:
                 finish()
@@ -379,18 +419,12 @@ class TestBegin:
                 pass
 
     def test_begin_escalation_preserves_all_other_config_fields(self, sandbox):
-        """The config write during escalation MUST NOT wipe out unrelated
-        fields (proxy credentials, environments array, custom fields, etc.)."""
+        """升级时 config 写入必须保留其他字段（proxy / environments / custom）。"""
         full_cfg = _make_full_config()
         full_cfg["ui_settings"]["render_mode"] = "auto"
         sandbox.write_config(full_cfg)
-        # Add an unknown nested field that render guard should never touch.
-        cfg_before_text = sandbox.config_path.read_text(encoding="utf-8")
-
-        sandbox.write_state(
-            {"mode": "auto", "pid": 9999, "started_at": 0, "version": "old",
-             "state": "running"}
-        )
+        sandbox.write_crash_log(_GRAPHICS_CRASH_SEG)
+        sandbox.write_state({"mode": "auto", "pid": 9999, "started_at": 0, "version": "old", "state": "running"})
         from core.render_guard import begin, finish
         try:
             begin()
@@ -401,21 +435,15 @@ class TestBegin:
                 pass
 
         cfg_after = sandbox.read_config()
-        # The only accepted diff: ui_settings.render_mode auto -> compat
         full_cfg["ui_settings"]["render_mode"] = "compat"
         assert cfg_after == full_cfg
 
     def test_begin_escalation_does_not_overwrite_empty_or_damaged_config(self, sandbox):
-        """If config is empty {} / damaged (atomic-write damage guard): skip
-        persistence rather than writing a minimal {ui_settings: {render_mode}}
-        stub that would break ConfigManager's own corruption handling."""
-        # Empty dict config (damaged: no top-level keys)
+        """config 损坏时升级不落盘（避免写回空壳 {ui_settings: {render_mode}}）。"""
         sandbox.config_path.write_text("{}", encoding="utf-8")
-        sandbox.write_state(
-            {"mode": "auto", "pid": 9999, "started_at": 0, "version": "old",
-             "state": "running"}
-        )
-        from core.render_guard import begin, finish, current_mode
+        sandbox.write_crash_log(_GRAPHICS_CRASH_SEG)
+        sandbox.write_state({"mode": "auto", "pid": 9999, "started_at": 0, "version": "old", "state": "running"})
+        from core.render_guard import begin, finish
         try:
             begin()
         finally:
@@ -425,19 +453,190 @@ class TestBegin:
                 pass
 
         cfg_text = sandbox.config_path.read_text(encoding="utf-8")
-        # Still {} (not persisted)
         import json
         assert json.loads(cfg_text) == {}, (
             f"empty/damaged config must not be mutated by escalation, got {cfg_text}")
-        # But process-internal mode still escalated (not persisted)
-        # current_mode reads env, which should be compat
+        # 但进程内 mode 仍升级
         assert current_mode() == "compat"
 
 
 # ---------------------------------------------------------------------------
-# TEST GROUP: finish()
+# TEST GROUP: mark_running()
 # ---------------------------------------------------------------------------
 
+
+class TestMarkRunning:
+    def test_mark_running_creates_when_no_state(self, sandbox):
+        """state 不存在 → 写 running（兜底, begin 写失败场景）。"""
+        from core.render_guard import mark_running
+        mark_running()
+        state = sandbox.read_state()
+        assert state is not None
+        assert state["state"] == "running"
+
+    def test_mark_running_no_change_when_clean_sentinel(self, sandbox):
+        """state=clean → 不动（finish 哨兵被保护, 重写会丢诊断信息）。"""
+        existing = {
+            "mode": "auto",
+            "started_at": 12345,
+            "version": "old",
+            "cleaned_at": 12346,
+            "state": "clean",
+        }
+        sandbox.write_state(existing)
+        from core.render_guard import mark_running
+        mark_running()
+        state = sandbox.read_state()
+        assert state["state"] == "clean"
+        assert state["cleaned_at"] == 12346  # 哨兵字段保留
+
+    def test_mark_running_updates_starting_to_running_preserves_fields(self, sandbox):
+        """state=starting → running, 保留 counter 等字段（v1 §1.4）。"""
+        existing = {
+            "mode": "auto",
+            "started_at": 99999,
+            "version": "v",
+            "state": "starting",
+        }
+        sandbox.write_state(existing)
+        from core.render_guard import mark_running
+        mark_running()
+        state = sandbox.read_state()
+        assert state["state"] == "running"
+        assert state["mode"] == "auto"
+        assert state["started_at"] == 99999
+        assert state["version"] == "v"
+
+
+# ---------------------------------------------------------------------------
+# TEST GROUP: classifier (v9 三态分类器)
+# ---------------------------------------------------------------------------
+
+
+class TestClassifier:
+    def test_classify_fatal_single_line(self):
+        from core.render_guard import _classify_last_exit
+        seg = "[startup] ts=p\nWindows fatal exception: x\n[startup] ts=n\n"
+        assert _classify_last_exit(seg) == "graphics_crash"
+
+    def test_classify_no_start_returns_unknown(self):
+        from core.render_guard import _classify_last_exit
+        assert _classify_last_exit("") == "unknown"
+        assert _classify_last_exit("hello\n") == "unknown"
+
+    def test_classify_only_one_start_returns_unknown(self):
+        from core.render_guard import _classify_last_exit
+        assert _classify_last_exit("[startup] ts=now\n") == "unknown"
+
+    def test_classify_only_markers_returns_clean_or_user(self):
+        from core.render_guard import _classify_last_exit
+        assert _classify_last_exit(_CLEAN_SEG) == "clean_or_user"
+
+    def test_classify_uncaught_block_returns_python_exception(self):
+        from core.render_guard import _classify_last_exit
+        assert _classify_last_exit(_PY_EXCEPTION_SEG) == "python_exception"
+
+    def test_classify_chained_exception_in_block(self):
+        """链式异常分隔行 'During handling of the above exception...' 在 [uncaught_exception]
+        块内 → python_exception（v2 行形状匹配漏的 case, v3 块排除兜住）。"""
+        from core.render_guard import _classify_last_exit
+        seg = (
+            "[startup] ts=p\n"
+            "[uncaught_exception] ts=...\n"
+            "Traceback (most recent call last):\n"
+            "  File \"x.py\", line 1\n"
+            "ValueError: a\n"
+            "\n"
+            "During handling of the above exception, another exception occurred:\n"
+            "\n"
+            "Traceback (most recent call last):\n"
+            "  File \"x.py\", line 2\n"
+            "TypeError: b\n"
+            "[startup] ts=n\n"
+        )
+        assert _classify_last_exit(seg) == "python_exception"
+
+    def test_classify_fatal_after_uncaught_block_returns_python_exception(self):
+        """先 Python 异常后 native crash → 块吞, python_exception（v3:64 + case 3 取舍）。"""
+        from core.render_guard import _classify_last_exit
+        seg = (
+            "[startup] ts=p\n"
+            "[uncaught_exception] ts=...\n"
+            "ValueError: x\n"
+            "Windows fatal exception: access violation (0xC0000005)\n"
+            "[startup] ts=n\n"
+        )
+        assert _classify_last_exit(seg) == "python_exception"
+
+
+# ---------------------------------------------------------------------------
+# TEST GROUP: finish() auto-recovery
+# ---------------------------------------------------------------------------
+
+
+class TestAutoRecovery:
+    """v1 §1.5 step 2 + v4 Rev3 裸 JSON 校验 + v4 Rev4 去门 + v9 Rev1 finish 落地。"""
+
+    def test_finish_counter_increment_and_persist(self, sandbox):
+        """每次 finish 都无条件中间落盘 counter+1, 跨 state 存活。"""
+        sandbox.write_config({"ui_settings": {"render_mode": "auto"}})
+        from core.render_guard import begin, finish
+        begin()
+        finish()
+        c1 = sandbox.read_counter()
+        assert c1 is not None and c1["count"] == 1
+        begin()
+        finish()
+        c2 = sandbox.read_counter()
+        assert c2["count"] == 2
+
+    def test_finish_threshold_5_promotes_to_auto_and_clears(self, sandbox):
+        """counter 从 4 进 finish → 5 → 触发 promote, 升 auto + 清零。"""
+        sandbox.write_config({"ui_settings": {"render_mode": "compat"}})
+        sandbox.write_counter({"count": 4, "last_clean_at": 0, "since_mode": "compat"})
+        from core.render_guard import begin, finish
+        begin()
+        finish()
+        c = sandbox.read_counter()
+        assert c["count"] == 0  # verified → 清零
+        assert sandbox.read_config()["ui_settings"]["render_mode"] == "auto"
+
+    def test_finish_threshold_5_in_auto_does_no_op_promote(self, sandbox):
+        """counter 4 + mode=auto + finish → no-op promote + 清零（v4 Rev4 去门）。"""
+        sandbox.write_config({"ui_settings": {"render_mode": "auto"}})
+        sandbox.write_counter({"count": 4, "last_clean_at": 0, "since_mode": "auto"})
+        from core.render_guard import begin, finish
+        begin()
+        finish()
+        c = sandbox.read_counter()
+        assert c["count"] == 0
+        assert sandbox.read_config()["ui_settings"]["render_mode"] == "auto"
+
+    def test_finish_promote_write_failure_counter_not_cleared(self, sandbox, monkeypatch):
+        """_write_render_mode_to_config 失败 → counter 不清零（v4 Rev3 + v9 Rev1）。"""
+        sandbox.write_config({"ui_settings": {"render_mode": "compat"}})
+        sandbox.write_counter({"count": 4, "last_clean_at": 0, "since_mode": "compat"})
+
+        def _raise_write(mode):
+            raise IOError("disk full")
+        monkeypatch.setattr(
+            "core.render_guard._write_render_mode_to_config", _raise_write
+        )
+        from core.render_guard import begin, finish
+        begin()
+        finish()
+        c = sandbox.read_counter()
+        assert c["count"] >= 4  # 不清零
+
+    def test_finish_promote_broken_config_counter_not_cleared(self, sandbox):
+        """config 损坏 → verify 失败 → counter 不清零（v9 新增 case, Revision 3 判别器）。"""
+        sandbox.config_path.write_text("{}", encoding="utf-8")
+        sandbox.write_counter({"count": 4, "last_clean_at": 0, "since_mode": "auto"})
+        from core.render_guard import begin, finish
+        begin()
+        finish()
+        c = sandbox.read_counter()
+        assert c["count"] >= 4  # verify 失败, counter 不清零
 class TestFinish:
     def test_finish_normal_path_removes_state(self, sandbox):
         sandbox.write_config({"ui_settings": {"render_mode": "auto"}})
@@ -546,3 +745,220 @@ class TestLocateDLL:
 
 
 import sys  # noqa: E402  (used in test above, import here to keep style clean)
+
+
+# ---------------------------------------------------------------------------
+# TEST GROUP: audit prefix dynamic regression (v8 Rev1 终版)
+# ---------------------------------------------------------------------------
+
+
+class TestAuditPrefix:
+    """v8 Rev1: audit 行必须带 [render_guard] 前缀, 否则裸文本被分类器当
+    证据 → 误升级。"""
+
+    def test_begin_audit_lines_dont_trigger_upgrade(self, monkeypatch, sandbox):
+        """动态 fixture: monkeypatch _crash_fh → StringIO, 真实 begin 非升级
+        路径, 对产出的文本断言下次 begin 分类为 clean_or_user。
+
+        关键: fixture 必须用 sandbox.state_path / sandbox.crash_path
+        (autouse patch_runtime_root 把 render_guard I/O 重定向到
+        tmp_path/launcher/, begin 才看得见 state + crash.log)。
+        """
+        from io import StringIO
+        import core.render_guard as rg
+        fake_log = StringIO()
+        monkeypatch.setattr("utils.logging._crash_fh", fake_log)
+
+        # Arrange: state=starting, crash.log 两段 [startup] (上次 clean_or_user)
+        sandbox.state_path.write_text(
+            '{"state": "starting", "mode": "auto"}', encoding="utf-8"
+        )
+        sandbox.crash_path.write_text(
+            "[startup] ts=prev1\n[startup] ts=prev2\n", encoding="utf-8"
+        )
+
+        # Act: 真实 begin() 走非升级路径（state=starting, 上次 clean_or_user）
+        rg.begin()
+
+        # Assert: 拼回 fixture 历史, 断言下次分类 clean_or_user
+        fake_log.seek(0)
+        written = fake_log.read()
+        history = sandbox.crash_path.read_text(encoding="utf-8")
+        next_session_text = history + written + "\n[startup] ts=next\n"
+        assert rg._classify_last_exit(next_session_text) == "clean_or_user"
+
+
+# ---------------------------------------------------------------------------
+# TEST GROUP: classifier edge cases (v3 清单补全)
+# ---------------------------------------------------------------------------
+
+
+class TestClassifierEdges:
+    """v6 F6: 补 v3 清单缺的 case (8/11/14/16/17) + v4 三便宜 case."""
+
+    def test_classify_bare_exception_no_traceback(self):
+        """case 8: 裸异常 (tb=None, print_exception 只输出异常类型行),
+        在 [uncaught_exception] 块内 → python_exception。"""
+        from core.render_guard import _classify_last_exit
+        seg = (
+            "[startup] ts=p\n"
+            "[uncaught_exception] ts=...\n"
+            "KeyError: 'x'\n"
+            "[startup] ts=n\n"
+        )
+        assert _classify_last_exit(seg) == "python_exception"
+
+    def test_classify_equals_separator_exits_marker_block(self):
+        """case 17: = 分隔行 (utils/logging.py:194 写在 [startup] 之前)
+        作为 marker 退出条件。"""
+        from core.render_guard import _classify_last_exit
+        seg = (
+            "[startup] ts=p\n"
+            "[uncaught_exception] ts=...\n"
+            "ValueError: x\n"
+            "=" * 60 + "\n"
+            "[startup] ts=n\n"
+        )
+        # 块被 = 行关掉, 后续若再有非空非 marker 行就是 graphics_crash;
+        # 这里 seg 在 = 后就到 [startup] 了, 走完 → clean_or_user
+        # (没开新块, = 只是退出旧块)
+        assert _classify_last_exit(seg) == "clean_or_user"
+
+    def test_classify_marker_after_empty_block(self):
+        """case 边界: [uncaught_exception] 后零内容 → 块内空, 走完
+        in_marker_block=True → python_exception。"""
+        from core.render_guard import _classify_last_exit
+        seg = (
+            "[startup] ts=p\n"
+            "[uncaught_exception] ts=...\n"
+            "[startup] ts=n\n"
+        )
+        assert _classify_last_exit(seg) == "python_exception"
+
+    def test_classify_fatal_before_uncaught_returns_graphics_crash(self):
+        """case 2: fatal 在前, uncaught 在后 (双失败边角):
+        fatal 行块外直接 return graphics_crash, 不进 uncaught 块。"""
+        from core.render_guard import _classify_last_exit
+        seg = (
+            "[startup] ts=p\n"
+            "Windows fatal exception: access violation (0xC0000005)\n"
+            "[uncaught_exception] ts=...\n"
+            "ValueError: x\n"
+            "[startup] ts=n\n"
+        )
+        assert _classify_last_exit(seg) == "graphics_crash"
+
+
+# ---------------------------------------------------------------------------
+# TEST GROUP: 升级即清零 + compat 未到阈值 (v5 F6)
+# ---------------------------------------------------------------------------
+
+
+class TestBeginCounterClearing:
+    """升级触发即清零 + compat 未到阈值不变 mode。"""
+
+    def test_begin_escalation_clears_counter(self, sandbox):
+        """升级时 (verified 路径) counter 强制清零 (B 特性闭环)。"""
+        sandbox.write_config({"ui_settings": {"render_mode": "auto"}})
+        sandbox.write_state(
+            {"mode": "auto", "pid": 9999, "started_at": 0, "version": "old",
+             "state": "running"}
+        )
+        sandbox.write_crash_log(_GRAPHICS_CRASH_SEG)
+        sandbox.write_counter({"count": 7, "last_clean_at": 0, "since_mode": "auto"})
+
+        from core.render_guard import begin
+        begin()
+
+        c = sandbox.read_counter()
+        assert c["count"] == 0, f"升级后 counter 必须清零, got {c}"
+
+    def test_begin_no_escalation_does_not_clear_counter(self, sandbox):
+        """非升级路径 (clean_or_user / unknown) counter 不动。"""
+        sandbox.write_config({"ui_settings": {"render_mode": "auto"}})
+        # state 不存在 → 跳过分类器 → clean_or_user → 不升级
+        sandbox.write_counter({"count": 3, "last_clean_at": 0, "since_mode": "auto"})
+
+        from core.render_guard import begin
+        begin()
+
+        c = sandbox.read_counter()
+        assert c["count"] == 3, f"非升级路径 counter 不动, got {c}"
+
+
+# ---------------------------------------------------------------------------
+# TEST GROUP: 状态门 (v1 §1.3 落地测试)
+# ---------------------------------------------------------------------------
+
+
+class TestStateGate:
+    """v10 F2: state 缺失/clean → 跳过分类器; running → 进分类器。"""
+
+    def test_begin_state_missing_skips_classifier(self, sandbox):
+        """state 缺失 + crash.log 含 graphics_crash 段 → 不升级
+        (taskkill 无 /F / finish 正常删除后, 段内若含良性误报不应误升级)。"""
+        sandbox.write_config({"ui_settings": {"render_mode": "auto"}})
+        # state 不写
+        sandbox.write_crash_log(_GRAPHICS_CRASH_SEG)
+
+        from core.render_guard import begin
+        begin()
+        assert not escalated_this_run(), (
+            "state 缺失必须跳过分类器, graphics_crash 段不触发升级")
+        assert current_mode() == "auto"
+
+    def test_begin_state_clean_skips_classifier(self, sandbox):
+        """state=clean 哨兵 + crash.log 含 graphics_crash 段 → 不升级
+        (finish 删除失败写了哨兵, 段内若含良性误报不应误升级)。"""
+        sandbox.write_config({"ui_settings": {"render_mode": "auto"}})
+        sandbox.write_state(
+            {"mode": "auto", "started_at": 0, "version": "old",
+             "cleaned_at": 1, "state": "clean"}
+        )
+        sandbox.write_crash_log(_GRAPHICS_CRASH_SEG)
+
+        from core.render_guard import begin
+        begin()
+        assert not escalated_this_run(), (
+            "state=clean 哨兵必须跳过分类器")
+        assert current_mode() == "auto"
+
+    def test_begin_state_running_enters_classifier(self, sandbox):
+        """state=running (taskkill /F / 断电) + crash.log 含 graphics_crash
+        段 → 升级。"""
+        sandbox.write_config({"ui_settings": {"render_mode": "auto"}})
+        sandbox.write_state(
+            {"mode": "auto", "pid": 9999, "started_at": 0, "version": "old",
+             "state": "running"}
+        )
+        sandbox.write_crash_log(_GRAPHICS_CRASH_SEG)
+
+        from core.render_guard import begin
+        begin()
+        assert escalated_this_run() is True
+        assert escalated_detail() == ("auto", "compat")
+        assert current_mode() == "compat"
+
+class TestDecodeFailure:
+    """v11 R3: F1 strict 读 crash.log, GBK 等非 UTF-8 → UnicodeDecodeError → unknown → 不升级。"""
+
+    def test_begin_gbk_crash_log_does_not_trigger_escalation(self, sandbox):
+        import codecs
+        sandbox.write_config({"ui_settings": {"render_mode": "auto"}})
+        sandbox.write_state(
+            {"mode": "auto", "pid": 9999, "started_at": 0, "version": "old",
+             "state": "running"}
+        )
+        # 写 GBK 字节 (非 UTF-8)
+        gbk_bytes = "正常内容 + 一些 GBK 字符".encode("gbk")
+        # 需要 2 个 [startup] 段, 段内含 GBK 字节
+        # 直接 bytes 写入, sandbox.write_crash_log 期望 str
+        sandbox.crash_path.write_bytes(
+            b"[startup] ts=p\n" + gbk_bytes + b"\n[startup] ts=n\n"
+        )
+
+        from core.render_guard import begin
+        begin()
+        # strict 读取抛 UnicodeDecodeError → crash_text="" → unknown → 不升级
+        assert escalated_this_run() is False
+        assert current_mode() == "auto"

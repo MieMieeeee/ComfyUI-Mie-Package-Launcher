@@ -203,5 +203,37 @@ class TestEntryWiringOrder(unittest.TestCase):
             )
 
 
+
+    # ---- 5. mark_running() between PyQtLauncher() ctor and window.run() -----
+    def test_mark_running_is_called_between_pylauncher_ctor_and_run(self):
+        """v10 F5: render_guard.mark_running() must be called AFTER
+        PyQtLauncher() construction and BEFORE window.run() — within
+        launch_gui body. finditer + fn 行号范围过滤 (避免 launch_gui
+        上方注释里出现同名函数误红)。
+        """
+        def _line_of(pos):
+            return SRC.count("\n", 0, pos) + 1
+
+        def _first_in_fn(needle):
+            pat = re.compile(re.escape(needle))
+            for m in pat.finditer(SRC):
+                ln = _line_of(m.start())
+                if self.fn.lineno <= ln <= (self.fn.end_lineno or 10**9):
+                    return m.start()
+            return -1
+
+        pos_pylauncher = _first_in_fn("PyQtLauncher()")
+        pos_mark = _first_in_fn("render_guard.mark_running()")
+        pos_run = _first_in_fn("window.run()")
+        self.assertGreater(pos_pylauncher, 0, "PyQtLauncher() not found in launch_gui")
+        self.assertGreater(pos_mark, 0, "render_guard.mark_running() not in launch_gui")
+        self.assertGreater(pos_run, 0, "window.run() not in launch_gui")
+        self.assertLess(
+            pos_pylauncher, pos_mark,
+            "mark_running() must come AFTER PyQtLauncher() ctor")
+        self.assertLess(
+            pos_mark, pos_run,
+            "mark_running() must come BEFORE window.run()")
+
 if __name__ == "__main__":
     unittest.main(verbosity=2)
