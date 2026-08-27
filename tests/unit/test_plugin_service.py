@@ -269,6 +269,47 @@ def test_run_cmcli_exit3_falls_back_to_stock_cmcli():
     assert calls == [str(Path("/out/cm_fast.py")), str(Path("/mgr/ComfyUI-Manager/cm-cli.py"))]
 
 
+# ---- B6：cm_fast 包装器源缺失时必须打 warning（install/update 静默退原生
+#  = 每次 ~5.5 分钟全量拉 CNR，用户日志里发生过且无任何痕迹可查）----
+
+def test_run_cmcli_warns_when_cm_fast_missing(caplog):
+    """B6：_materialize_cm_fast 返回 None → 打 warning（含 args，可检索）。"""
+    import logging as _logging
+    svc = PluginService(_app())
+    with patch.object(svc, "_python_exec", return_value="/py/python.exe"), \
+         patch.object(svc, "_cm_cli_path", return_value=Path("/mgr/ComfyUI-Manager/cm-cli.py")), \
+         patch.object(svc, "_comfyui_dir", return_value=Path("/comfy/ComfyUI")), \
+         patch.object(svc, "_materialize_cm_fast", return_value=None), \
+         patch("pathlib.Path.exists", return_value=True), \
+         patch("services.plugin_service.run_hidden") as rh:
+        rh.return_value = MagicMock(returncode=0, stdout="", stderr="")
+        with caplog.at_level(_logging.WARNING, logger="comfyui_launcher"):
+            svc._run_cmcli(["install", "foo"])
+    assert any("cm_fast" in rec.message and "install" in rec.message
+               for rec in caplog.records)
+
+
+def test_run_cmcli_streaming_warns_when_cm_fast_missing(caplog):
+    """B6：流式路径同样要在 wrapper 缺失时打 warning。"""
+    import logging as _logging
+    svc = PluginService(_app())
+    with patch.object(svc, "_python_exec", return_value="/py/python.exe"), \
+         patch.object(svc, "_cm_cli_path", return_value=Path("/mgr/ComfyUI-Manager/cm-cli.py")), \
+         patch.object(svc, "_comfyui_dir", return_value=Path("/comfy/ComfyUI")), \
+         patch.object(svc, "_materialize_cm_fast", return_value=None), \
+         patch("pathlib.Path.exists", return_value=True), \
+         patch("services.plugin_service.subprocess.Popen") as popen:
+        proc = MagicMock()
+        proc.stdout = iter(["done\n"])
+        proc.wait.return_value = 0
+        proc.returncode = 0
+        proc.poll.return_value = 0
+        popen.return_value = proc
+        with caplog.at_level(_logging.WARNING, logger="comfyui_launcher"):
+            svc._run_cmcli_streaming(["install", "foo"])
+    assert any("cm_fast" in rec.message for rec in caplog.records)
+
+
 def test_run_cmcli_returns_error_when_paths_missing():
     svc = PluginService(_app())
     with patch.object(svc, "_python_exec", return_value=None), \
@@ -467,7 +508,7 @@ def test_list_installed_version_prefers_pyproject_over_git_hash(tmp_path):
 def test_list_installed_skips_caches_hidden_and_files(tmp_path):
     cn = tmp_path / "ComfyUI" / "custom_nodes"
     cn.mkdir(parents=True)
-    (cn / "ComfyUI-KJNodes").mkdir()
+    (cn / "ComfyUI-KJNodes").mkdir()  # 缓存目录 —— 跳过
     (cn / "__pycache__").mkdir()  # 缓存目录 —— 跳过
     (cn / ".hidden-dir").mkdir()  # 隐藏目录 —— 跳过
     (cn / "stray.py").write_text("# 不是目录")  # 文件 —— 跳过
@@ -478,6 +519,57 @@ def test_list_installed_skips_caches_hidden_and_files(tmp_path):
         result = svc.list_installed()
     names = {r["name"] for r in result}
     assert names == {"ComfyUI-KJNodes", "real-plugin"}
+
+
+# ---- B4：.disabled/ 子目录可见性（Manager 网页端禁用的插件移进 custom_nodes/.disabled/，
+# 旧 list_installed 跳过 '.' 开头目录 → 插件从启动器列表彻底消失、无法恢复）----
+
+def test_list_installed_includes_dot_disabled_subdir_plugins(tmp_path):
+    """B4：.disabled/ 子目录里的插件要出现在列表：enabled=False、可被 enable 恢复。"""
+    cn = tmp_path / "ComfyUI" / "custom_nodes"
+    (cn / "ComfyUI-KJNodes").mkdir(parents=True)
+    dd = cn / ".disabled"
+    # Manager 网页端禁用形态：<node_id>@<ver 下划线>（unified_disable 的命名）
+    foo = dd / "ComfyUI-Foo@1_0_0"
+    (foo / ".git").mkdir(parents=True)
+    plain = dd / "PlainDisabled"
+    plain.mkdir()
+
+    svc = PluginService(_app())
+    with patch.object(svc, "_comfyui_dir", return_value=tmp_path / "ComfyUI"), \
+         patch.object(svc, "_fill_git_info"):
+        result = svc.list_installed()
+
+    by_dir = {r["dir_name"]: r for r in result}
+    assert set(by_dir) == {"ComfyUI-KJNodes", "ComfyUI-Foo@1_0_0", "PlainDisabled"}
+
+    kj = by_dir["ComfyUI-KJNodes"]
+    assert kj["enabled"] is True and kj.get("in_disabled_dir") is False
+
+    fd = by_dir["ComfyUI-Foo@1_0_0"]
+    assert fd["enabled"] is False
+    assert fd["in_disabled_dir"] is True
+    assert fd["name"] == "ComfyUI-Foo"  # 展示名刻掉 @ver 尾巴
+
+    pd = by_dir["PlainDisabled"]
+    assert pd["enabled"] is False
+    assert pd["in_disabled_dir"] is True
+    assert pd["name"] == "PlainDisabled"  # 无 @ 尾巴时展示名 = 目录名
+
+
+def test_list_installed_dot_disabled_ignores_hidden_and_files(tmp_path):
+    """B4：.disabled/ 子目录内部同样跳过隐藏目录与文件。"""
+    cn = tmp_path / "ComfyUI" / "custom_nodes"
+    dd = cn / ".disabled"
+    (dd / "real-disabled").mkdir(parents=True)
+    (dd / "__pycache__").mkdir()
+    (dd / ".trasher").mkdir()
+    (dd / "note.txt").write_text("x", encoding="utf-8")
+
+    svc = PluginService(_app())
+    with patch.object(svc, "_comfyui_dir", return_value=tmp_path / "ComfyUI"):
+        result = svc.list_installed()
+    assert [r["dir_name"] for r in result] == ["real-disabled"]
 
 
 # ---- force_update_selected：确认 git 仓库则 git stash + git pull（强制更新）----
@@ -557,26 +649,32 @@ def _cmcli_ok():
     return {"returncode": 0, "stdout": "done", "stderr": "", "error": None}
 
 
-def test_uninstall_invokes_cmcli_uninstall():
-    svc = PluginService(_app())
+def test_uninstall_invokes_cmcli_uninstall(tmp_path):
+    """B5：uninstall 不再跑 cm-cli（子进程要全量拉 CNR registry ~5.5 分钟且对
+    只读 git pack 删不动），磁盘直连完成；_run_cmcli 必须零调用。"""
+    svc, pdir = _svc_with_plugin_dir(tmp_path)
     with patch.object(svc, "_run_cmcli", return_value=_cmcli_ok()) as m:
-        r = svc.uninstall("ComfyUI-KJNodes")
-    m.assert_called_once_with(["uninstall", "ComfyUI-KJNodes"])
-    assert r["ok"] is True
+        r = svc.uninstall("ComfyUI-Foo")
+    m.assert_not_called()
+    assert r["ok"] is True and not pdir.exists()
 
 
-def test_disable_invokes_cmcli_disable():
-    svc = PluginService(_app())
+def test_disable_invokes_cmcli_disable(tmp_path):
+    """B5：disable 同 uninstall —— 磁盘直连（rename 加后缀），不跑 cm-cli。"""
+    svc, pdir = _svc_with_plugin_dir(tmp_path)
     with patch.object(svc, "_run_cmcli", return_value=_cmcli_ok()) as m:
-        svc.disable("ComfyUI-KJNodes")
-    m.assert_called_once_with(["disable", "ComfyUI-KJNodes"])
+        r = svc.disable("ComfyUI-Foo")
+    m.assert_not_called()
+    assert r["ok"] is True and (tmp_path / "custom_nodes" / "ComfyUI-Foo.disabled").exists()
 
 
-def test_enable_invokes_cmcli_enable():
-    svc = PluginService(_app())
+def test_enable_invokes_cmcli_enable(tmp_path):
+    """B5：enable 同 uninstall —— 磁盘直连（刻后缀/移回），不跑 cm-cli。"""
+    svc, pdir = _svc_with_plugin_dir(tmp_path, "ComfyUI-Foo.disabled")
     with patch.object(svc, "_run_cmcli", return_value=_cmcli_ok()) as m:
-        svc.enable("ComfyUI-KJNodes")
-    m.assert_called_once_with(["enable", "ComfyUI-KJNodes"])
+        r = svc.enable("ComfyUI-Foo.disabled")
+    m.assert_not_called()
+    assert r["ok"] is True and (tmp_path / "custom_nodes" / "ComfyUI-Foo").exists()
 
 
 def test_install_invokes_cmcli_install_with_spec():
@@ -587,10 +685,9 @@ def test_install_invokes_cmcli_install_with_spec():
 
 
 def test_lifecycle_op_maps_nonzero_rc_to_error():
+    """B5：目标不存在 → 磁盘执行也无法完成 → ok=False + error 说明原因。"""
     svc = PluginService(_app())
-    fail = {"returncode": 1, "stdout": "", "stderr": "boom", "error": None}
-    with patch.object(svc, "_run_cmcli", return_value=fail):
-        r = svc.uninstall("ComfyUI-KJNodes")
+    r = svc.uninstall("NoSuchPlugin")
     assert r["ok"] is False
     assert r["error"]
 
@@ -1053,12 +1150,16 @@ def _svc_for_api(tmp_path=None):
 
 
 def _api_route_installed(extra=None):
-    """「Manager 在跑且队列空闲」的默认路由表；各操作 POST 默认 200。"""
+    """「Manager 在跑且队列空闲」的默认路由表；各操作 POST 默认 200。
+
+    queue/start 是 GET-only 路由（Manager 3.39.2 glob/manager_server.py:1314
+    `@routes.get`）——POST 必 405，此处按真实服务端行为模拟。
+    """
     routes = {
         ("GET", "/manager/version"): (200, "V3.41"),
         ("GET", "/manager/queue/status"): (200, {"is_processing": False,
                                                  "total_count": 0, "done_count": 0}),
-        ("POST", "/manager/queue/start"): (200, None),
+        ("GET", "/manager/queue/start"): (200, None),
         ("POST", "/manager/queue/install"): (200, None),
         ("POST", "/manager/queue/uninstall"): (200, None),
         ("POST", "/manager/queue/disable"): (200, None),
@@ -1131,6 +1232,51 @@ def test_api_run_queue_probe_unavailable_returns_none(tmp_path):
         assert svc._api_run_queue([("/manager/queue/install", {"id": "x"})]) is None
 
 
+# ---- queue/start 用 GET（Manager 3.39.2 该路由 GET-only，POST 必 405）----
+
+def _api_route_for_start(start_get=(200, None), start_post=(201, None)):
+    """operation POST 200 + 队列空闲 + 可配置 start 路由（GET/POST 各自状态码）。"""
+    routes = _api_route_installed()
+    del routes[("GET", "/manager/queue/start")]
+    routes[("GET", "/manager/queue/start")] = start_get
+    if start_post is not None:
+        routes[("POST", "/manager/queue/start")] = start_post
+    return routes
+
+
+def test_api_run_queue_starts_queue_with_get_not_post(tmp_path):
+    """B1：服务端 queue/start 是 GET-only；用 GET 成功后不得再发 POST（原实现 POST 必 405）。"""
+    svc = _svc_for_api(tmp_path)
+    fake = _FakeHttp(_api_route_for_start(start_get=(200, None)))
+    with patch.object(svc, "_http_json", fake):
+        res = svc._api_run_queue([("/manager/queue/uninstall", {"id": "x"})])
+    assert res is not None and res["ok"] is True
+    assert "/manager/queue/start" in fake.gets
+    assert all(p != "/manager/queue/start" for p, _ in fake.posts)
+
+
+def test_api_run_queue_get_start_405_falls_back_to_post(tmp_path):
+    """B1 兼容：若未来 Manager 改成 POST-only（GET 405），回退 POST 一次。"""
+    svc = _svc_for_api(tmp_path)
+    fake = _FakeHttp(_api_route_for_start(start_get=(405, "Method Not Allowed"),
+                                          start_post=(200, None)))
+    with patch.object(svc, "_http_json", fake):
+        res = svc._api_run_queue([("/manager/queue/uninstall", {"id": "x"})])
+    assert res is not None and res["ok"] is True
+    assert any(p == "/manager/queue/start" for p, _ in fake.posts)
+
+
+def test_api_run_queue_start_all_methods_fail_reports_error(tmp_path):
+    """B1：GET/POST 都不通时按失败返回（状态码写进 error），不再误报成功。"""
+    svc = _svc_for_api(tmp_path)
+    fake = _FakeHttp(_api_route_for_start(start_get=(405, "Method Not Allowed"),
+                                          start_post=(405, "Method Not Allowed")))
+    with patch.object(svc, "_http_json", fake):
+        res = svc._api_run_queue([("/manager/queue/uninstall", {"id": "x"})])
+    assert res is not None and res["ok"] is False
+    assert "405" in res["error"]
+
+
 def test_api_try_lifecycle_cnr_tracking_identity(tmp_path):
     svc = _svc_for_api(tmp_path)
     pdir = tmp_path / "custom_nodes" / "ComfyUI-Foo"
@@ -1193,7 +1339,12 @@ def test_api_try_update_all_uses_cache_mode(tmp_path):
 
 
 def test_lifecycle_uninstall_uses_api_when_available(tmp_path):
-    """公开方法 _lifecycle：uninstall 先走 API，成功即返回不再跑 cm-cli。"""
+    """公开方法 _lifecycle：uninstall 先走 API；API 真把目录删了才不跑 cm-cli。
+
+    fake API 的 uninstall 路由带副作用（删目录），模拟服务端真执行；
+    若 API 只报 ok 而目录还在（服务端 skip 假成功），见
+    test_lifecycle_api_ok_but_no_effect_falls_back_to_cmcli。
+    """
     svc = _svc_for_api(tmp_path)
     pdir = tmp_path / "custom_nodes" / "ComfyUI-Foo"
     (pdir / ".tracking").mkdir(parents=True)
@@ -1201,13 +1352,160 @@ def test_lifecycle_uninstall_uses_api_when_available(tmp_path):
     (pdir / ".git" / ".cnr-id").write_text("comfyui-foo", encoding="utf-8")
     (pdir / "pyproject.toml").write_text('[project]\nversion = "2.1.0"\n', encoding="utf-8")
 
-    fake = _FakeHttp(_api_route_installed())
+    def _real_uninstall(body):
+        import shutil
+        shutil.rmtree(pdir)
+        return (200, None)
+
+    routes = _api_route_installed()
+    routes[("POST", "/manager/queue/uninstall")] = _real_uninstall
+    fake = _FakeHttp(routes)
     with patch.object(svc, "_http_json", fake), \
          patch.object(svc, "_run_cmcli") as run_cmcli:
         res = svc.uninstall("ComfyUI-Foo")
 
     assert res["ok"] is True
     run_cmcli.assert_not_called()
+
+
+# ---- B2：lifecycle 假成功治理（终态核实）+ target 规范化 ----
+# cm-cli 对「Manager 不认识目录名」的插件输出 SKIPPED: Not installed 但退出码 0，
+# 旧实现只看退出码 → 弹「已卸载」实际一个字节没动。修复：操作后核实磁盘终态。
+
+def _svc_with_plugin_dir(tmp_path, name="ComfyUI-Foo"):
+    """PluginService + tmp custom_nodes/<name> 目录（含假 .git，模拟 git 插件）。"""
+    svc = PluginService(_app())
+    svc._comfyui_dir = lambda: tmp_path
+    pdir = tmp_path / "custom_nodes" / name
+    (pdir / ".git").mkdir(parents=True)
+    return svc, pdir
+
+
+def test_lifecycle_uninstall_success_verifies_dir_gone(tmp_path):
+    """B5：uninstall 直接删目录（不经 cm-cli），终态达成 → ok=True。"""
+    svc, pdir = _svc_with_plugin_dir(tmp_path)
+    with patch.object(svc, "_run_cmcli") as m:
+        r = svc.uninstall("ComfyUI-Foo")
+    m.assert_not_called()
+    assert r["ok"] is True and not pdir.exists()
+
+
+def test_lifecycle_uninstall_disabled_suffix_target_normalized(tmp_path):
+    """B5：卸载目标带 .disabled 后缀 → 磁盘执行覆盖后缀目录（.disabled/ 子目录同样）。"""
+    svc, pdir = _svc_with_plugin_dir(tmp_path, "ComfyUI-Foo.disabled")
+    r = svc.uninstall("ComfyUI-Foo.disabled")
+    assert r["ok"] is True and not pdir.exists()
+
+
+def test_lifecycle_api_ok_but_no_effect_falls_back_to_disk(tmp_path):
+    """B5：API 报 ok=True 但目录还在（服务端 skip 假成功 / 队列没执行）→ 磁盘直连完成。"""
+    svc, pdir = _svc_with_plugin_dir(tmp_path)
+    (pdir / ".tracking").mkdir()
+    (pdir / ".git" / ".cnr-id").write_text("comfyui-foo", encoding="utf-8")
+    (pdir / "pyproject.toml").write_text('[project]\nversion = "2.1.0"\n', encoding="utf-8")
+
+    fake = _FakeHttp(_api_route_installed())  # API 全 200 但什么都没做
+    with patch.object(svc, "_http_json", fake), \
+         patch.object(svc, "_run_cmcli") as m:
+        r = svc.uninstall("ComfyUI-Foo")
+
+    assert r["ok"] is True and not pdir.exists()
+    m.assert_not_called()
+
+
+# ---- B3/B5：磁盘执行（uninstall/disable/enable 的主路径，不经 cm-cli）----
+# Manager unified_uninstall/unified_disable 的语义就是 rmtree / 移动目录（无 pip
+# 卸载），cm-cli 子进程除了多付一次 CNR registry 全量拉取（Windows ~5.5 分钟）
+# 且对只读 git pack 删不动（标「重启后删除」）外没有任何增量价值。B5 起
+# uninstall/disable/enable = API（ComfyUI 在跑时）→ 启动器磁盘直连。
+# 后缀禁用是 ComfyUI 原生机制且 Manager from_fullpath 同样识别。
+
+def test_lifecycle_uninstall_disk_executes_directly(tmp_path):
+    """B5：uninstall 直接 rmtree，ok=True + log 说明启动器执行。"""
+    svc, pdir = _svc_with_plugin_dir(tmp_path)
+    r = svc.uninstall("ComfyUI-Foo")
+    assert r["ok"] is True
+    assert not pdir.exists()
+    assert "启动器" in r["log"]
+
+
+def test_lifecycle_uninstall_disk_handles_readonly_git_pack(tmp_path):
+    """B3：目录里有只读文件（git pack .idx/.pack 的 Windows 常态）也能删。"""
+    svc, pdir = _svc_with_plugin_dir(tmp_path)
+    pack = pdir / ".git" / "objects" / "pack"
+    pack.mkdir(parents=True)
+    ro = pack / "pack-abc.idx"
+    ro.write_text("x", encoding="utf-8")
+    import os, stat
+    os.chmod(ro, stat.S_IREAD)
+    r = svc.uninstall("ComfyUI-Foo")
+    assert r["ok"] is True and not pdir.exists()
+
+
+def test_lifecycle_uninstall_disk_removes_dot_disabled_entries(tmp_path):
+    """B3：目标只存在于 .disabled/ 子目录（Manager 网页端禁用形态）也能卸载。"""
+    svc, pdir = _svc_with_plugin_dir(tmp_path)
+    import shutil
+    dd = tmp_path / "custom_nodes" / ".disabled"
+    dd.mkdir()
+    shutil.move(str(pdir), str(dd / "ComfyUI-Foo@1_0_0"))
+    r = svc.uninstall("ComfyUI-Foo")
+    assert r["ok"] is True
+    assert not list(dd.glob("ComfyUI-Foo*"))
+
+
+def test_lifecycle_disable_disk_renames_with_suffix(tmp_path):
+    """B5：disable → rename 加 .disabled 后缀（launcher/ComfyUI 原生语义）。"""
+    svc, pdir = _svc_with_plugin_dir(tmp_path)
+    r = svc.disable("ComfyUI-Foo")
+    assert r["ok"] is True
+    assert not pdir.exists()
+    assert (tmp_path / "custom_nodes" / "ComfyUI-Foo.disabled").exists()
+
+
+def test_lifecycle_enable_disk_strips_suffix(tmp_path):
+    """B5：enable → 刻掉 .disabled 后缀 rename 回启用名。"""
+    svc, pdir = _svc_with_plugin_dir(tmp_path, "ComfyUI-Foo.disabled")
+    r = svc.enable("ComfyUI-Foo.disabled")
+    assert r["ok"] is True
+    assert not pdir.exists()
+    assert (tmp_path / "custom_nodes" / "ComfyUI-Foo").exists()
+
+
+def test_lifecycle_enable_disk_restores_from_dot_disabled_dir(tmp_path):
+    """B3：Manager 网页端禁用（移进 .disabled/ 子目录）的插件 enable 时 move 回来。"""
+    svc, pdir = _svc_with_plugin_dir(tmp_path)
+    import shutil
+    dd = tmp_path / "custom_nodes" / ".disabled"
+    dd.mkdir()
+    shutil.move(str(pdir), str(dd / "ComfyUI-Foo@1_0_0"))
+    r = svc.enable("ComfyUI-Foo@1_0_0")
+    assert r["ok"] is True
+    assert (tmp_path / "custom_nodes" / "ComfyUI-Foo").exists()
+    assert not list(dd.glob("ComfyUI-Foo*"))
+
+
+def test_lifecycle_api_skip_then_disk_execute_succeeds(tmp_path):
+    """B5 整合：API 假成功 → 磁盘直连删除，最终 ok=True（真实链路，全程无 cm-cli）。"""
+    svc, pdir = _svc_with_plugin_dir(tmp_path)
+    (pdir / ".tracking").mkdir()
+    (pdir / ".git" / ".cnr-id").write_text("comfyui-foo", encoding="utf-8")
+    (pdir / "pyproject.toml").write_text('[project]\nversion = "2.1.0"\n', encoding="utf-8")
+    fake = _FakeHttp(_api_route_installed())  # API ok 但啥也没干
+    with patch.object(svc, "_http_json", fake), \
+         patch.object(svc, "_run_cmcli") as m:
+        r = svc.uninstall("ComfyUI-Foo")
+    assert r["ok"] is True and not pdir.exists()
+    m.assert_not_called()
+
+
+def test_lifecycle_disk_failure_keeps_error(tmp_path):
+    """B5：磁盘执行失败（mock _disk_lifecycle False）→ ok=False + error。"""
+    svc, pdir = _svc_with_plugin_dir(tmp_path)
+    with patch.object(svc, "_disk_lifecycle", return_value=(False, "boom")):
+        r = svc.uninstall("ComfyUI-Foo")
+    assert r["ok"] is False
+    assert r["error"]
 
 
 def test_pyproject_version_parses_project_section(tmp_path):

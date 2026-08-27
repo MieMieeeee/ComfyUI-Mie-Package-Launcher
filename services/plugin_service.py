@@ -226,43 +226,60 @@ class PluginService:
         # 记下哪些是 git 仓库需要第二遍跑 git 命令。结果按 dir_name 字典序（sorted iterdir 保证）。
         results: list[dict[str, Any]] = []
         pending_git: list[tuple[int, Path]] = []  # (results 下标, 插件目录) 第二遍并行处理
-        for entry in sorted(cn_dir.iterdir()):
-            if not entry.is_dir():
-                continue
-            dir_name = entry.name
-            if dir_name.startswith("__") or dir_name.startswith("."):
-                continue
-            # ComfyUI-Manager 禁用插件 = 给目录加 .disabled 后缀
-            enabled = not dir_name.endswith(".disabled")
-            name = dir_name[:-len(".disabled")] if not enabled else dir_name
 
-            has_git = (entry / ".git").exists()
-            py = self._read_pyproject(entry)
-            # 三态分类：.git 优先 git；否则有 pyproject 是 cnr；都没有 local
-            if has_git:
-                kind = "git"
-            elif py:
-                kind = "cnr"
-            else:
-                kind = "local"
+        # 扫描来源 = 顶层目录 + .disabled/ 子目录（B4：Manager 网页端禁用会把目录
+        # 移进 custom_nodes/.disabled/<id>@<ver>，旧实现跳过 '.' 开头目录导致这些
+        # 插件从启动器列表彻底消失、无法恢复）。dir_name 始终用「所在层的真实目录名」
+        # （.disabled/ 条目含 @ver 尾巴），磁盘操作（uninstall/enable 兜底）据此定位。
+        def _scan(scan_dir: Path, in_disabled_dir: bool):
+            for entry in sorted(scan_dir.iterdir()):
+                if not entry.is_dir():
+                    continue
+                dir_name = entry.name
+                if dir_name.startswith("__") or dir_name.startswith("."):
+                    continue
+                # ComfyUI-Manager 禁用插件 = 给目录加 .disabled 后缀（顶层），
+                # 或移进 .disabled/ 子目录（子目录内一律视为禁用）
+                enabled = (not dir_name.endswith(".disabled")) and not in_disabled_dir
+                if in_disabled_dir:
+                    # Manager 命名 <node_id>@<ver_underscored>；展示名刻掉 @ 尾巴
+                    name = dir_name.split("@", 1)[0] if "@" in dir_name else dir_name
+                else:
+                    name = dir_name[:-len(".disabled")] if not enabled else dir_name
 
-            rec: dict[str, Any] = {
-                "name": name,
-                "dir_name": dir_name,
-                "kind": kind,
-                "is_git": kind == "git",  # 向后兼容（outdated_plugins 等仍用它判断能否 git 操作）
-                "enabled": enabled,
-                "version": "",
-                "remote_url": "",
-                "local_date": "",
-            }
-            # version/remote_url：优先 pyproject（CNR 和多数 git 插件都有），git 命令仅补缺失项
-            if py:
-                rec["version"] = py.get("version", "")
-                rec["remote_url"] = py.get("repository", "")
-            results.append(rec)
-            if has_git:
-                pending_git.append((len(results) - 1, entry))
+                has_git = (entry / ".git").exists()
+                py = self._read_pyproject(entry)
+                # 三态分类：.git 优先 git；否则有 pyproject 是 cnr；都没有 local
+                if has_git:
+                    kind = "git"
+                elif py:
+                    kind = "cnr"
+                else:
+                    kind = "local"
+
+                rec: dict[str, Any] = {
+                    "name": name,
+                    "dir_name": dir_name,
+                    "kind": kind,
+                    "is_git": kind == "git",  # 向后兼容（outdated_plugins 等仍用它判断能否 git 操作）
+                    "enabled": enabled,
+                    "in_disabled_dir": in_disabled_dir,
+                    "version": "",
+                    "remote_url": "",
+                    "local_date": "",
+                }
+                # version/remote_url：优先 pyproject（CNR 和多数 git 插件都有），git 命令仅补缺失项
+                if py:
+                    rec["version"] = py.get("version", "")
+                    rec["remote_url"] = py.get("repository", "")
+                results.append(rec)
+                if has_git:
+                    pending_git.append((len(results) - 1, entry))
+
+        _scan(cn_dir, in_disabled_dir=False)
+        dd = cn_dir / ".disabled"
+        if dd.is_dir():
+            _scan(dd, in_disabled_dir=True)
 
         # ---- 第二遍：git 信息并行回填（贵：每个仓库最多 3 条 git 命令）----
         # 串行时 N 个仓库 ≈ N×3×0.5s；并行（4 worker）可压到约 1/4。失败回退串行，保契约不破。
@@ -873,6 +890,10 @@ class PluginService:
             if res.get("returncode") != _CM_FAST_EXIT_CACHE_MISSING:
                 return res
             logger.info("cmcli: 包装器 exit 3（CNR 缓存缺失）→ 原生 cm-cli 兜底建缓存 args=%r", args)
+        else:
+            # B6：静默退原生 = 每次 ~5.5 分钟 registry 全量拉取，必须留痕可检索
+            # （用户日志包里发生过 wrapper 缺失且无任何痕迹的事故）
+            logger.warning("cm_fast: 包装器源缺失，退原生 cm-cli（慢，~5.5 分钟）args=%r", args)
         return self._run_cmcli_script(py, cm, cm, args, timeout=timeout)
 
     def _run_cmcli_script(self, py: str, cm: Path, script: Path,
@@ -972,6 +993,9 @@ class PluginService:
             if res.get("returncode") != _CM_FAST_EXIT_CACHE_MISSING:
                 return res
             logger.info("cmcli_stream: 包装器 exit 3（CNR 缓存缺失）→ 原生 cm-cli 兜底建缓存 args=%r", args)
+        else:
+            # B6：同 _run_cmcli，wrapper 缺失退原生必须留痕
+            logger.warning("cm_fast: 包装器源缺失，退原生 cm-cli（慢，~5.5 分钟）args=%r", args)
         return self._run_script_streaming(py, cm, cm, args,
                                           on_output=on_output,
                                           cancel_event=cancel_event,
@@ -1174,7 +1198,12 @@ class PluginService:
             if not (200 <= status < 300):
                 logger.info("manager-api: POST %s -> %s（降级包装器）data=%s", path, status, data)
                 return None
-        status, _, _ = self._http_json("POST", "/manager/queue/start", timeout=3.0)
+        # queue/start 在 Manager 3.39.2 是 GET-only 路由（@routes.get），POST 必 405
+        # （曾致 ComfyUI 在跑时所有 API 操作失败）。GET 优先；GET 405/404 时回退
+        # POST 一次，兼容未来改 POST-only 的版本。201 = 已在跑，同样算启动成功。
+        status, _, _ = self._http_json("GET", "/manager/queue/start", timeout=3.0)
+        if status in (404, 405):
+            status, _, _ = self._http_json("POST", "/manager/queue/start", timeout=3.0)
         if not (200 <= status < 300):
             # POST 已成功但 start 失败：条目还挂在队列里，不降级避免重跑，按错误返回
             return {"ok": False, "log": "", "error": f"Manager API queue/start 状态码 {status}"}
@@ -1440,15 +1469,15 @@ class PluginService:
         return self._do_update([str(n) for n in nodes])
 
     def uninstall(self, target):
-        """卸载插件（cm-cli uninstall）。"""
+        """卸载插件（Manager API → 启动器磁盘直连，见 _lifecycle）。"""
         return self._lifecycle("uninstall", target)
 
     def disable(self, target):
-        """禁用插件（cm-cli disable）。"""
+        """禁用插件（Manager API → 启动器磁盘直连，见 _lifecycle）。"""
         return self._lifecycle("disable", target)
 
     def enable(self, target):
-        """启用插件（cm-cli enable）。"""
+        """启用插件（Manager API → 启动器磁盘直连，见 _lifecycle）。"""
         return self._lifecycle("enable", target)
 
     def install(self, node_spec):
@@ -1456,7 +1485,20 @@ class PluginService:
         api = self._api_try_install(node_spec)
         if api is not None:
             return api
-        return self._lifecycle("install", node_spec)
+        # install 需要 git clone + pip 依赖安装，无法本地替代 → 保留 cm-cli 路径
+        res = self._run_cmcli(["install", str(node_spec)])
+        if res["error"]:
+            return {"ok": False, "log": "", "error": res["error"]}
+        log = _truncate((res["stdout"] or res["stderr"]).strip())
+        rc = res["returncode"]
+        if rc == 0:
+            # install 结果目录名不确定（CNR id / github url 的目录命名不同）→ 清全部
+            try:
+                self._evict_git_info_cache(None)
+            except Exception:
+                pass
+        return {"ok": rc == 0, "log": log,
+                "error": None if rc == 0 else f"cm-cli install 退出码 {rc}"}
 
     def install_streaming(self, node_spec, on_stage=None, cancel_event=None) -> dict[str, Any]:
         """安装插件（流式）：cm-cli install <spec>，逐阶段回调。
@@ -1529,35 +1571,153 @@ class PluginService:
         return {"ok": rc == 0, "log": log,
                 "error": None if rc == 0 else f"cm-cli install 退出码 {rc}"}
 
-    def _lifecycle(self, op: str, target) -> dict[str, Any]:
-        """uninstall/disable/enable/install 共用：跑 cm-cli <op> <target>。
+    # ---- B2：lifecycle 终态核实 + target 规范化 ----
+    # cm-cli 对「Manager 内部名（cnr id / url basename）≠ 目录名」的插件输出
+    # SKIPPED: Not installed / Not found 但退出码 0，旧实现只看退出码 → 假成功。
+    # 修复：uninstall/disable/enable 完成后核实磁盘终态，未达成即失败（B3 再兜底）。
+    @staticmethod
+    def _lifecycle_base_name(target: str) -> str:
+        """刻掉 .disabled 后缀（Manager 字典 key 不含后缀；enable 的期望目录名同此）。"""
+        t = str(target)
+        suf = ".disabled"
+        return t[:-len(suf)] if t.endswith(suf) else t
 
-        uninstall/disable/enable 先试 Manager API（ComfyUI 在跑时秒级），
-        不适用/前置失败自动降级本路径（cm_fast 包装器 → 原生 cm-cli）。
+    def _lifecycle_effect_ok(self, op: str, target: str) -> bool:
+        """核实 op 的磁盘终态是否达成（API / cm-cli 两路径统一适用）。
+
+        - uninstall: 启用目录、.disabled 后缀目录、.disabled/ 子目录条目（含
+          Manager 的 <id>@<ver> 命名）全部不存在。
+        - disable:   启用态目录不存在（无论被改成后缀还是移进 .disabled/ 子目录）。
+        - enable:    启用态目录存在（.disabled/ 子目录形态的还原名 = @ 前段）。
         """
-        if op in ("uninstall", "disable", "enable"):
-            api = self._api_try_lifecycle(op, target)
-            if api is not None:
-                return api
-        res = self._run_cmcli([op, str(target)])
-        if res["error"]:
-            return {"ok": False, "log": "", "error": res["error"]}
-        log = _truncate((res["stdout"] or res["stderr"]).strip())
-        rc = res["returncode"]
-        result = {"ok": rc == 0, "log": log,
-                  "error": None if rc == 0 else f"cm-cli {op} 退出码 {rc}"}
-        # P1-3 meta-review：写操作后 evict git 缓存（插件可能被装/删/改名，目录会动）
-        if rc == 0:
+        try:
+            cn_dir = PATHS.plugins_dir(self._comfyui_dir())
+            base = self._lifecycle_base_name(target)
+            if op == "uninstall":
+                if (cn_dir / base).exists() or (cn_dir / f"{base}.disabled").exists():
+                    return False
+                dd = cn_dir / ".disabled"
+                if dd.exists() and any(dd.glob(f"{base}*")):
+                    return False
+                return True
+            if op == "disable":
+                return not (cn_dir / str(target)).exists()
+            if op == "enable":
+                if (cn_dir / base).exists():
+                    return True
+                # Manager 移进 .disabled/ 的条目名是 <id>@<ver_underscored>，
+                # enable 成功后还原为 @ 前段名
+                return "@" in base and (cn_dir / base.split("@")[0]).exists()
+            return True
+        except Exception:
+            logger.debug("lifecycle_effect_ok(%s, %s) 检查失败", op, target, exc_info=True)
+            return False
+
+    # ---- B3：磁盘兜底 ----
+    @staticmethod
+    def _rmtree_force(p: Path) -> None:
+        """rmtree，遇到只读文件（git pack 的 Windows 常态）先 chmod 再删。"""
+        import shutil
+        import stat
+
+        def _onexc(f, path, exc):
             try:
-                if op == "install":
-                    # install 结果目录名不确定（CNR id / github url 的目录命名不同）→ 清全部
-                    self._evict_git_info_cache(None)
-                else:
-                    # uninstall/disable/enable 用 target（插件名）evict 就行
-                    self._evict_git_info_cache(str(target))
+                os.chmod(path, stat.S_IWRITE)
+                f(path)
+            except Exception:
+                raise
+        shutil.rmtree(p, onexc=_onexc)
+
+    def _disk_lifecycle(self, op: str, target: str) -> tuple[bool, str]:
+        """B3/B5：uninstall/disable/enable 的磁盘直连执行（主路径，不经 cm-cli）。
+
+        与 Manager 行为等价：unified_uninstall 本就只 rmtree（不 pip 卸载）；
+        .disabled 后缀是 ComfyUI 原生禁用机制、Manager from_fullpath 同样识别；
+        enable 从 .disabled/ 子目录按「@ 前段」还原（Manager 的 <id>@<ver> 命名）。
+        另处理 Manager try_rmtree 删不动的只读 git pack（WinError 5 → 它只能标
+        「重启后删除」，这里 chmod 后直接删干净）。
+
+        返回 (成功?, 说明文案)。任何异常不抛（返回 False + 原因）。
+        """
+        try:
+            cn_dir = PATHS.plugins_dir(self._comfyui_dir())
+            base = self._lifecycle_base_name(target)
+            if op == "uninstall":
+                removed = []
+                for cand in [cn_dir / base, cn_dir / f"{base}.disabled",
+                             *sorted((cn_dir / ".disabled").glob(f"{base}*"))]:
+                    if cand.exists():
+                        self._rmtree_force(cand)
+                        removed.append(cand.name)
+                if not removed:
+                    return False, "未找到可删除的插件目录"
+                return True, f"启动器已直接删除插件目录：{', '.join(removed)}"
+            if op == "disable":
+                src = cn_dir / str(target)
+                if not src.exists():
+                    return False, "插件目录不存在"
+                dst = cn_dir / f"{base}.disabled"
+                if dst.exists():
+                    # 同名禁用目录已存在：删源目录即可达成「启用态消失」终态
+                    self._rmtree_force(src)
+                    return True, "启动器已直接删除插件目录（同名禁用目录已存在）"
+                src.rename(dst)
+                return True, f"启动器已直接禁用（重命名 {base} → {base}.disabled）"
+            if op == "enable":
+                src = cn_dir / str(target)
+                if src.exists():
+                    dst = cn_dir / base
+                    if dst.exists():
+                        return True, "插件已处于启用状态"
+                    src.rename(dst)
+                    return True, f"启动器已直接启用（重命名 {target} → {base}）"
+                dd = cn_dir / ".disabled"
+                entry = dd / str(target)
+                if not entry.exists():
+                    return False, "未找到插件目录（启用态与 .disabled/ 子目录均无）"
+                restore = base.split("@")[0]
+                dst = cn_dir / restore
+                if dst.exists():
+                    return True, "插件已处于启用状态"
+                entry.rename(dst)
+                return True, f"启动器已直接启用（{target} → custom_nodes/{restore}）"
+            return False, f"未知操作 {op}"
+        except Exception as e:
+            logger.warning("disk_lifecycle(%s, %s) 失败", op, target, exc_info=True)
+            return False, f"磁盘执行失败：{e}"
+
+    def _lifecycle(self, op: str, target) -> dict[str, Any]:
+        """uninstall/disable/enable 共用：Manager API → 启动器磁盘直连（B5）。
+
+        为什么不再走 cm-cli：Manager 的 unified_uninstall/unified_disable 语义就是
+        rmtree / 移动目录（无 pip 卸载），cm-cli 子进程除了多付一次 CNR registry
+        全量拉取（Windows 上 ~5.5 分钟）外没有增量价值，且它的 try_rmtree 对只读
+        git pack 会 WinError 5 → 标「重启后删除」半途而废。磁盘直连毫秒级完成同样
+        的终态，并顺带处理只读文件。
+
+        API（ComfyUI 在跑时秒级）先行保留：服务端执行能同步更新其内存字典。
+        报 ok 但终态未达成（skip 假成功）→ 磁盘执行补刀；lifecycle 操作幂等
+        （对已达成的终态重复执行 = 无害 skip），队列里的僵尸条目将来执行无副作用。
+        install 不在此列（需要 git clone + pip），见 install()/install_streaming()。
+        """
+        target = str(target)
+        api = self._api_try_lifecycle(op, target)
+        if api is not None and api.get("ok") and self._lifecycle_effect_ok(op, target):
+            return api
+        if api is not None:
+            logger.info("lifecycle: API 路径未达成终态（op=%s target=%s api_ok=%s）→ 启动器磁盘执行",
+                        op, target, api.get("ok"))
+        fell, note = self._disk_lifecycle(op, target)
+        if fell and self._lifecycle_effect_ok(op, target):
+            logger.info("lifecycle: %s %s 由启动器磁盘直连完成", op, target)
+            try:
+                self._evict_git_info_cache(str(target))
             except Exception:
                 pass
-        return result
+            return {"ok": True, "log": note, "error": None}
+        # 未达成：磁盘说明（目录不存在/权限）是最接近根因的报错
+        return {"ok": False, "log": note,
+                "error": note or f"{op} {target} 未生效"}
 
     def force_update_selected(self, names: list[str]) -> list[dict[str, Any]]:
         """强制更新选中的插件：确认是 git 仓库则 git stash + git pull --ff-only。
