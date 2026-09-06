@@ -99,6 +99,18 @@
           </File>
           <File>
             <Type>2</Type>
+            <Name>cm_fast.py</Name>
+            <File>F:\ComfyUI-Mie-Package-Launcher\dist\ComfyUI启动器.dist\cm_fast.py</File>
+            <ActiveX>False</ActiveX>
+            <ActiveXInstall>False</ActiveXInstall>
+            <Action>0</Action>
+            <OverwriteDateTime>False</OverwriteDateTime>
+            <OverwriteAttributes>False</OverwriteAttributes>
+            <PassCommandLine>False</PassCommandLine>
+            <HideFromDialogs>0</HideFromDialogs>
+          </File>
+          <File>
+            <Type>2</Type>
             <Name>ComfyUI_Launcher_Internal.exe</Name>
             <File>F:\ComfyUI-Mie-Package-Launcher\dist\ComfyUI启动器.dist\ComfyUI_Launcher_Internal.exe</File>
             <ActiveX>False</ActiveX>

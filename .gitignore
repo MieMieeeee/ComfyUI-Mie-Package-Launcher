@@ -66,7 +66,16 @@ python_embeded/pip.ini
 release/
 
 # Build artifacts (Enigma Virtual Box / Nuitka)
+#
+# 注意：EnigmaVirtualBox/launcher.evb 例外，必须入库。
+# 它不是 build artifact，而是 EVB 的「工程文件」——build.py 直接读取它
+# 生成 boxed exe。历史：2026-09-06 漏把 cm_fast.py 登记进 .evb，导致 3 个
+# v1.0.17 release 的 boxed exe 缺 cm_fast.py，install 慢 5.5min。下方的
+# `!EnigmaVirtualBox/launcher.evb` 显式取消 ignore 这一文件，其它
+# EnigmaVirtualBox/ 子产物（boxed.exe、模板）仍按 build artifact 处理。
+# tests/unit/test_evb_includes_dist_root.py 锁 cm_fast.py 必须在 .evb 里。
 EnigmaVirtualBox/
+!EnigmaVirtualBox/launcher.evb
 nuitka-crash-report.xml
 
 # Diagnostic leftover from manual CLI testing
