@@ -156,8 +156,8 @@ comfyui-launcher restart [--no-wait] [--timeout SEC] [--env ENV_ID]
 
 ### info
 
-读 `launcher/config.json` + `build_parameters.json`，把关键字段整理输出，
-**不启动任何东西**。排查"我配了什么"时用。
+读 `launcher/config.json` + `core/version.py`（版本号）+ `build_parameters.json`（编译时间），
+把关键字段整理输出，**不启动任何东西**。排查"我配了什么"时用。
 
 ```
 comfyui-launcher info [--json] [--env ENV_ID]

@@ -133,11 +133,12 @@ comfyui-mie-resources/
 
 ### build_parameters.json 配置
 
-编译参数配置文件位于项目根目录：
+版本号唯一事实源是 `core/version.py` 的 `LAUNCHER_VERSION`（代码控制，
+`python build.py --version vX.Y.Z` 会自动改写该文件）。`build_parameters.json`
+只保留编译脚本自动插入的元数据，位于项目根目录：
 
 ```json
 {
-  "version": "v1.0.9",
   "channel": "stable",
   "suffix": " · 构建于 2026-03-25 10:30:00",
   "mode": "nuitka_release",
@@ -148,7 +149,6 @@ comfyui-mie-resources/
 
 | 字段 | 类型 | 说明 |
 |------|------|------|
-| `version` | string | 版本号，编译后不可更改 |
 | `channel` | string | 通道：`stable` 或 `test` |
 | `suffix` | string | 编译后添加到关于窗口的附加信息 |
 | `mode` | string | Nuitka编译模式，通常为 `nuitka_release` |

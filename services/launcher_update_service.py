@@ -131,42 +131,53 @@ class LauncherUpdateService:
         return self._get_update_dir() / "apply_update.bat"
 
     def get_current_version(self) -> str:
-        """获取当前版本"""
-        try:
-            candidates = []
-            try:
-                candidates.append(
-                    Path(getattr(sys, "_MEIPASS", "")) / "build_parameters.json"
-                )
-            except Exception:
-                pass
-            try:
-                candidates.append(
-                    Path(sys.executable).resolve().parent / "build_parameters.json"
-                )
-            except Exception:
-                pass
-            try:
-                candidates.append(Path.cwd() / "build_parameters.json")
-                candidates.append(Path.cwd() / "launcher" / "build_parameters.json")
-            except Exception:
-                pass
+        """获取当前版本：代码常量 core.version.LAUNCHER_VERSION（编译期打进 exe）。
 
-            for p in candidates:
-                try:
-                    if p.exists():
-                        with open(p, "r", encoding="utf-8") as f:
-                            params = json.load(f) or {}
-                        ver = str(params.get("version") or "").strip()
-                        if ver:
-                            channel = params.get("channel", self.CHANNEL_STABLE)
-                            self._compiled_channel = channel
-                            return ver
-                except Exception:
-                    pass
+        顺带加载编译通道（build_parameters.json 的 channel，编译脚本
+        自动插入）——与旧行为一致，get_current_channel 优先用它。
+        """
+        self._load_compiled_channel()
+        try:
+            from core.version import LAUNCHER_VERSION
+            return LAUNCHER_VERSION
+        except Exception:
+            return "v0.0.0"
+
+    def _build_param_candidates(self):
+        """build_parameters.json 候选路径（exe 旁 / MEIPASS / cwd）。"""
+        candidates = []
+        try:
+            meipass = getattr(sys, "_MEIPASS", "")
+            if meipass:
+                candidates.append(Path(meipass) / "build_parameters.json")
         except Exception:
             pass
-        return "v0.0.0"
+        try:
+            candidates.append(Path(sys.executable).resolve().parent / "build_parameters.json")
+        except Exception:
+            pass
+        try:
+            candidates.append(Path.cwd() / "build_parameters.json")
+            candidates.append(Path.cwd() / "launcher" / "build_parameters.json")
+        except Exception:
+            pass
+        return candidates
+
+    def _load_compiled_channel(self):
+        """从 build_parameters.json 读编译通道；读不到保持 None（回退 config）。"""
+        if self._compiled_channel:
+            return
+        for p in self._build_param_candidates():
+            try:
+                if p and p.exists():
+                    with open(p, "r", encoding="utf-8") as f:
+                        params = json.load(f) or {}
+                    ch = str(params.get("channel") or "").strip()
+                    if ch:
+                        self._compiled_channel = ch
+                        return
+            except Exception:
+                continue
 
     @staticmethod
     def calculate_sha256(file_path: str) -> str:
@@ -189,11 +200,11 @@ class LauncherUpdateService:
 
     def _fetch_update_payload(self, url: str, headers: dict):
         self._log("debug", "launcher_update: checking %s", url)
-        url = _encode_url(url)
+        encoded = _encode_url(url)
         # 加 Accept-Encoding 让 CDN 主动压缩响应（issue 11）
         fetch_headers = dict(headers)
         fetch_headers.setdefault("Accept-Encoding", "gzip, deflate")
-        req = Request(url, headers=fetch_headers)
+        req = Request(encoded, headers=fetch_headers)
         with urlopen(req, timeout=5) as resp:
             raw = read_response_raw(resp)  # 自动解 gzip/deflate
             return json.loads(raw.decode("utf-8", errors="ignore"))
@@ -365,8 +376,8 @@ class LauncherUpdateService:
         def _do_download():
             """内部下载函数，在 ThreadPoolExecutor 中运行以支持总超时。"""
             self._log("info", "launcher_update: downloading from %s", url)
-            url = _encode_url(url)
-            req = Request(url, headers={"User-Agent": "ComfyUI-Launcher"})
+            encoded = _encode_url(url)
+            req = Request(encoded, headers={"User-Agent": "ComfyUI-Launcher"})
             with urlopen(req, timeout=30) as resp:
                 total_size = int(resp.headers.get("Content-Length", 0))
                 downloaded = 0

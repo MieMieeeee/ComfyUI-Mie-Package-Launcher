@@ -125,22 +125,15 @@ _crash_fh = None  # module-level, keep file handle alive so faulthandler doesn't
 
 
 def _read_build_version(root: Path) -> str:
-    """Try to read build_parameters.json version, fall back to 'unknown'."""
-    import json as _json
-    candidates = (
-        root / "build_parameters.json",
-        root / "launcher" / "build_parameters.json",
-    )
-    for p in candidates:
-        try:
-            if p.exists():
-                data = _json.loads(p.read_text(encoding="utf-8"))
-                v = (data or {}).get("version")
-                if v:
-                    return str(v)
-        except Exception:
-            continue
-    return "unknown"
+    """版本号来自代码常量 core.version.LAUNCHER_VERSION（编译期打进 exe）。
+
+    root 参数保留给旧调用方（render_guard），不再参与解析。
+    """
+    try:
+        from core.version import LAUNCHER_VERSION
+        return LAUNCHER_VERSION
+    except Exception:
+        return "unknown"
 
 
 def install_crash_reporting(log_root=None):

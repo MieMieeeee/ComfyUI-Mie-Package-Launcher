@@ -248,43 +248,15 @@ class AboutLauncherPage(BasePage):
         return card
 
     def _get_version_only(self) -> str:
-        """只获取版本号"""
+        """只获取版本号：代码常量 + build_parameters.json 的 built_at 拼展示。"""
         try:
-            from pathlib import Path
-            import json, sys
-            p_base = Path(getattr(self, "base_root", Path.cwd()))
-            candidates = []
-            try:
-                candidates.append(Path(getattr(sys, "_MEIPASS", "")) / "build_parameters.json")
-            except Exception:
-                pass
-            try:
-                candidates.append(Path(sys.executable).resolve().parent / "build_parameters.json")
-            except Exception:
-                pass
-            try:
-                candidates.append(p_base / "build_parameters.json")
-            except Exception:
-                pass
-            for p in candidates:
-                try:
-                    if p and p.exists():
-                        with open(p, "r", encoding="utf-8") as f:
-                            params = json.load(f) or {}
-                        ver = str(params.get("version") or "").strip()
-                        if ver:
-                            try:
-                                from core.build_meta import (
-                                    actual_build_time, format_version_display,
-                                )
-                                return format_version_display(ver, actual_build_time())
-                            except Exception:
-                                return ver
-                except Exception:
-                    pass
+            from core.version import LAUNCHER_VERSION
+            from core.build_meta import (
+                actual_build_time, format_version_display,
+            )
+            return format_version_display(LAUNCHER_VERSION, actual_build_time())
         except Exception:
-            pass
-        return "Dev Build"
+            return "Dev Build"
 
     def _get_version_display(self) -> str:
         return self._get_version_only()

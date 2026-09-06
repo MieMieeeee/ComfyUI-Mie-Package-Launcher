@@ -20,8 +20,12 @@ def _read_build_parameters():
 
 
 def _resolve_version() -> str:
-    """读 build_parameters.json 里的 version 字段。"""
-    return str(_read_build_parameters().get("version") or "unknown")
+    """版本号来自代码常量 core.version.LAUNCHER_VERSION。"""
+    try:
+        from core.version import LAUNCHER_VERSION
+        return LAUNCHER_VERSION
+    except Exception:
+        return "unknown"
 
 
 def _resolve_build_time() -> str:

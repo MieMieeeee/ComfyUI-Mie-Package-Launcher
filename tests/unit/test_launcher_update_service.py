@@ -10,6 +10,7 @@ import hashlib
 import json
 import os
 import tempfile
+import pytest
 import unittest
 from email.message import Message
 from typing import cast
@@ -272,20 +273,12 @@ class TestUpgradeExeScript(unittest.TestCase):
         self.assertEqual(version, "v1.2.3")
 
     def test_build_parameters_multiple_locations(self):
-        """Should find build_parameters.json in multiple candidate locations."""
+        """版本号来自代码常量（core.version），不再受 cwd 的 json 影响；
+        json 候选位置只服务于编译通道（channel）的加载。"""
         from services.launcher_update_service import LauncherUpdateService
+        from core.version import LAUNCHER_VERSION
 
         service = LauncherUpdateService(self.mock_app)
-
-        # Create build_parameters.json in one of the candidate locations
-        # The service checks: cwd, cwd/launcher, sys.executable parent
-        candidates = [
-            Path.cwd() / "build_parameters.json",
-            Path.cwd() / "launcher" / "build_parameters.json",
-        ]
-
-        # Find one that exists or create it in temp
-        build_params = {"version": "v2.0.0"}
 
         # Use the temp dir as cwd
         original_cwd = os.getcwd()
@@ -293,16 +286,21 @@ class TestUpgradeExeScript(unittest.TestCase):
             os.chdir(self.temp_dir)
 
             # Create launcher subdirectory with build_parameters.json
+            # （旧格式带 version，新格式不带——都不应影响版本号来源）
             launcher_dir = Path(self.temp_dir) / "launcher"
             launcher_dir.mkdir(exist_ok=True)
             bp_file = launcher_dir / "build_parameters.json"
-            bp_file.write_text(json.dumps(build_params), encoding="utf-8")
+            bp_file.write_text(
+                json.dumps({"version": "v2.0.0", "channel": "test"}), encoding="utf-8"
+            )
 
-            # Service should find it
+            # 版本号恒等于代码常量，即使旁边躺着一份 version=v2.0.0 的 json
             service_with_new_cwd = LauncherUpdateService(self.mock_app)
             version = service_with_new_cwd.get_current_version()
+            self.assertEqual(version, LAUNCHER_VERSION)
 
-            self.assertEqual(version, "v2.0.0")
+            # 编译通道仍从 json 候选位置加载
+            self.assertEqual(service_with_new_cwd.get_current_channel(), "test")
         finally:
             os.chdir(original_cwd)
 
@@ -513,7 +511,6 @@ class TestDownloadSha256Verification(unittest.TestCase):
         self.assertIsNotNone(result)
         self.assertTrue(Path(result).exists())
 
-    def test_download_update_rejects_sha256_mismatch(self):
         """SHA256 不匹配时应删除文件并返回 None。"""
         from services.launcher_update_service import LauncherUpdateService
         service = LauncherUpdateService(self.mock_app)

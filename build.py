@@ -4,18 +4,27 @@ ComfyUI启动器 一键构建脚本
 
 用法:
   python build.py                     # 使用当前版本构建
-  python build.py --version v1.0.10   # 设置版本号并构建
+  python build.py --version v1.0.10   # 设置版本号并构建（改写 core/version.py）
   python build.py --test              # 测试通道
   python build.py --evb-only          # 跳过 Nuitka，仅封包
+
+版本号唯一事实源：core/version.py 的 LAUNCHER_VERSION（代码控制）。
+build_parameters.json 只存编译脚本自动插入的元数据（built_at/suffix/
+mode/builder/channel），不带 version。
 """
 
 import os
 import sys
 import json
+import re
 import time
 import shutil
 import subprocess
 import argparse
+
+# 版本号从代码读（build.py 位于项目根，core 包可直接 import）
+sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
+from core.version import LAUNCHER_VERSION  # noqa: E402
 
 # Enigma Virtual Box 安装路径搜索列表
 ENIGMA_SEARCH_PATHS = [
@@ -135,33 +144,34 @@ def find_enigma_console(custom_path=None):
 
 
 def bump_version(version_str):
-    """更新 build_parameters.json 中的版本号"""
+    """把 core/version.py 的 LAUNCHER_VERSION 改写为新版本（唯一事实源）。
+
+    版本号不再写进 build_parameters.json——json 只留编译脚本自动插入
+    的元数据，版本随代码编译进 exe，杜绝生成物与源码脱节。
+    """
     project_dir = get_project_dir()
-    bp_path = os.path.join(project_dir, 'build_parameters.json')
-    bp_path_launcher = os.path.join(project_dir, 'launcher', 'build_parameters.json')
-
-    params = {}
-    try:
-        if os.path.exists(bp_path):
-            with open(bp_path, 'r', encoding='utf-8') as f:
-                params = json.load(f) or {}
-    except Exception:
-        params = {}
-
-    old_version = params.get('version', 'unknown')
-    params['version'] = version_str
-
-    with open(bp_path, 'w', encoding='utf-8') as f:
-        json.dump(params, f, ensure_ascii=False, indent=2)
+    ver_path = os.path.join(project_dir, 'core', 'version.py')
 
     try:
-        os.makedirs(os.path.dirname(bp_path_launcher), exist_ok=True)
-        with open(bp_path_launcher, 'w', encoding='utf-8') as f:
-            json.dump(params, f, ensure_ascii=False, indent=2)
+        with open(ver_path, 'r', encoding='utf-8') as f:
+            content = f.read()
+        m = re.search(r'^LAUNCHER_VERSION\s*=\s*["\']([^"\']*)["\']', content, re.M)
+        old_version = m.group(1) if m else 'unknown'
     except Exception:
-        pass
+        old_version = 'unknown'
 
-    print(f"[版本] {old_version} -> {version_str}")
+    new_line = f'LAUNCHER_VERSION = "{version_str}"'
+    if m:
+        content = re.sub(
+            r'^LAUNCHER_VERSION\s*=\s*["\'][^"\']*["\']', new_line, content, count=1, flags=re.M
+        )
+        with open(ver_path, 'w', encoding='utf-8') as f:
+            f.write(content)
+    else:
+        with open(ver_path, 'a', encoding='utf-8') as f:
+            f.write(f'\n{new_line}\n')
+
+    print(f"[版本] {old_version} -> {version_str} (core/version.py)")
 
 
 def read_build_parameters():
@@ -202,14 +212,16 @@ def update_build_parameters(is_test=False):
     params = {}
     try:
         if os.path.exists(bp_path):
-            with open(bp_path, "r", encoding="utf-8") as f:
+            with open(bp_path, 'r', encoding='utf-8') as f:
                 params = json.load(f) or {}
     except:
         params = {}
 
+    # 版本号由 core/version.py 管理（代码控制）；清洗历史遗留的 version 键，
+    # 防止旧值与 exe 内常量脱节（曾出现 root 与 launcher/ 两份 json 各自漂移）。
+    params.pop("version", None)
+
     now = time.strftime("%Y-%m-%d %H:%M:%S", time.localtime())
-    ver = params.get("version", "v1.0.7")
-    params["version"] = ver
     params["suffix"] = f" - 构建于 {now}"
     params["mode"] = "nuitka_release"
     params["built_at"] = now
@@ -245,7 +257,7 @@ def step_nuitka_compile(is_test):
         print("[通道] 正式版本")
 
     params = update_build_parameters(is_test=is_test)
-    print(f"[版本] {params.get('version', 'unknown')}")
+    print(f"[版本] {LAUNCHER_VERSION} (core/version.py)")
 
     internal_name = INTERNAL_EXE_NAME
     if is_test:
@@ -332,8 +344,8 @@ def step_nuitka_compile(is_test):
         '--company-name=黎黎原上咩',
         '--product-name=ComfyUI启动器',
         '--file-description=ComfyUI Package Launcher',
-        f'--file-version={params.get("version", "1.0.0").replace("v", "")}',
-        f'--product-version={params.get("version", "1.0.0").replace("v", "")}',
+        f'--file-version={LAUNCHER_VERSION.replace("v", "")}',
+        f'--product-version={LAUNCHER_VERSION.replace("v", "")}',
 
         # 主脚本
         '__main__.py',
@@ -558,9 +570,9 @@ def main():
     args = parse_args()
     project_dir = get_project_dir()
 
-    # 读取当前版本
+    # 读取编译元数据（built_at 等）；版本号来自 core/version.py
     params = read_build_parameters()
-    version = params.get('version', 'unknown')
+    version = LAUNCHER_VERSION
     channel = 'test' if args.test else 'stable'
     mode = 'Enigma 封包' if args.evb_only else 'Nuitka + Enigma'
 
@@ -588,19 +600,6 @@ def main():
             sys.exit(1)
         print(f"\n[跳过] Nuitka 编译 (--evb-only)")
 
-    # evb-only 模式下同步版本号到 dist 目录的 build_parameters.json
-    if args.evb_only and args.version:
-        dist_bp = os.path.join(dist_dir, 'build_parameters.json')
-        try:
-            with open(dist_bp, 'r', encoding='utf-8') as f:
-                dist_params = json.load(f) or {}
-            dist_params['version'] = args.version
-            with open(dist_bp, 'w', encoding='utf-8') as f:
-                json.dump(dist_params, f, ensure_ascii=False, indent=2)
-            print(f"[版本] dist/build_parameters.json 已同步为 {args.version}")
-        except Exception as e:
-            print(f"[警告] 同步 dist 版本号失败: {e}")
-
     # 3. Enigma 打包
     enigma_exe = find_enigma_console(args.enigma_path)
     boxed_exe = step_enigma_package(dist_dir, args.test, enigma_exe)
@@ -609,17 +608,7 @@ def main():
     if not args.evb_only:
         step_copy_cli_wrapper(dist_dir, project_dir)
 
-    # 4. 生成发布文件
-    # 从 dist 目录中的 build_parameters.json 读取最终版本（Nuitka 会写入时间戳）
-    dist_bp = os.path.join(dist_dir, 'build_parameters.json')
-    if os.path.exists(dist_bp):
-        try:
-            with open(dist_bp, 'r', encoding='utf-8') as f:
-                final_params = json.load(f) or {}
-            version = final_params.get('version', version)
-        except Exception:
-            pass
-
+    # 4. 生成发布文件（版本号自始至终来自 core/version.py / --version 覆盖）
     final_path = step_finalize_release(boxed_exe, version, args.test)
 
     # 构建摘要。final_path 现在是目录，统计整个目录的总大小

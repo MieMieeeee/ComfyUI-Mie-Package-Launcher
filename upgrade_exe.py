@@ -79,17 +79,17 @@ class UpgradeScript:
     def detect_version(self):
         if self.version:
             return self.version
-        
-        build_params_file = PROJECT_ROOT / "build_parameters.json"
-        if build_params_file.exists():
-            with open(build_params_file, "r", encoding="utf-8") as f:
-                params = json.load(f)
-                version = params.get("version", "")
-                if version:
-                    self.version = version
-                    print(f"自动检测到版本: {self.version}")
-                    return self.version
-        
+
+        # 版本号唯一事实源：core/version.py（build_parameters.json 不再携带 version）
+        try:
+            sys.path.insert(0, str(PROJECT_ROOT))
+            from core.version import LAUNCHER_VERSION
+            self.version = LAUNCHER_VERSION
+            print(f"自动检测到版本: {self.version}")
+            return self.version
+        except Exception:
+            pass
+
         raise ValueError("无法自动检测版本，请通过参数指定版本号")
 
     def calculate_hash(self):
