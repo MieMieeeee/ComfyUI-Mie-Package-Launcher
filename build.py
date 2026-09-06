@@ -554,7 +554,48 @@ def step_finalize_release(boxed_exe, version, is_test):
     #    Enigma box 会把整个 dist_dir（含 _internal 子树）虚拟化进单 exe，
     #    发布子目录保持「单 exe + wrapper + 文档」零 DLL。
 
+    # 5) 兜底清理：发布子目录里不应留 launcher/ 子目录 / *.json 本地状态。
+    #    那是开发机或 CI 在 release 子目录里跑过 boxed exe (如 info --json
+    #    自检) 时启动器自动生成的，AGENTS.md §3 明令不能入库。
+    _scrub_release_dir(sub_dir)
+
     return sub_dir
+
+
+def _scrub_release_dir(sub_dir: str) -> None:
+    """删除发布子目录里 step_finalize_release 不应留下的本地状态。
+
+    主要清理两类：
+      - launcher/ 子目录 (boxed exe 在该目录跑过一次后会自动建, 里面装
+        config.json / crash.log / launcher.log 等)
+      - 不在白名单里的 .json 文件 (典型是 launcher/config.json)
+    """
+    launcher_dir = os.path.join(sub_dir, 'launcher')
+    if os.path.isdir(launcher_dir):
+        try:
+            shutil.rmtree(launcher_dir)
+            print(f"[scrub] 移除遗留 launcher/ 子目录（启动器本地状态）: {launcher_dir}")
+        except OSError as e:
+            print(f"[警告] 无法删除 {launcher_dir}: {e}")
+
+    allowed = {
+        EXE_NAME,
+        CLI_WRAPPER_NAME,
+        # RELEASE_DOC_FILES 里的 dst 名
+        *(dst for _src, dst in RELEASE_DOC_FILES),
+    }
+    for name in os.listdir(sub_dir):
+        path = os.path.join(sub_dir, name)
+        if os.path.isdir(path):
+            continue
+        if name in allowed:
+            continue
+        if name.endswith('.json'):
+            try:
+                os.remove(path)
+                print(f"[scrub] 移除未列入白名单的 JSON: {path}")
+            except OSError as e:
+                print(f"[警告] 无法删除 {path}: {e}")
 
 
 def format_duration(seconds):
