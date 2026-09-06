@@ -269,6 +269,134 @@ def test_run_cmcli_exit3_falls_back_to_stock_cmcli():
     assert calls == [str(Path("/out/cm_fast.py")), str(Path("/mgr/ComfyUI-Manager/cm-cli.py"))]
 
 
+
+# ---- git proxy gitconfig 物化 + 透传给 cm-cli 子进程 ----
+
+def test_git_proxy_config_returns_none_when_mode_none(tmp_path, monkeypatch):
+    svc = PluginService(_app())
+    svc.app.config["proxy_settings"] = {"git_proxy_mode": "none"}
+    monkeypatch.setattr("services.plugin_service.PATHS.stable_project_root", lambda: tmp_path)
+    assert svc._git_proxy_config_path() is None
+    assert not (tmp_path / "launcher" / "gitconfig.proxy").exists()
+
+def test_git_proxy_config_returns_none_for_unknown_mode(tmp_path, monkeypatch):
+    svc = PluginService(_app())
+    svc.app.config["proxy_settings"] = {"git_proxy_mode": "ssh-tunnel"}
+    monkeypatch.setattr("services.plugin_service.PATHS.stable_project_root", lambda: tmp_path)
+    assert svc._git_proxy_config_path() is None
+
+def test_git_proxy_config_ghproxy_mode_writes_insteadof_for_github_and_gitlab(tmp_path, monkeypatch):
+    svc = PluginService(_app())
+    svc.app.config["proxy_settings"] = {"git_proxy_mode": "gh-proxy"}
+    monkeypatch.setattr("services.plugin_service.PATHS.stable_project_root", lambda: tmp_path)
+    cfg_path = svc._git_proxy_config_path()
+    assert cfg_path is not None
+    assert cfg_path == tmp_path / "launcher" / "gitconfig.proxy"
+    content = cfg_path.read_text(encoding="utf-8")
+    assert '[url "https://gh-proxy.com/https://github.com/"]' in content
+    assert "insteadOf = https://github.com/" in content
+    assert '[url "https://gh-proxy.com/https://gitlab.com/"]' in content
+    assert "insteadOf = https://gitlab.com/" in content
+    # SSH 形式不写（git insteadOf 不能链式 SSH→HTTPS→代理，写了反而让 SSH 用户从直连 SSH 退化成直连 HTTPS，少了代理）
+
+def test_git_proxy_config_custom_mode_uses_user_url(tmp_path, monkeypatch):
+    svc = PluginService(_app())
+    svc.app.config["proxy_settings"] = {
+        "git_proxy_mode": "custom",
+        "git_proxy_url": "https://my-proxy.example.com/proxy",
+    }
+    monkeypatch.setattr("services.plugin_service.PATHS.stable_project_root", lambda: tmp_path)
+    cfg_path = svc._git_proxy_config_path()
+    assert cfg_path is not None
+    content = cfg_path.read_text(encoding="utf-8")
+    assert '[url "https://my-proxy.example.com/proxy/https://github.com/"]' in content
+    assert "https://my-proxy.example.com/proxyhttps://" not in content
+
+def test_git_proxy_config_custom_mode_empty_url_returns_none(tmp_path, monkeypatch):
+    svc = PluginService(_app())
+    svc.app.config["proxy_settings"] = {"git_proxy_mode": "custom", "git_proxy_url": ""}
+    monkeypatch.setattr("services.plugin_service.PATHS.stable_project_root", lambda: tmp_path)
+    assert svc._git_proxy_config_path() is None
+
+def test_git_proxy_config_skips_rewrite_when_content_unchanged(tmp_path, monkeypatch):
+    svc = PluginService(_app())
+    svc.app.config["proxy_settings"] = {"git_proxy_mode": "gh-proxy"}
+    monkeypatch.setattr("services.plugin_service.PATHS.stable_project_root", lambda: tmp_path)
+    p1 = svc._git_proxy_config_path()
+    mtime1 = p1.stat().st_mtime_ns
+    p2 = svc._git_proxy_config_path()
+    assert p1 == p2
+    assert p2.stat().st_mtime_ns == mtime1
+
+def test_run_cmcli_sets_git_config_global_when_proxy_enabled(tmp_path, monkeypatch):
+    """代理启用时，cm-cli 子进程 env 含 GIT_CONFIG_GLOBAL 指向 launcher/gitconfig.proxy。"""
+    svc = PluginService(_app())
+    svc.app.config["proxy_settings"] = {"git_proxy_mode": "gh-proxy"}
+    monkeypatch.setattr("services.plugin_service.PATHS.stable_project_root", lambda: tmp_path)
+    captured = {}
+    def fake_run_hidden(cmd, **kwargs):
+        captured["cmd"] = cmd
+        captured["env"] = kwargs.get("env")
+        r = MagicMock()
+        r.returncode = 0
+        r.stdout = "ok"
+        r.stderr = ""
+        return r
+    with patch.object(svc, "_python_exec", return_value="/py/python.exe"), \
+         patch.object(svc, "_cm_cli_path", return_value=Path("/mgr/ComfyUI-Manager/cm-cli.py")), \
+         patch.object(svc, "_comfyui_dir", return_value=Path("/comfy/ComfyUI")), \
+         patch.object(svc, "_materialize_cm_fast", return_value=None), \
+         patch("pathlib.Path.exists", return_value=True), \
+         patch("services.plugin_service.run_hidden", side_effect=fake_run_hidden):
+        svc._run_cmcli(["install", "foo"])
+    env = captured["env"]
+    assert env["COMFYUI_PATH"] == str(Path("/comfy/ComfyUI"))
+    assert env["GIT_CONFIG_GLOBAL"] == str(tmp_path / "launcher" / "gitconfig.proxy")
+
+def test_run_cmcli_skips_git_config_global_when_proxy_disabled():
+    """proxy_settings 缺失或 mode=none 时，env 不应含 GIT_CONFIG_GLOBAL。"""
+    svc = PluginService(_app())
+    captured = {}
+    def fake_run_hidden(cmd, **kwargs):
+        captured["env"] = kwargs.get("env")
+        r = MagicMock()
+        r.returncode = 0
+        r.stdout = "ok"
+        r.stderr = ""
+        return r
+    with patch.object(svc, "_python_exec", return_value="/py/python.exe"), \
+         patch.object(svc, "_cm_cli_path", return_value=Path("/mgr/ComfyUI-Manager/cm-cli.py")), \
+         patch.object(svc, "_comfyui_dir", return_value=Path("/comfy/ComfyUI")), \
+         patch.object(svc, "_materialize_cm_fast", return_value=None), \
+         patch("pathlib.Path.exists", return_value=True), \
+         patch("services.plugin_service.run_hidden", side_effect=fake_run_hidden):
+        svc._run_cmcli(["install", "foo"])
+    assert "GIT_CONFIG_GLOBAL" not in captured["env"]
+
+def test_run_cmcli_streaming_sets_git_config_global_when_proxy_enabled(tmp_path, monkeypatch):
+    """流式路径同样要透传 GIT_CONFIG_GLOBAL。"""
+    svc = PluginService(_app())
+    svc.app.config["proxy_settings"] = {"git_proxy_mode": "gh-proxy"}
+    monkeypatch.setattr("services.plugin_service.PATHS.stable_project_root", lambda: tmp_path)
+    captured = {}
+    proc = MagicMock()
+    proc.stdout = iter(["ok\n"])
+    proc.wait.return_value = 0
+    proc.returncode = 0
+    proc.poll.return_value = 0
+    def fake_popen(cmd, **kwargs):
+        captured["cmd"] = cmd
+        captured["env"] = kwargs.get("env")
+        return proc
+    with patch.object(svc, "_python_exec", return_value="/py/python.exe"), \
+         patch.object(svc, "_cm_cli_path", return_value=Path("/mgr/ComfyUI-Manager/cm-cli.py")), \
+         patch.object(svc, "_comfyui_dir", return_value=Path("/comfy/ComfyUI")), \
+         patch.object(svc, "_materialize_cm_fast", return_value=None), \
+         patch("pathlib.Path.exists", return_value=True), \
+         patch("services.plugin_service.subprocess.Popen", side_effect=fake_popen):
+        svc._run_cmcli_streaming(["install", "foo"])
+    assert captured["env"]["GIT_CONFIG_GLOBAL"] == str(tmp_path / "launcher" / "gitconfig.proxy")
+
 # ---- B6：cm_fast 包装器源缺失时必须打 warning（install/update 静默退原生
 #  = 每次 ~5.5 分钟全量拉 CNR，用户日志里发生过且无任何痕迹可查）----
 

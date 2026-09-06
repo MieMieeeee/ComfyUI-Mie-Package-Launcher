@@ -876,6 +876,73 @@ class PluginService:
                 continue
         return None
 
+    # ---- git proxy gitconfig 物化（透给 cm-cli 子进程）----
+    # 把 config.proxy_settings.git_proxy_mode 转成一份 gitconfig（用 url.*.insteadOf
+    # 规则改写 github/gitlab URL 到镜像站），通过 GIT_CONFIG_GLOBAL env 透给 cm-cli。
+    # 只影响 cm-cli 子进程里的 git 调用（env 透传），不污染用户 ~/.gitconfig。
+    # proxy_mode == none 或未知 -> 返回 None（不设 env，走用户默认 git 配置）。
+    _GIT_PROXY_FILENAME = "gitconfig.proxy"
+    _GIT_PROXY_ORIG_PREFIXES = (
+        "https://github.com/",
+        "https://gitlab.com/",
+    )
+
+    def _git_proxy_config_path(self):
+        """物化 git proxy gitconfig 并返回路径。返回 None 表示不启用。"""
+        try:
+            ps = (getattr(self.app, "config", None) or {}).get("proxy_settings") or {}
+            mode = str(ps.get("git_proxy_mode") or "none").strip()
+            if mode == "none":
+                return None
+            if mode == "gh-proxy":
+                prefix = "https://gh-proxy.com/"
+            elif mode == "custom":
+                url = str(ps.get("git_proxy_url") or "").strip().rstrip("/") + "/"
+                if not url or url == "/":
+                    return None
+                prefix = url
+            else:
+                return None
+
+            rules_lines = []
+            for orig in self._GIT_PROXY_ORIG_PREFIXES:
+                rules_lines.append('[url "' + prefix + orig + '"]')
+                rules_lines.append("\tinsteadOf = " + orig)
+            content = ("; launcher-managed git proxy (auto-generated, do not edit)\n" + "\n".join(rules_lines) + "\n")
+
+            cfg_dir = PATHS.stable_project_root() / "launcher"
+            cfg_path = cfg_dir / self._GIT_PROXY_FILENAME
+
+            # 内容未变就跳过重写（hot path：每次 install 都调，proxy_settings 极少改）
+            try:
+                if cfg_path.is_file():
+                    existing = cfg_path.read_text(encoding="utf-8", errors="ignore")
+                    if existing == content:
+                        return cfg_path
+            except Exception:
+                pass
+            try:
+                cfg_dir.mkdir(parents=True, exist_ok=True)
+                cfg_path.write_text(content, encoding="utf-8")
+                return cfg_path
+            except Exception:
+                logger.warning("git_proxy_config: 写 %s 失败", cfg_path, exc_info=True)
+                return None
+        except Exception:
+            logger.warning("git_proxy_config: 物化失败", exc_info=True)
+            return None
+
+    def _apply_git_proxy_env(self, env):
+        """把 _git_proxy_config_path 的结果写进 env（设 GIT_CONFIG_GLOBAL）。
+
+        调用方只需在 env = os.environ.copy() + COMFYUI_PATH/CM_FAST_MANAGER_DIR
+        之后调一次。proxy_mode == "none" 时 helper 返 None，env 保持原样（用户
+        自己的 ~/.gitconfig / 系统 / 用户自设 HTTPS_PROXY 都不被覆盖）。
+        """
+        cfg = self._git_proxy_config_path()
+        if cfg is not None:
+            env["GIT_CONFIG_GLOBAL"] = str(cfg)
+
     # ---- 通用 cm-cli 执行器 ----
     def _run_cmcli(self, args: list[str], timeout: int = _DEFAULT_TIMEOUT) -> dict[str, Any]:
         """跑一个 cm-cli 子命令（优先 cm_fast 包装器）。返回 {returncode, stdout, stderr, error}。"""
@@ -904,6 +971,7 @@ class PluginService:
         env["COMFYUI_PATH"] = str(self._comfyui_dir())
         if script != cm:
             env["CM_FAST_MANAGER_DIR"] = str(cm.parent)
+        self._apply_git_proxy_env(env)
         try:
             r = run_hidden(
                 cmd,
@@ -1010,6 +1078,7 @@ class PluginService:
         env["COMFYUI_PATH"] = str(self._comfyui_dir())
         if script != cm:
             env["CM_FAST_MANAGER_DIR"] = str(cm.parent)
+        self._apply_git_proxy_env(env)
         # 强制 cm-cli（python 子进程）stdout 无缓冲：默认非 tty(PIPE) 下 Python 是
         # 块缓冲，print 会积压到进程结束才 flush，导致流式阶段进度读不到（全程无更新）。
         env["PYTHONUNBUFFERED"] = "1"
