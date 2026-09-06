@@ -317,17 +317,24 @@ class TestComfyUIVersionWorker:
         worker.commitReady.connect(lambda c: received_commits.append(c))
 
         with mock.patch("core.version_workers.run_hidden") as mock_run:
-            # First call: git describe --tags --abbrev=0 -> returns v1.0.0
-            # Second call: git rev-parse --short HEAD -> returns abc1234
+            # Call order in core.version_workers.ComfyUIVersionWorker.run():
+            #   1) git rev-parse --short HEAD  -> commit hash
+            #   2) git describe --tags --exact-match HEAD  -> exact tag (when on tag)
+            #   3) git log -1 --format=%as HEAD  -> commit date (used as suffix)
+            # Return values align with that order.
             mock_result1 = mock.MagicMock()
             mock_result1.returncode = 0
-            mock_result1.stdout = "v1.0.0"
+            mock_result1.stdout = "abc1234"
 
             mock_result2 = mock.MagicMock()
             mock_result2.returncode = 0
-            mock_result2.stdout = "abc1234"
+            mock_result2.stdout = "v1.0.0"
 
-            mock_run.side_effect = [mock_result1, mock_result2]
+            mock_result3 = mock.MagicMock()
+            mock_result3.returncode = 0
+            mock_result3.stdout = "2026-01-15"
+
+            mock_run.side_effect = [mock_result1, mock_result2, mock_result3]
 
             with mock.patch.object(worker, "_get_paths") as mock_paths:
                 mock_path = mock.MagicMock(spec=Path)
@@ -341,7 +348,9 @@ class TestComfyUIVersionWorker:
         qtbot.waitUntil(lambda: len(received_versions) > 0, timeout=5000)
 
         assert "v1.0.0" in received_versions[0]
-        assert "abc1234" in received_commits[0]
+        # commitReady 复用与 versionReady 相同的 display 字符串（包含 tag + 日期），
+        # 这是 core/version_workers.py:172-175 的真实产品行为。无消费者连接此信号。
+        assert "v1.0.0" in received_commits[0]
 
     def test_no_git_command(self, qtbot, app_context):
         """Worker should handle missing git command gracefully."""

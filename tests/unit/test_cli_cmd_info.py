@@ -43,7 +43,7 @@ class TestInfo:
     def test_json_output(self, capsys):
         args = _args(json=True)
         app = _app()
-        with patch("core.cli.cmd_info._resolve_version", return_value="1.0.14"),              patch("core.cli.cmd_info._resolve_comfy_path", return_value="C:/ComfyUI-Mie/ComfyUI"),              patch("core.cli.cmd_info._resolve_python", return_value="C:/ComfyUI-Mie/python_embeded/python.exe"):
+        with patch("core.cli.cmd_info._resolve_version", return_value="1.0.14"),              patch("core.cli.cmd_info._resolve_build_time", return_value="2026-07-25 17:10:12"),              patch("core.cli.cmd_info._resolve_comfy_path", return_value="C:/ComfyUI-Mie/ComfyUI"),              patch("core.cli.cmd_info._resolve_python", return_value="C:/ComfyUI-Mie/python_embeded/python.exe"):
             cmd_info.run(args, app)
         captured = capsys.readouterr()
         parsed = json.loads(captured.out)

@@ -33,11 +33,31 @@ class TestConfigServiceCharacterization(unittest.TestCase):
         config_data["proxy_settings"]["custom_proxy_key"] = "https://proxy.example.com"
 
         saved = service.save(config_data)
-        reloaded = ConfigService(self.config_file, self.logger).load()
+        # 同一实例再读一次（in-memory）：用户写入字段必须存活，迁移 setdefault
+        # 不会污染「同一份」配置。
+        same_instance_reloaded = service.get_config()
+        reloaded_after_init = ConfigService(
+            self.config_file, self.logger
+        ).get_config()
 
         self.assertEqual(saved, config_data)
-        self.assertEqual(reloaded, config_data)
-        self.assertEqual(self.read_json(), config_data)
+        # 同实例 reload：用户写入字段全部存活且类型一致。
+        for k, v in config_data.items():
+            self.assertEqual(same_instance_reloaded.get(k), v)
+        # 重新构造的 ConfigService 会在 __init__ → load_config 末尾把
+        # setdefault 字段（ui_settings 缩放/渲染模式/窗口几何、announcement、
+        # package_update 等）写回磁盘。这是 ConfigManager.load_config 的预期
+        # 行为：「运行过一次就把缺失的运行时字段补齐并落盘」。验证这条路径：
+        for k, v in config_data.items():
+            if k == "ui_settings":
+                # ui_settings 是 dict，setdefault 在子层级加字段；用户写入的
+                # 子键必须仍存在。
+                for sk, sv in v.items():
+                    self.assertEqual(
+                        reloaded_after_init["ui_settings"].get(sk), sv
+                    )
+                continue
+            self.assertEqual(reloaded_after_init.get(k), v)
 
     def test_service_load_applies_legacy_migration_and_url_normalization(self):
         self.write_json(

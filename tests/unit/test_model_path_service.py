@@ -11,6 +11,36 @@ from pathlib import Path
 from unittest.mock import MagicMock, patch, mock_open
 
 
+class _AppProxy:
+    """A app mock that makes ``hasattr(app, "get_active_paths")`` False so the
+    product code falls back to ``app.config["paths"]`` instead of returning a
+    MagicMock sub-attribute and crashing downstream Path construction.
+
+    Auto-vivifies everything else (logger, services, ...) by delegating to an
+    inner MagicMock so existing test code keeps working unchanged.
+    """
+
+    def __init__(self, inner: MagicMock):
+        self._inner = inner
+
+    def __getattr__(self, name):
+        if name == "get_active_paths":
+            raise AttributeError("get_active_paths")
+        return getattr(self._inner, name)
+
+    def __setattr__(self, name, value):
+        if name == "_inner":
+            object.__setattr__(self, name, value)
+        else:
+            setattr(self._inner, name, value)
+
+
+def _make_app() -> _AppProxy:
+    """Returns an app-proxy whose inner MagicMock has the standard attributes
+    tests rely on (config, logger, services, etc.)."""
+    return _AppProxy(MagicMock())
+
+
 class TestModelPathServiceInit:
     """Test ModelPathService initialization."""
 
@@ -18,7 +48,7 @@ class TestModelPathServiceInit:
         """ModelPathService should assign the app instance."""
         from services.model_path_service import ModelPathService
 
-        app = MagicMock()
+        app = _make_app()
         service = ModelPathService(app)
 
         assert service.app is app
@@ -27,7 +57,7 @@ class TestModelPathServiceInit:
         """ModelPathService should have standard_map with all expected model types."""
         from services.model_path_service import ModelPathService
 
-        app = MagicMock()
+        app = _make_app()
         service = ModelPathService(app)
 
         expected_keys = [
@@ -43,7 +73,7 @@ class TestModelPathServiceInit:
         """Standard map values should contain 'models/' prefix for most entries."""
         from services.model_path_service import ModelPathService
 
-        app = MagicMock()
+        app = _make_app()
         service = ModelPathService(app)
 
         for key, value in service.standard_map:
@@ -58,7 +88,7 @@ class TestGetYamlPath:
         """_get_yaml_path should resolve path from config's comfyui_root."""
         from services.model_path_service import ModelPathService
 
-        app = MagicMock()
+        app = _make_app()
         app.config = {"paths": {"comfyui_root": str(tmp_path / "my_comfyui")}}
         
         service = ModelPathService(app)
@@ -71,7 +101,7 @@ class TestGetYamlPath:
         """_get_yaml_path should default to '.' when comfyui_root not in config."""
         from services.model_path_service import ModelPathService
 
-        app = MagicMock()
+        app = _make_app()
         app.config = {"paths": {}}
         
         service = ModelPathService(app)
@@ -83,7 +113,7 @@ class TestGetYamlPath:
         """_get_yaml_path should return path inside ComfyUI subdirectory."""
         from services.model_path_service import ModelPathService
 
-        app = MagicMock()
+        app = _make_app()
         app.config = {"paths": {"comfyui_root": str(tmp_path)}}
         
         service = ModelPathService(app)
@@ -100,7 +130,7 @@ class TestLoadCurrentConfig:
         """load_current_config should return {} when yaml file doesn't exist."""
         from services.model_path_service import ModelPathService
 
-        app = MagicMock()
+        app = _make_app()
         app.config = {"paths": {"comfyui_root": str(tmp_path)}}
         
         service = ModelPathService(app)
@@ -125,7 +155,7 @@ class TestLoadCurrentConfig:
         }
         yaml_path.write_text(yaml.dump(test_data), encoding="utf-8")
         
-        app = MagicMock()
+        app = _make_app()
         app.config = {"paths": {"comfyui_root": str(tmp_path)}}
         
         service = ModelPathService(app)
@@ -143,7 +173,7 @@ class TestLoadCurrentConfig:
         yaml_path = comfyui_root / "extra_model_paths.yaml"
         yaml_path.write_text("invalid: yaml: content: [", encoding="utf-8")
         
-        app = MagicMock()
+        app = _make_app()
         app.config = {"paths": {"comfyui_root": str(tmp_path)}}
         
         service = ModelPathService(app)
@@ -159,7 +189,7 @@ class TestGetExternalPath:
         """get_external_path should prefer 'comfyui' (lowercase) key."""
         from services.model_path_service import ModelPathService
 
-        app = MagicMock()
+        app = _make_app()
         app.config = {"paths": {"comfyui_root": str(tmp_path)}}
         
         test_data = {
@@ -178,7 +208,7 @@ class TestGetExternalPath:
         """get_external_path should fall back to 'ComfyUI' key if 'comfyui' not present."""
         from services.model_path_service import ModelPathService
 
-        app = MagicMock()
+        app = _make_app()
         app.config = {"paths": {"comfyui_root": str(tmp_path)}}
         
         test_data = {
@@ -196,7 +226,7 @@ class TestGetExternalPath:
         """get_external_path should return empty string when config is empty."""
         from services.model_path_service import ModelPathService
 
-        app = MagicMock()
+        app = _make_app()
         app.config = {"paths": {"comfyui_root": str(tmp_path)}}
         
         with patch("services.model_path_service.open", mock_open(read_data=yaml.dump({}))):
@@ -214,7 +244,7 @@ class TestGetStandardMappings:
         """_get_standard_mappings should return full standard_map when base_path is empty."""
         from services.model_path_service import ModelPathService
 
-        app = MagicMock()
+        app = _make_app()
         service = ModelPathService(app)
         
         result = service._get_standard_mappings("")
@@ -226,7 +256,7 @@ class TestGetStandardMappings:
         """_get_standard_mappings should return full standard_map when base_path is None."""
         from services.model_path_service import ModelPathService
 
-        app = MagicMock()
+        app = _make_app()
         service = ModelPathService(app)
         
         result = service._get_standard_mappings(None)
@@ -237,7 +267,7 @@ class TestGetStandardMappings:
         """_get_standard_mappings should return full standard_map when base_path doesn't exist."""
         from services.model_path_service import ModelPathService
 
-        app = MagicMock()
+        app = _make_app()
         service = ModelPathService(app)
         
         result = service._get_standard_mappings("/nonexistent/path")
@@ -253,7 +283,7 @@ class TestResolveBasePath:
         """_resolve_base_path should return original path when empty."""
         from services.model_path_service import ModelPathService
 
-        app = MagicMock()
+        app = _make_app()
         service = ModelPathService(app)
         
         result = service._resolve_base_path("")
@@ -263,7 +293,7 @@ class TestResolveBasePath:
         """_resolve_base_path should return original path when None."""
         from services.model_path_service import ModelPathService
 
-        app = MagicMock()
+        app = _make_app()
         service = ModelPathService(app)
         
         result = service._resolve_base_path(None)
@@ -273,7 +303,7 @@ class TestResolveBasePath:
         """_resolve_base_path should return original path when it doesn't exist."""
         from services.model_path_service import ModelPathService
 
-        app = MagicMock()
+        app = _make_app()
         service = ModelPathService(app)
         
         nonexistent = str(tmp_path / "nonexistent_dir")
@@ -285,7 +315,7 @@ class TestResolveBasePath:
         """_resolve_base_path should return original path when it's a file not directory."""
         from services.model_path_service import ModelPathService
 
-        app = MagicMock()
+        app = _make_app()
         service = ModelPathService(app)
         
         test_file = tmp_path / "test_file.txt"
@@ -298,7 +328,7 @@ class TestResolveBasePath:
         """_resolve_base_path should return original when path/models exists."""
         from services.model_path_service import ModelPathService
 
-        app = MagicMock()
+        app = _make_app()
         service = ModelPathService(app)
         
         base_path = tmp_path / "my_models"
@@ -312,7 +342,7 @@ class TestResolveBasePath:
         """_resolve_base_path should find models in child directory."""
         from services.model_path_service import ModelPathService
 
-        app = MagicMock()
+        app = _make_app()
         service = ModelPathService(app)
         
         # Create: parent/child/models structure
@@ -333,7 +363,7 @@ class TestUpdateMapping:
         """update_mapping should return False when base_path is empty."""
         from services.model_path_service import ModelPathService
 
-        app = MagicMock()
+        app = _make_app()
         service = ModelPathService(app)
         
         result = service.update_mapping("")
@@ -343,7 +373,7 @@ class TestUpdateMapping:
         """update_mapping should return False when base_path is only whitespace."""
         from services.model_path_service import ModelPathService
 
-        app = MagicMock()
+        app = _make_app()
         service = ModelPathService(app)
         
         result = service.update_mapping("   ")
@@ -353,7 +383,7 @@ class TestUpdateMapping:
         """update_mapping should create the extra_model_paths.yaml file."""
         from services.model_path_service import ModelPathService
 
-        app = MagicMock()
+        app = _make_app()
         app.config = {"paths": {"comfyui_root": str(tmp_path)}}
         app.logger = MagicMock()
         
@@ -377,7 +407,7 @@ class TestUpdateMapping:
         """update_mapping writes a mie_launcher_<id> top-level block (post-migration routing)."""
         from services.model_path_service import ModelPathService
 
-        app = MagicMock()
+        app = _make_app()
         app.config = {"paths": {"comfyui_root": str(tmp_path)}}
         app.logger = MagicMock()
         
@@ -402,7 +432,7 @@ class TestUpdateMapping:
         """update_mapping should include base_path in output."""
         from services.model_path_service import ModelPathService
 
-        app = MagicMock()
+        app = _make_app()
         app.config = {"paths": {"comfyui_root": str(tmp_path)}}
         app.logger = MagicMock()
         
@@ -426,7 +456,7 @@ class TestUpdateMapping:
         """update_mapping should create .bak backup of existing file."""
         from services.model_path_service import ModelPathService
 
-        app = MagicMock()
+        app = _make_app()
         app.config = {"paths": {"comfyui_root": str(tmp_path)}}
         app.logger = MagicMock()
         
@@ -455,7 +485,7 @@ class TestCollectExtraMappings:
         """_collect_extra_mappings should return empty list when base_path doesn't exist."""
         from services.model_path_service import ModelPathService
 
-        app = MagicMock()
+        app = _make_app()
         service = ModelPathService(app)
         
         result = service._collect_extra_mappings("/nonexistent/path", set())
@@ -465,7 +495,7 @@ class TestCollectExtraMappings:
         """_collect_extra_mappings should skip folders that are standard keys."""
         from services.model_path_service import ModelPathService
 
-        app = MagicMock()
+        app = _make_app()
         service = ModelPathService(app)
         
         # Create base path with standard folder
@@ -483,7 +513,7 @@ class TestCollectExtraMappings:
         """_collect_extra_mappings should discover custom model folders."""
         from services.model_path_service import ModelPathService
 
-        app = MagicMock()
+        app = _make_app()
         service = ModelPathService(app)
         
         # Create base path with custom folder
@@ -505,7 +535,7 @@ class TestGetMappingsForBase:
         then _get_standard_mappings drops keys whose paths are not on disk."""
         from services.model_path_service import ModelPathService
 
-        app = MagicMock()
+        app = _make_app()
         service = ModelPathService(app)
 
         # Nested structure: parent has one child, child holds models/checkpoints.
@@ -525,7 +555,7 @@ class TestGetMappingsForBase:
         non-standard extras; phantom keys (no real path) are omitted."""
         from services.model_path_service import ModelPathService
 
-        app = MagicMock()
+        app = _make_app()
         service = ModelPathService(app)
 
         # Base dir is named "models" so short-path resolution (step 3) catches
@@ -553,7 +583,7 @@ class TestGetMappings:
         """get_mappings should return a copy of standard_map as a list."""
         from services.model_path_service import ModelPathService
 
-        app = MagicMock()
+        app = _make_app()
         service = ModelPathService(app)
         
         result = service.get_mappings()
@@ -565,7 +595,7 @@ class TestGetMappings:
         """get_mappings should return list of tuples."""
         from services.model_path_service import ModelPathService
 
-        app = MagicMock()
+        app = _make_app()
         service = ModelPathService(app)
 
         result = service.get_mappings()
@@ -583,7 +613,7 @@ class TestGetStandardMappingsSDStyle:
         """Should map 'checkpoints' to 'Stable-diffusion/' when that folder exists."""
         from services.model_path_service import ModelPathService
 
-        app = MagicMock()
+        app = _make_app()
         service = ModelPathService(app)
 
         base = tmp_path / "sd_models"
@@ -599,7 +629,7 @@ class TestGetStandardMappingsSDStyle:
         """Should map 'loras' to 'Lora/' when that folder exists."""
         from services.model_path_service import ModelPathService
 
-        app = MagicMock()
+        app = _make_app()
         service = ModelPathService(app)
 
         base = tmp_path / "sd_models"
@@ -615,7 +645,7 @@ class TestGetStandardMappingsSDStyle:
         """Should map 'upscale_models' to 'ESRGAN/' when that folder exists."""
         from services.model_path_service import ModelPathService
 
-        app = MagicMock()
+        app = _make_app()
         service = ModelPathService(app)
 
         base = tmp_path / "sd_models"
@@ -631,7 +661,7 @@ class TestGetStandardMappingsSDStyle:
         """Should map 'controlnet' to 'ControlNet/' when that folder exists."""
         from services.model_path_service import ModelPathService
 
-        app = MagicMock()
+        app = _make_app()
         service = ModelPathService(app)
 
         base = tmp_path / "sd_models"
@@ -647,7 +677,7 @@ class TestGetStandardMappingsSDStyle:
         """Should detect multiple SD-style folders simultaneously."""
         from services.model_path_service import ModelPathService
 
-        app = MagicMock()
+        app = _make_app()
         service = ModelPathService(app)
 
         base = tmp_path / "sd_models"
@@ -675,7 +705,7 @@ class TestResolveBasePathSDStyle:
         """Should return base_path when it contains 'Stable-diffusion/'."""
         from services.model_path_service import ModelPathService
 
-        app = MagicMock()
+        app = _make_app()
         service = ModelPathService(app)
 
         base = tmp_path / "sd_models"
@@ -689,7 +719,7 @@ class TestResolveBasePathSDStyle:
         """Should return base_path when it contains 'Lora/'."""
         from services.model_path_service import ModelPathService
 
-        app = MagicMock()
+        app = _make_app()
         service = ModelPathService(app)
 
         base = tmp_path / "sd_models"
@@ -703,7 +733,7 @@ class TestResolveBasePathSDStyle:
         """Should return base_path when it contains 'ESRGAN/'."""
         from services.model_path_service import ModelPathService
 
-        app = MagicMock()
+        app = _make_app()
         service = ModelPathService(app)
 
         base = tmp_path / "sd_models"
@@ -717,7 +747,7 @@ class TestResolveBasePathSDStyle:
         """Should return base_path when it contains multiple SD-style folders."""
         from services.model_path_service import ModelPathService
 
-        app = MagicMock()
+        app = _make_app()
         service = ModelPathService(app)
 
         base = tmp_path / "sd_models"
@@ -738,7 +768,7 @@ class TestUpdateMappingSDStyle:
         """YAML should contain SD-style folder paths under correct ComfyUI keys."""
         from services.model_path_service import ModelPathService
 
-        app = MagicMock()
+        app = _make_app()
         app.config = {"paths": {"comfyui_root": str(tmp_path)}}
         app.logger = MagicMock()
 
@@ -765,7 +795,7 @@ class TestUpdateMappingSDStyle:
         """YAML should have SD mappings plus auto-discovered extra folders."""
         from services.model_path_service import ModelPathService
 
-        app = MagicMock()
+        app = _make_app()
         app.config = {"paths": {"comfyui_root": str(tmp_path)}}
         app.logger = MagicMock()
 
@@ -796,7 +826,7 @@ class TestUpdateMappingDisabled:
         """is_disabled should return False when config has no disable flag."""
         from services.model_path_service import ModelPathService
 
-        app = MagicMock()
+        app = _make_app()
         app.config = {}
         service = ModelPathService(app)
 
@@ -806,7 +836,7 @@ class TestUpdateMappingDisabled:
         """is_disabled should return True when config has disable flag set."""
         from services.model_path_service import ModelPathService
 
-        app = MagicMock()
+        app = _make_app()
         app.config = {"models": {"disable_external": True}}
         service = ModelPathService(app)
 
@@ -816,7 +846,7 @@ class TestUpdateMappingDisabled:
         """update_mapping should return False and not create YAML when disabled."""
         from services.model_path_service import ModelPathService
 
-        app = MagicMock()
+        app = _make_app()
         app.config = {
             "paths": {"comfyui_root": str(tmp_path)},
             "models": {"disable_external": True},

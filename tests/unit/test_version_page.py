@@ -50,10 +50,30 @@ def _make_page(qt_app):
     """
     from ui_qt.pages.version_page import VersionPage
     page = VersionPage.__new__(VersionPage)  # 跳过 __init__/_setup_ui
-    app = MagicMock()
-    app.config = {"paths": {"comfyui_root": "E:/fake"}, "version_preferences": {}}
-    app.git_path = "git"
-    app._update_running = False
+    # 内部 MagicMock + 壳：让 get_active_paths 抛 AttributeError，从而
+    # hasattr(self.app, "get_active_paths") 返 False，VersionPage._comfyui_root()
+    # 走 config 回退到 app.config["paths"]。默认 MagicMock 会按需造子 mock，
+    # 把子 mock 当路径喂给 Path(...) 会得到 "MagicMock/mock.get_active..." 这种路径，
+    # .exists() 永远 False，触发 RuntimeError("ComfyUI目录不存在")。
+    inner = MagicMock()
+    inner.config = {"paths": {"comfyui_root": "E:/fake"}, "version_preferences": {}}
+    inner.git_path = "git"
+    inner._update_running = False
+    # VersionPage._comfyui_root() 优先用 self.app.get_active_paths()。默认 MagicMock
+    # 会按需造子 mock，把它们当路径喂给 Path(...) 会得到 "MagicMock/mock.get_active..."这种
+    # 路径名 → .exists() 永远 False。显式让 get_active_paths 抛 AttributeError，让
+    # hasattr(...) 返 False、走 config 回退到 app.config["paths"]。
+
+    class _AppProxy:
+        def __getattr__(self, name):
+            if name == "get_active_paths":
+                raise AttributeError("get_active_paths")
+            return getattr(inner, name)
+
+        def __setattr__(self, name, value):
+            setattr(inner, name, value)
+
+    app = _AppProxy()
     page.app = app
     page.theme_manager = _stub_theme()
     # loader 编排引用的状态字段

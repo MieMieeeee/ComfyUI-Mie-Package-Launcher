@@ -8,10 +8,26 @@ import pytest
 
 
 def _make_app(comfyui_root: Path) -> MagicMock:
-    """Create a mock app whose config resolves to the given comfyui root."""
-    app = MagicMock()
-    app.config.get.return_value = {"comfyui_root": str(comfyui_root)}
-    return app
+    """Create a mock app whose config resolves to the given comfyui root.
+
+    log_package_service._resolve_comfyui_log 通过 hasattr(self.app, "get_active_paths")
+    探测 app 上的方法；MagicMock 默认会按需造子 mock，导致 services.log_package_service 走
+    错分支（把 MagicMock repr 当 comfyui 根）。这里显式让 get_active_paths 抛
+    AttributeError，让 hasattr 返 False、走 app.config 回退，与 product 实际行为对齐。
+    """
+    inner = MagicMock()
+    inner.config.get.return_value = {"comfyui_root": str(comfyui_root)}
+
+    class _AppProxy:
+        def __getattr__(self, name):
+            if name == "get_active_paths":
+                raise AttributeError("get_active_paths")
+            return getattr(inner, name)
+
+        def __setattr__(self, name, value):
+            setattr(inner, name, value)
+
+    return _AppProxy()
 
 
 class TestCreateLogPackage:

@@ -173,29 +173,45 @@ class TestCoreTools(unittest.TestCase):
         pids = probe.find_pids_by_port_safe("8188")
         self.assertIn(1234, pids)
 
-    def test_probe_is_http_reachable_fallback(self):
+    def test_probe_is_http_reachable_returns_false_when_urlopen_fails(self):
+        """当端口上无服务监听时 urlopen 失败，is_http_reachable 返回 False。
+
+        历史说明：原 test_probe_is_http_reachable_fallback 期望 PID 兜底分支
+        （socket.create_connection / find_pids_by_port_safe）触发时返回 True。
+        但 core.probe.is_http_reachable 已简化为纯 urlopen 探测（urlopen 失败即
+        返回 False），兜底路径被移除。详见 notes/codex_test_repair_report.md 「#5」节。
+        """
         from core import probe
-        import types
 
         class A:
             def __init__(self):
                 self.custom_port = _Var("8188")
 
-        probe.socket = types.SimpleNamespace(
-            create_connection=lambda *a, **k: (_ for _ in ()).throw(Exception("no"))
-        )
-        with mock.patch("core.probe.find_pids_by_port_safe", return_value=[1111]):
-            self.assertTrue(probe.is_http_reachable(A()))
+        # 让 urlopen 直接抛错，模拟端口无服务
+        with mock.patch.object(
+            probe, "urlopen",
+            side_effect=lambda *_a, **_k: (_ for _ in ()).throw(OSError("Connection refused")),
+        ):
+            self.assertFalse(probe.is_http_reachable(A()))
 
     def test_kill_pids_windows(self):
+        """验证 taskkill /PID X /F 对传入的每个 PID 都至少被触发一次。
+        阻止 UAC 提权路径（在非交互测试环境下 ShellExecuteW 不会成功返回 True，
+        会导致 kill_pids 抛 RuntimeError），并隔离 psutil 真实副作用。
+        """
         from core import kill
 
         calls = []
         with mock.patch(
             "core.kill.run_hidden", side_effect=lambda *a, **k: calls.append(a)
+        ), mock.patch.object(
+            kill, "_kill_with_admin", return_value=True
         ):
             kill.kill_pids(object(), [111, 222])
-        self.assertTrue(len(calls) >= 2)
+        self.assertTrue(
+            len(calls) >= 2,
+            f"taskkill 调用次数={len(calls)} < 2，实际调用：{calls}",
+        )
 
 
 if __name__ == "__main__":

@@ -19,7 +19,12 @@ import pytest
 
 
 def _make_app(tmp_path, extras=None):
-    """Build a MagicMock app with a config dict wired to tmp_path."""
+    """Build a mock app with a config dict wired to tmp_path.
+
+    Wrapped so ``hasattr(app, "get_active_paths")`` returns False. MagicMock
+    默认会按需造子 mock,  product code 探测到 get_active_paths 后会调它并把返回的
+    MagicMock 当 comfyui 根,  Path(...).resolve() 立刻 crash / 落到错目录。
+    """
     app = MagicMock()
     app.logger = MagicMock()
     app.config = {"paths": {"comfyui_root": str(tmp_path)}}
@@ -27,7 +32,21 @@ def _make_app(tmp_path, extras=None):
         for k, v in extras.items():
             app.config.setdefault(k, {})
             app.config[k].update(v)
-    return app
+    return _wrap_no_get_active_paths(app)
+
+
+def _wrap_no_get_active_paths(inner):
+    class _Proxy:
+        def __getattr__(self, name):
+            if name == "get_active_paths":
+                raise AttributeError("get_active_paths")
+            return getattr(inner, name)
+
+        def __setattr__(self, name, value):
+            if name == "_inner":
+                object.__setattr__(self, name, value)
+            setattr(inner, name, value)
+    return _Proxy()
 
 
 class TestGetLibraries:
