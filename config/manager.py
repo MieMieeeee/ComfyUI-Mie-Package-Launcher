@@ -66,6 +66,8 @@ class ConfigManager:
                 "disable_pinned_memory": False,
                 "enable_cors": True,
                 "listen_all": True,
+                # ComfyUI 资源系统（Assets）：默认关。
+                "enable_assets": False,
                 "extra_args": "",
                 "env_vars": "",
                 "attention_mode": "",
@@ -108,6 +110,10 @@ class ConfigManager:
                 "pypi_proxy_url": "https://mirrors.aliyun.com/pypi/simple/",
                 "hf_mirror_mode": "hf-mirror",
                 "hf_mirror_url": "https://hf-mirror.com",
+                # 本地正向代理（Clash / v2ray 等，issue #109）。与上面三段镜像正交：
+                # 镜像决定「连哪」，本地代理决定「怎么连」。默认关。
+                "local_proxy_enabled": False,
+                "local_proxy_url": "http://127.0.0.1:7890",
             },
             "announcement": {
                 "enabled": True,

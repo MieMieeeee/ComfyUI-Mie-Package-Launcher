@@ -96,6 +96,22 @@ def main() -> int:
         pass
     sys.path.insert(0, ".")
 
+    # 本地正向代理（Clash 等，issue #109）：必须在任何出网动作之前改 os.environ。
+    # 放在这里而不是 services 里，是因为 GUI / CLI 两条路都经过 main()，
+    # 而 core/launcher_cmd.py 构造 ComfyUI env 时是 os.environ.copy() —— 改一次
+    # 就覆盖启动器自身 + ComfyUI + git + pip + HF 下载的全部出网流量。
+    # 读 config 用最轻的方式，失败就跳过（代理是增强项，不能挡启动）。
+    try:
+        import json as _json
+
+        from utils import net as _net
+
+        with open(os.path.join("launcher", "config.json"), "r", encoding="utf-8") as _f:
+            _ps = (_json.load(_f) or {}).get("proxy_settings") or {}
+        _net.apply_local_proxy_env(_ps)
+    except Exception:
+        pass
+
     if _is_cli_invocation():
         # 仅 CLI 需要挂父 console；GUI 路径调用会破坏 subprocess 标准句柄 → WinError 6
         _attach_parent_console()

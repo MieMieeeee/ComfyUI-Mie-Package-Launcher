@@ -262,6 +262,28 @@ def resolve_active_paths_for_webui(config: Dict[str, Any], env_id: str | None = 
 #   ui_settings.window_size（"WxH" 字符串）
 # ---------------------------------------------------------------------------
 
+# 默认窗口 base 尺寸。1350×960 而非 1350×900：环境区新增一行设置后（约 46px 行距），
+# 900 会把「快捷目录」那排按钮切掉半截。960 刚好容下多出来的一行，仍在 1080p
+# 可用区（≈1040）之内。
+DEFAULT_BASE_W, DEFAULT_BASE_H = 1350, 960
+
+# 上一版默认尺寸。用户从没手动改过大小时，config 里存的就是这个值 —— 只抬高度，
+# 让「内容长高了但窗口还是老高度」的存量安装跟着长。其余尺寸（用户自己调过的）
+# 一律不动。
+_LEGACY_DEFAULT_BASE = (1350, 900)
+
+
+def _bump_legacy_default_height(ui: Dict[str, Any]) -> bool:
+    """存量安装里「等于上一版默认尺寸」的窗口，高度抬到新默认。"""
+    w, h = ui.get("window_w"), ui.get("window_h")
+    if not (isinstance(w, int) and isinstance(h, int)):
+        return False
+    if (w, h) != _LEGACY_DEFAULT_BASE:
+        return False
+    ui["window_h"] = DEFAULT_BASE_H
+    return True
+
+
 def migrate_window_geometry_fields(config: Dict[str, Any]) -> bool:
     """把老的 window 字段迁移到归一化新 schema。
 
@@ -305,6 +327,8 @@ def migrate_window_geometry_fields(config: Dict[str, Any]) -> bool:
             ui["window_y"] = None
             ui["window_state"] = None
             changed = True
+        if _bump_legacy_default_height(ui):
+            changed = True
         return changed
 
     changed = False
@@ -329,6 +353,8 @@ def migrate_window_geometry_fields(config: Dict[str, Any]) -> bool:
         ui["window_x"] = None
         ui["window_y"] = None
         ui["window_state"] = None
+        changed = True
+    if _bump_legacy_default_height(ui):
         changed = True
 
     # 2) 老数字字段
@@ -384,12 +410,12 @@ def resolve_window_geometry_for_startup(
     # 最小允许 base 尺寸（跟 qt_app 里 setMinimumSize(_sp(960), _sp(640)) 的 base 对齐）
     MIN_BASE_W = 960
     MIN_BASE_H = 640
-    # 🚨 老 default_config 800×600 这类「比 MIN_BASE 还小的脏基」直接回默认 1350×900。
+    # 🚨 老 default_config 800×600 这类「比 MIN_BASE 还小的脏基」直接回默认 1350×960。
     #    阈值严格等于 MIN_BASE：
-    #    * 800×600 / 800×700 → w<960 且 h<640 → 视为异常小 → 1350×900（底部不会被切）
+    #    * 800×600 / 800×700 → w<960 且 h<640 → 视为异常小 → 1350×960（底部不会被切）
     #    * 960×640 / 1100×760 / 1200×820 → 都 ≥ 一边，视为用户合法中等尺寸，保留（不回默认）
     #    这对应设置页允许填 800~1200 的中等尺寸，记忆一致。
-    DEFAULT_BASE_W, DEFAULT_BASE_H = 1350, 900
+    #    （DEFAULT_BASE_W/H 是模块级常量，见文件上方）
 
     if isinstance(base_w, int) and isinstance(base_h, int) and base_w > 0 and base_h > 0:
         if base_w < MIN_BASE_W and base_h < MIN_BASE_H:
@@ -470,7 +496,7 @@ def persist_window_geometry(
 
 
 def reset_ui_size_defaults(config: Dict[str, Any]) -> bool:
-    """恢复界面大小默认值：ui_scale → 自动跟随 DPI，窗口几何记忆 → 走 1350×900 默认基准。
+    """恢复界面大小默认值：ui_scale → 自动跟随 DPI，窗口几何记忆 → 走 1350×960 默认基准。
 
     - ui_settings.ui_scale = None（自动跟随 DPI，不再锁定）
     - ui_settings.{window_w, window_h, window_x, window_y, window_state} = None

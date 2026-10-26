@@ -18,6 +18,49 @@ import sys
 import pytest
 
 
+def _qt_app_module_importable() -> bool:
+    """子进程探测：能不能 import ui_qt.qt_app。
+
+    ui_qt.qt_app 在模块层就定义了 QMainWindow 子类（PyQtLauncher）。在 sip
+    ABI 不匹配的机器上（PyQt5 5.15.7 + PyQt5-sip 12.17）这一步会直接
+    access violation，把整个 pytest 进程带走 —— 后面所有用例都跑不到。
+    这里先在子进程里试一次，探不通就跳过本模块（与 tests/unit/
+    test_close_to_tray.py 用的是同一套办法）。
+    """
+    import os
+    import subprocess
+
+    repo_root = Path(__file__).resolve().parent.parent.parent
+    try:
+        probe = subprocess.run(
+            [sys.executable, "-c",
+             "import ui_qt.qt_app as qa; print('OK', qa.PyQtLauncher)"],
+            cwd=str(repo_root),
+            capture_output=True,
+            text=True,
+            env={**os.environ, "QT_QPA_PLATFORM": "offscreen"},
+            timeout=60,
+        )
+    except Exception:
+        return False
+    return probe.returncode == 0 and "OK" in probe.stdout
+
+
+_QT_APP_IMPORTABLE = _qt_app_module_importable()
+
+pytestmark = [
+    pytest.mark.usefixtures("qapp"),
+    pytest.mark.skipif(
+        not _QT_APP_IMPORTABLE,
+        reason=(
+            "ui_qt.qt_app import crashes in this env (pre-existing PyQt5/sip "
+            "ABI access violation at PyQtLauncher class definition). Run on a "
+            "machine where the GUI launches normally."
+        ),
+    ),
+]
+
+
 class TestWorkerIntegration:
     """Test workers integrate properly with app context."""
 

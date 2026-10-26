@@ -10,6 +10,36 @@ import pytest
 class TestStartFunction:
     """Tests for the start() function."""
 
+    @pytest.fixture(autouse=True)
+    def _no_real_startup_wait(self, monkeypatch):
+        """别让用例真的去等 ComfyUI 启动。
+
+        worker() 里是 ``time.sleep(3)`` + 最多 120 秒轮询 /system_stats。
+        这些用例只想验证 spawn 参数与回调分支，于是同步调用 worker_func()：
+        进程"还活着"（poll() 返回 None）的用例会一路轮询到 120 秒超时才
+        返回 —— 单个文件 11 个用例加起来 20 多分钟，整套单测直接被它拖成
+        半小时。
+
+        这里把 sleep 换成空操作、把就绪探测固定为 True，用例语义不变
+        （成功路径照走 on_start_success；失败路径由 poll() != None 的分支
+        先行短路），耗时从分钟级降到毫秒级。
+        """
+        import time as _real_time
+
+        import core.runner_start as _rs
+
+        class _FastTime:
+            @staticmethod
+            def sleep(_seconds):
+                return None
+
+            @staticmethod
+            def time():
+                return _real_time.time()
+
+        monkeypatch.setattr(_rs, "time", _FastTime)
+        monkeypatch.setattr(_rs, "_check_system_stats", lambda *a, **k: True)
+
     @pytest.fixture
     def mock_app(self):
         """Mock app object."""

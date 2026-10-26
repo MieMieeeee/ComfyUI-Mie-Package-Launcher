@@ -5,7 +5,7 @@
 from pathlib import Path
 from unittest.mock import patch, MagicMock
 
-from services.plugin_service import PluginService, _cmcli_install_stage
+from services.plugin_service import PluginService, _cmcli_install_stage, _cmcli_update_progress
 
 
 # ---- _cmcli_install_stage（cm-cli install 流式输出 → 阶段文案）----
@@ -47,6 +47,37 @@ def test_cmcli_install_stage_unrelated_and_empty():
 
 def test_cmcli_install_stage_strips_crlf():
     assert _cmcli_install_stage("CLONE into 'X'\r\n") == "正在克隆 git 仓库..."
+
+
+
+# ---- _cmcli_update_progress（cm-cli update 流式输出 → k/N 进度行）----
+# cm-cli 每完成一个插件打一行 "{k}/{N} [ STATUS ]: name => result"（结果尾巴可能
+# 折行）；锁住对真实输出的匹配（见用户 launcher.log 的 cm_fast update 输出）。
+
+def test_cmcli_update_progress_matches_updated_line():
+    assert _cmcli_update_progress("1/5 [  UPDATED ]: comfyui-enricos-nodes => done") ==         (1, 5, "comfyui-enricos-nodes")
+
+
+def test_cmcli_update_progress_matches_skipped_with_wide_status():
+    assert _cmcli_update_progress("1/1 [  SKIPPED  ]: ComfyUI-MiniMaxH3-Context-Loop => Not installed") ==         (1, 1, "ComfyUI-MiniMaxH3-Context-Loop")
+
+
+def test_cmcli_update_progress_ignores_noise_lines():
+    assert _cmcli_update_progress("FETCH DATA from: C:/x/custom-node-list.json [DONE]") is None
+    assert _cmcli_update_progress("[ComfyUI-Manager] The ComfyRegistry cache update is still in progress.") is None
+    assert _cmcli_update_progress("") is None
+    assert _cmcli_update_progress("   ") is None
+
+
+def test_cmcli_update_progress_rejects_invalid_counts():
+    assert _cmcli_update_progress("0/5 [ UPDATED ]: foo => x") is None
+    assert _cmcli_update_progress("6/5 [ UPDATED ]: foo => x") is None
+    assert _cmcli_update_progress("abc/5 [ UPDATED ]: foo => x") is None
+
+
+def test_cmcli_update_progress_name_without_result_tail():
+    # 没带 => 结果尾巴的行也认（名字即整段）
+    assert _cmcli_update_progress("2/4 [ UPDATED ]: RES4LYF") == (2, 4, "RES4LYF")
 
 
 def _app():
@@ -489,7 +520,7 @@ def test_update_selected_passes_nodes_to_cmcli():
     svc = PluginService(_app())
     seen = {}
 
-    def fake_do_update(nodes):
+    def fake_do_update(nodes, on_progress=None):
         seen["nodes"] = nodes
         return {"updated": True, "up_to_date": False, "log": "", "error": None}
 
@@ -769,6 +800,117 @@ def test_force_update_reports_failure_when_pull_fails(tmp_path):
         results = svc.force_update_selected(["ComfyUI-KJNodes"])
     assert results[0]["ok"] is False
     assert "merge conflict" in results[0]["detail"]
+    assert "git 代理" not in results[0]["detail"]  # 非网络错误不归类
+
+
+# ---- force_update CNR 插件：install() 重装 + 版本不动抑制（issue #107）----
+
+def _write_cnr_pyproject(pdir, version):
+    (pdir / "pyproject.toml").write_text(
+        f'[project]\nversion = "{version}"\n'
+        f'[project.urls]\nRepository = "https://github.com/a/stub"\n',
+        encoding="utf-8")
+
+
+def test_force_update_cnr_plugin_reinstalls_and_reports_version_move(tmp_path):
+    cn = tmp_path / "ComfyUI" / "custom_nodes"
+    cn.mkdir(parents=True)
+    pdir = cn / "SomeCnrNode"
+    pdir.mkdir()
+    _write_cnr_pyproject(pdir, "1.0.0")
+
+    svc = PluginService(_app())
+
+    def fake_install(spec):
+        assert spec == "stub-cnr-node"
+        _write_cnr_pyproject(pdir, "2.0.0")  # 重装真的把包内版本带上来了
+        return {"ok": True, "log": "installed", "error": None}
+
+    with patch.object(svc, "_comfyui_dir", return_value=tmp_path / "ComfyUI"), \
+         patch.object(svc, "_cnr_lookup",
+                      return_value={"id": "stub-cnr-node", "version": "2.0.0"}), \
+         patch.object(svc, "install", side_effect=fake_install) as inst:
+        results = svc.force_update_selected(["SomeCnrNode"])
+    inst.assert_called_once()
+    assert results[0]["ok"] is True
+    assert results[0]["skipped"] is False
+    assert "1.0.0" in results[0]["detail"] and "2.0.0" in results[0]["detail"]
+
+
+def test_force_update_cnr_version_unchanged_suppresses_outdated(tmp_path):
+    """重装后包内版本没动（上游元数据不一致）→ 本会话不再重复标记「有更新」。
+
+    issue #107：过去这类插件永远「扫描说有更新 → 建议 强制更新 → 跳过/空转」。
+    """
+    cn = tmp_path / "ComfyUI" / "custom_nodes"
+    cn.mkdir(parents=True)
+    pdir = cn / "StubbornNode"
+    pdir.mkdir()
+    _write_cnr_pyproject(pdir, "1.0.0")
+
+    svc = PluginService(_app())
+    with patch.object(svc, "_comfyui_dir", return_value=tmp_path / "ComfyUI"), \
+         patch.object(svc, "_cnr_lookup",
+                      return_value={"id": "stub-node", "version": "2.0.0"}), \
+         patch.object(svc, "install",
+                      return_value={"ok": True, "log": "", "error": None}), \
+         patch.object(svc, "_cnr_registry_map",
+                      return_value={"https://github.com/a/stub": "2.0.0"}):
+        results = svc.force_update_selected(["StubbornNode"])
+        assert results[0]["ok"] is True
+        assert "未变化" in results[0]["detail"]
+        # 重装没让版本动 → outdated_plugins 不再标记，死循环终止
+        assert svc.outdated_plugins(["StubbornNode"]) == []
+        # registry 之后又出了更高版 → 抑制自动解除，重新提示
+        with patch.object(svc, "_cnr_registry_map",
+                          return_value={"https://github.com/a/stub": "3.0.0"}):
+            assert svc.outdated_plugins(["StubbornNode"]) == ["StubbornNode"]
+
+
+def test_force_update_cnr_without_registry_entry_skips(tmp_path):
+    """registry 缓存查不到条目 → skipped（跟 local 插件同等待遇），不跑 install。"""
+    cn = tmp_path / "ComfyUI" / "custom_nodes"
+    cn.mkdir(parents=True)
+    pdir = cn / "UnknownCnr"
+    pdir.mkdir()
+    _write_cnr_pyproject(pdir, "1.0.0")
+
+    svc = PluginService(_app())
+    with patch.object(svc, "_comfyui_dir", return_value=tmp_path / "ComfyUI"), \
+         patch.object(svc, "_cnr_lookup", return_value=None), \
+         patch.object(svc, "install") as inst:
+        results = svc.force_update_selected(["UnknownCnr"])
+    assert results[0]["skipped"] is True
+    assert results[0]["ok"] is False
+    inst.assert_not_called()
+
+
+def test_force_update_git_pull_network_error_classified(tmp_path):
+    """pull 失败且 stderr 是 SSL/镜像类错误 → detail 归类为网络问题（issue #107 截图）。"""
+    cn = tmp_path / "ComfyUI" / "custom_nodes"
+    cn.mkdir(parents=True)
+    (cn / "NetPlugin" / ".git").mkdir(parents=True)
+
+    svc = PluginService(_app())
+
+    def fake(cmd, **kwargs):
+        r = MagicMock()
+        if "pull" in cmd:
+            r.returncode = 1
+            r.stdout = ""
+            r.stderr = ("fatal: unable to access 'https://gh-proxy.com/https://github.com/x/y/': "
+                        "schannel: failed to receive handshake, SSL/TLS connection failed")
+        else:
+            r.returncode = 0
+            r.stdout = ""
+            r.stderr = ""
+        return r
+
+    with patch.object(svc, "_comfyui_dir", return_value=tmp_path / "ComfyUI"), \
+         patch("services.plugin_service.run_hidden", side_effect=fake):
+        results = svc.force_update_selected(["NetPlugin"])
+    assert results[0]["ok"] is False
+    assert "更换 git 代理" in results[0]["detail"]
 
 
 # ---- cm-cli 包装：uninstall / disable / enable / install ----
@@ -785,6 +927,47 @@ def test_uninstall_invokes_cmcli_uninstall(tmp_path):
         r = svc.uninstall("ComfyUI-Foo")
     m.assert_not_called()
     assert r["ok"] is True and not pdir.exists()
+
+
+def test_uninstall_does_not_delete_same_prefix_siblings(tmp_path):
+    """回归（数据丢失级）：卸载 Foo 不得连带删掉 .disabled/ 下的 FooBar / FooControl。
+
+    旧实现用 `glob(f"{base}*")` 前缀匹配，卸载 Foo 会把同前缀的所有目录删掉。
+    Manager 的禁用目录命名是 `<id>@<ver>`，只有 base 本身与 base@ver 属于它。
+    """
+    cn = tmp_path / "custom_nodes"
+    cn.mkdir(parents=True)
+    dd = cn / ".disabled"
+    dd.mkdir()
+    (dd / "Foo").mkdir()
+    (dd / "Foo@1.2.3").mkdir()      # 同插件历史版本，该删
+    (dd / "FooBar").mkdir()         # 无关插件，不该删
+    (dd / "FooControl").mkdir()     # 无关插件，不该删
+
+    svc = PluginService(_app())
+    with patch.object(svc, "_comfyui_dir", return_value=tmp_path):
+        ok, _note = svc._disk_lifecycle("uninstall", "Foo")
+
+    assert ok is True
+    assert not (dd / "Foo").exists()
+    assert not (dd / "Foo@1.2.3").exists()
+    assert (dd / "FooBar").exists(), "同前缀插件 FooBar 被误删了"
+    assert (dd / "FooControl").exists(), "同前缀插件 FooControl 被误删了"
+    # 终态核实也不能被同前缀兄弟带偏（否则会判「没删净」→ 触发二次破坏性删除）
+    assert svc._lifecycle_effect_ok("uninstall", "Foo") is True
+
+
+def test_lifecycle_effect_ok_uninstall_ignores_same_prefix_sibling(tmp_path):
+    """只有同前缀兄弟存在时，卸载 Foo 的终态仍应算达成。"""
+    cn = tmp_path / "custom_nodes"
+    cn.mkdir(parents=True)
+    dd = cn / ".disabled"
+    dd.mkdir()
+    (dd / "FooBar").mkdir()  # 与 Foo 同前缀，但 Foo 自己早被删了
+
+    svc = PluginService(_app())
+    with patch.object(svc, "_comfyui_dir", return_value=tmp_path):
+        assert svc._lifecycle_effect_ok("uninstall", "Foo") is True
 
 
 def test_disable_invokes_cmcli_disable(tmp_path):
@@ -873,6 +1056,60 @@ def test_outdated_plugins_skips_non_git_without_calling_git(tmp_path):
         mock_run.assert_not_called()  # 非 git 不应查 git
 
 
+# ---- outdated_plugins 并发：顺序稳定 + 进度回调完整（issue #107 后的性能改造）----
+
+def test_outdated_plugins_preserves_input_order_under_concurrency(tmp_path):
+    """git 检测并发跑，完成顺序不固定 → 返回必须按输入顺序（UI 展示稳定）。"""
+    cn = tmp_path / "ComfyUI" / "custom_nodes"
+    cn.mkdir(parents=True)
+    names = ["aaa", "bbb", "ccc", "ddd", "eee", "fff"]
+    for n in names:
+        (cn / n / ".git").mkdir(parents=True)
+
+    svc = PluginService(_app())
+
+    def fake(cmd, **kwargs):
+        r = MagicMock()
+        r.returncode = 0
+        r.stderr = ""
+        # 每个插件都算落后，且 sha 由 cwd 决定（模拟不同网络往返）
+        cwd = str(kwargs.get("cwd", ""))
+        sha = cwd[-3:]
+        r.stdout = f"{sha}remote\tHEAD\n" if "ls-remote" in cmd else f"{sha}local\n"
+        return r
+
+    with patch.object(svc, "_comfyui_dir", return_value=tmp_path / "ComfyUI"), \
+         patch("services.plugin_service.run_hidden", side_effect=fake):
+        out = svc.outdated_plugins(names)
+    assert out == names  # 全落后 + 顺序与输入一致
+
+
+def test_outdated_plugins_reports_progress_for_every_plugin(tmp_path):
+    """并发下 on_progress 仍要每个插件回调一次，且终值 = 总数（UI 进度条依赖）。"""
+    cn = tmp_path / "ComfyUI" / "custom_nodes"
+    cn.mkdir(parents=True)
+    names = ["p1", "p2", "p3", "p4"]
+    for n in names:
+        (cn / n / ".git").mkdir(parents=True)
+
+    svc = PluginService(_app())
+
+    def fake(cmd, **kwargs):
+        r = MagicMock()
+        r.returncode = 0
+        r.stderr = ""
+        r.stdout = "same\tHEAD\n" if "ls-remote" in cmd else "same\n"
+        return r
+
+    seen = []
+    with patch.object(svc, "_comfyui_dir", return_value=tmp_path / "ComfyUI"), \
+         patch("services.plugin_service.run_hidden", side_effect=fake):
+        svc.outdated_plugins(names, on_progress=lambda c, t, n: seen.append((c, t)))
+    assert len(seen) == len(names)          # 每个插件一次
+    assert max(c for c, _ in seen) == len(names)  # 终值 = 总数
+    assert all(t == len(names) for _, t in seen)  # total 恒定
+
+
 def test_outdated_plugins_treats_unreachable_remote_as_not_outdated(tmp_path):
     cn = tmp_path / "ComfyUI" / "custom_nodes"
     cn.mkdir(parents=True)
@@ -894,6 +1131,63 @@ def test_outdated_plugins_treats_unreachable_remote_as_not_outdated(tmp_path):
     with patch.object(svc, "_comfyui_dir", return_value=tmp_path / "ComfyUI"), \
          patch("services.plugin_service.run_hidden", side_effect=fake):
         assert svc.outdated_plugins(["Offline"]) == []  # 取不到远端，不误报落后
+
+
+def test_outdated_plugins_reports_unreachable_remotely(tmp_path):
+    """连不上远端的插件要填进 unreachable，让 UI 能提示「未能检查」。
+
+    代理/网络故障时静默当成「不落后」会让用户误以为所有插件都最新（review H3）。
+    """
+    cn = tmp_path / "ComfyUI" / "custom_nodes"
+    cn.mkdir(parents=True)
+    (cn / "Offline" / ".git").mkdir(parents=True)
+    (cn / "Uptodate" / ".git").mkdir(parents=True)
+
+    svc = PluginService(_app())
+
+    def fake(cmd, **kwargs):
+        r = MagicMock()
+        r.stderr = ""
+        if "ls-remote" in cmd and "Offline" in str(kwargs.get("cwd", "")):
+            r.returncode = 1   # 该插件连不上远端
+            r.stdout = ""
+        else:
+            r.returncode = 0
+            r.stdout = "same\tHEAD\n" if "ls-remote" in cmd else "same\n"
+        return r
+
+    unreachable = []
+    with patch.object(svc, "_comfyui_dir", return_value=tmp_path / "ComfyUI"), \
+         patch("services.plugin_service.run_hidden", side_effect=fake):
+        out = svc.outdated_plugins(["Offline", "Uptodate"], unreachable=unreachable)
+    assert out == []              # 两个都不算有更新
+    assert unreachable == ["Offline"]  # 但 Offline 要被如实回报
+
+
+def test_git_commands_receive_proxy_env(tmp_path):
+    """回归：启动器自己跑的 git（ls-remote 等）必须带上代理配置 env。
+
+    代理原先只透给 cm-cli 子进程，导致「检查更新」的 ls-remote 直连 github 失败 →
+    误报「所有插件均为最新」，而同一时刻走 cm-cli 的「更新全部」却成功（review H3）。
+    """
+    svc = PluginService(_app())
+    cfg = tmp_path / "proxy.gitconfig"
+    captured = {}
+
+    def fake_run_hidden(cmd, **kwargs):
+        captured.update(kwargs)
+        r = MagicMock()
+        r.returncode = 0
+        r.stdout = "abc\n"
+        r.stderr = ""
+        return r
+
+    with patch.object(svc, "_git_proxy_config_path", return_value=cfg), \
+         patch("services.plugin_service.run_hidden", side_effect=fake_run_hidden):
+        svc._git_out(["rev-parse", "HEAD"], tmp_path)
+
+    assert "env" in captured, "_git_out 必须传 env"
+    assert captured["env"].get("GIT_CONFIG_GLOBAL") == str(cfg)
 
 
 # ---- check_updates：批量查全部已装插件（UI「检查更新」按钮 / CLI check-updates 共用）----
@@ -987,6 +1281,64 @@ def test_remote_dates_skips_non_git_plugins(tmp_path):
          patch("services.plugin_service.run_hidden") as mock_run:
         assert svc.remote_dates(["plain"]) == {}
     mock_run.assert_not_called()
+
+
+def test_remote_dates_include_all_git_covers_every_git_plugin(tmp_path):
+    """include_all_git=True：把所有已装 git 插件的远端日期都带上（不只 outdated）。
+
+    UI 的「远端日期」列要整表可见，否则更新完唯一可更新的插件后整列全是 —。
+    CNR/local 插件不在其中（它们没有远端 commit 日期，names 里给了才算）。
+    """
+    cn = tmp_path / "ComfyUI" / "custom_nodes"
+    cn.mkdir(parents=True)
+    (cn / "Behind" / ".git").mkdir(parents=True)
+    (cn / "UpToDate" / ".git").mkdir(parents=True)
+    (cn / "CnrOne").mkdir()  # 非 git
+
+    svc = PluginService(_app())
+    calls = []
+
+    def fake(cmd, **kwargs):
+        r = MagicMock()
+        r.returncode = 0
+        r.stderr = ""
+        cwd = str(kwargs.get("cwd", ""))
+        calls.append(cwd)
+        r.stdout = "2025-06-01\n" if "Behind" in cwd else "2025-05-20\n"
+        return r
+
+    with patch.object(svc, "_comfyui_dir", return_value=tmp_path / "ComfyUI"), \
+         patch("services.plugin_service.run_hidden", side_effect=fake):
+        out = svc.remote_dates(["Behind"], include_all_git=True)
+
+    assert out == {"Behind": "2025-06-01", "UpToDate": "2025-05-20"}, f"整表日期不全: {out}"
+    assert not any("CnrOne" in c for c in calls), "非 git 插件不该被查（除非在 names 里）"
+
+
+def test_remote_dates_include_all_git_does_not_duplicate(tmp_path):
+    """names 里的 git 插件不该被查两遍（重复 git log + dict 覆盖无意义）。"""
+    cn = tmp_path / "ComfyUI" / "custom_nodes"
+    cn.mkdir(parents=True)
+    (cn / "Behind" / ".git").mkdir(parents=True)
+
+    svc = PluginService(_app())
+
+    def fake(cmd, **kwargs):
+        r = MagicMock()
+        r.returncode = 0
+        r.stderr = ""
+        r.stdout = "2025-06-01\n"
+        return r
+
+    with patch.object(svc, "_comfyui_dir", return_value=tmp_path / "ComfyUI"), \
+         patch("services.plugin_service.run_hidden", side_effect=fake) as mock_run:
+        out = svc.remote_dates(["Behind"], include_all_git=True)
+
+    # 只数「取远端日期」那条命令（list_installed 自己那几条 git 信息不在此列）
+    date_calls = [c for c in mock_run.call_args_list
+                  if "origin/HEAD" in " ".join(c.args[0])]
+    assert out == {"Behind": "2025-06-01"}
+    assert len(date_calls) == 1, f"同一插件取了 {len(date_calls)} 次远端日期"
 
 
 # ---- CNR 更新检测：读 registry 缓存（nodes.json），按 repo URL 匹配，语义版本比较 ----
@@ -1298,43 +1650,6 @@ def _api_route_installed(extra=None):
     return routes
 
 
-def test_api_try_install_url_spec_skips_api():
-    svc = _svc_for_api()
-    fake = _FakeHttp({})
-    with patch.object(svc, "_http_json", fake):
-        assert svc._api_try_install("https://github.com/x/y") is None
-    assert fake.posts == []
-
-
-def test_api_try_install_unknown_id_skips_api(tmp_path):
-    svc = _svc_for_api(tmp_path)  # 无 CNR 缓存文件
-    fake = _FakeHttp({})
-    with patch.object(svc, "_http_json", fake):
-        assert svc._api_try_install("not-a-cnr-id") is None
-    assert fake.posts == []
-
-
-def test_api_try_install_cnr_id_posts_latest_version(tmp_path):
-    svc = _svc_with_cnr_cache(tmp_path, [
-        {"id": "comfyui-foo", "repository": "https://github.com/a/foo",
-         "latest_version": {"version": "1.2.3"}},
-    ])
-    svc.app.custom_port.get.return_value = "8188"
-    fake = _FakeHttp(_api_route_installed())
-    stages = []
-    with patch.object(svc, "_http_json", fake), \
-         patch.object(svc, "_evict_git_info_cache") as evict:
-        res = svc._api_try_install("comfyui-foo", on_stage=stages.append)
-
-    assert res == {"ok": True, "log": "Manager API 队列完成（1 项）", "error": None}
-    path, body = fake.posts[0]
-    assert path == "/manager/queue/install"
-    assert body == {"id": "comfyui-foo", "version": "1.2.3",
-                    "selected_version": "1.2.3", "channel": "default", "mode": "cache"}
-    evict.assert_called_once_with(None)
-    assert "开始安装" in stages[0]
-
-
 def test_api_run_queue_busy_returns_none(tmp_path):
     svc = _svc_for_api(tmp_path)
     fake = _FakeHttp({("GET", "/manager/version"): (200, "V3.41"),
@@ -1451,19 +1766,6 @@ def test_api_try_lifecycle_no_identity_returns_none(tmp_path):
     with patch.object(svc, "_http_json", fake):
         assert svc._api_try_lifecycle("uninstall", "Plain") is None
     assert fake.posts == []
-
-
-def test_api_try_update_all_uses_cache_mode(tmp_path):
-    svc = _svc_for_api(tmp_path)
-    fake = _FakeHttp(_api_route_installed())
-    with patch.object(svc, "_http_json", fake), \
-         patch.object(svc, "_evict_git_info_cache") as evict:
-        res = svc._api_try_update_all()
-
-    assert res["updated"] is True
-    path, body = fake.posts[0]
-    assert path == "/manager/queue/update_all" and body == {"mode": "cache"}
-    evict.assert_called_once_with(None)
 
 
 def test_lifecycle_uninstall_uses_api_when_available(tmp_path):
@@ -1653,3 +1955,214 @@ def test_plugin_git_url_reads_first_remote(tmp_path):
         '[remote "origin"]\n\turl = https://github.com/a/foo\n'
         '[remote "upstream"]\n\turl = https://github.com/b/foo\n', encoding="utf-8")
     assert PluginService._plugin_git_url(tmp_path) == "https://github.com/a/foo"
+
+
+# ---- _plugin_queue_identity 的 CNR 分支（issue #107 根本 bug）----
+
+def _cnr_plugin_dir(cn_dir, name, version, repo):
+    """造一个 Manager 装好的 CNR 插件：.tracking 是**文件**（Manager 实际写法）+
+    pyproject.toml + 无 .git（CNR 插件不是 git 仓库）。"""
+    d = cn_dir / name
+    d.mkdir(parents=True)
+    (d / ".tracking").write_text("main.py\nnodes.py\n", encoding="utf-8")  # 文件！非目录
+    (d / "pyproject.toml").write_text(
+        f'[project]\nname = "{name}"\nversion = "{version}"\n'
+        f'[project.urls]\nRepository = "{repo}"\n', encoding="utf-8")
+    return d
+
+
+def test_queue_identity_resolves_cnr_plugin_with_tracking_file(tmp_path):
+    """Manager 把 .tracking 写成文件（不是目录）→ identity 仍应构造成功。
+
+    回归 issue #107：原实现用 is_dir() 判断 .tracking（永假），且 cnr_id 只从
+    .git/.cnr-id 读（CNR 插件无 .git，恒 None），导致所有 CNR 插件拿不到身份 →
+    update_selected 整批降级 → 什么都没升 → 反复提示强制更新。
+    """
+    cn = tmp_path / "ComfyUI" / "custom_nodes"
+    cn.mkdir(parents=True)
+    _cnr_plugin_dir(cn, "ComfyUI-MultiGPU", "2.5.11",
+                    "https://github.com/pollockjj/ComfyUI-MultiGPU")
+
+    svc = PluginService(_app())
+    with patch.object(svc, "_comfyui_dir", return_value=tmp_path / "ComfyUI"), \
+         patch.object(svc, "_cnr_lookup",
+                      return_value={"id": "comfyui-multigpu", "version": "2.6.4"}):
+        ident = svc._plugin_queue_identity("ComfyUI-MultiGPU")
+    assert ident == {"id": "comfyui-multigpu", "version": "2.5.11"}
+
+
+def test_queue_identity_cnr_falls_back_to_dirname_stripping_at_ver(tmp_path):
+    """registry 查不到 id 时兜底：目录名 <id>@<ver> 刻 @ 尾巴当 id。"""
+    cn = tmp_path / "ComfyUI" / "custom_nodes"
+    cn.mkdir(parents=True)
+    _cnr_plugin_dir(cn, "10s-comfy-nodes@1_0_0", "1.0.0",
+                    "https://github.com/TenStrip/10S-Comfy-nodes")
+
+    svc = PluginService(_app())
+    with patch.object(svc, "_comfyui_dir", return_value=tmp_path / "ComfyUI"), \
+         patch.object(svc, "_cnr_lookup", return_value=None):
+        ident = svc._plugin_queue_identity("10s-comfy-nodes@1_0_0")
+    assert ident == {"id": "10s-comfy-nodes", "version": "1.0.0"}
+
+
+def test_resolve_plugin_dir_finds_disabled_dir_entries(tmp_path):
+    """.disabled/ 下的插件裸目录名（Manager 的 <id>@<ver> 形态）也要能寻址。
+
+    list_installed 的扫描源含 .disabled/ 子目录，dir_name 是裸目录名；直接
+    cn_dir/name 指向不存在的顶层路径 → identity 恒 None、强制更新恒「目录不存在」
+    （review H2/L4）。
+    """
+    cn = tmp_path / "custom_nodes"
+    dd = cn / ".disabled"
+    dd.mkdir(parents=True)
+    (dd / "10s-nodes@1_0_0").mkdir()
+    (cn / "TopLevel").mkdir()
+    (cn / "Suffix.disabled").mkdir()
+
+    svc = PluginService(_app())
+    with patch.object(svc, "_comfyui_dir", return_value=tmp_path):
+        assert svc._resolve_plugin_dir("10s-nodes@1_0_0") == dd / "10s-nodes@1_0_0"
+        assert svc._resolve_plugin_dir("TopLevel") == cn / "TopLevel"
+        assert svc._resolve_plugin_dir("Suffix.disabled") == cn / "Suffix.disabled"
+        assert svc._resolve_plugin_dir("Nope") is None
+
+
+def test_force_update_one_finds_disabled_dir_entry(tmp_path):
+    """禁用目录里的插件不再被判「目录不存在」。"""
+    cn = tmp_path / "custom_nodes"
+    dd = cn / ".disabled"
+    dd.mkdir(parents=True)
+    d = dd / "SomeCnr@1_0_0"
+    d.mkdir()
+    (d / "pyproject.toml").write_text(
+        '[project]\nversion = "1.0.0"\n[project.urls]\n'
+        'Repository = "https://github.com/a/stub"\n', encoding="utf-8")
+
+    svc = PluginService(_app())
+    with patch.object(svc, "_comfyui_dir", return_value=tmp_path), \
+         patch.object(svc, "_cnr_lookup", return_value=None), \
+         patch.object(svc, "install") as inst:
+        r = svc._force_update_one("SomeCnr@1_0_0")
+    assert "目录不存在" not in r["detail"], "不该因路径拼错报目录不存在"
+    inst.assert_not_called()  # registry 无条目 → 走 skipped 分支
+
+
+def test_lifecycle_effect_ok_disable_requires_disabled_trace(tmp_path):
+    """disable 终态：顶层消失 + 留下禁用痕迹（改名或搬进 .disabled/）。"""
+    cn = tmp_path / "custom_nodes"
+    cn.mkdir(parents=True)
+    svc = PluginService(_app())
+    with patch.object(svc, "_comfyui_dir", return_value=tmp_path):
+        (cn / "Foo").mkdir()
+        assert svc._lifecycle_effect_ok("disable", "Foo") is False  # 还在启用态
+        (cn / "Foo").rename(cn / "Foo.disabled")
+        assert svc._lifecycle_effect_ok("disable", "Foo") is True   # 改名痕迹
+
+
+def test_queue_identity_none_for_plugin_without_tracking_or_pyproject(tmp_path):
+    """既无 .tracking 也无 pyproject（纯 local 脚本）→ None，调用方降级。"""
+    cn = tmp_path / "ComfyUI" / "custom_nodes"
+    cn.mkdir(parents=True)
+    (cn / "plain-scripts").mkdir()
+
+    svc = PluginService(_app())
+    with patch.object(svc, "_comfyui_dir", return_value=tmp_path / "ComfyUI"):
+        assert svc._plugin_queue_identity("plain-scripts") is None
+
+
+
+def test_update_selected_bypasses_manager_api_even_when_available(tmp_path):
+    """2026-10 策略：update 一律 cm-cli，即使 Manager 在跑且队列空闲也不走 API。
+
+    队列任务完成后 Manager 网页端会弹「Apply/重启」，用户点击产生启动器跟踪不到的
+    os.execv 重启链（曾把运行中的 ComfyUI 静默搞死，2026-10-03 事故）。
+    """
+    cn = tmp_path / "ComfyUI" / "custom_nodes"
+    cn.mkdir(parents=True)
+    _cnr_plugin_dir(cn, "ComfyUI-MultiGPU", "2.5.11",
+                    "https://github.com/pollockjj/ComfyUI-MultiGPU")
+
+    svc = PluginService(_app())
+    fake = _FakeHttp(_api_route_installed())  # Manager 在跑、队列空闲、POST 全 200
+    with patch.object(svc, "_comfyui_dir", return_value=tmp_path / "ComfyUI"),          patch.object(svc, "is_available", return_value=True),          patch.object(svc, "_http_json", fake),          patch.object(svc, "_run_cmcli") as cmcli:
+        svc.update_selected(["ComfyUI-MultiGPU"])
+    cmcli.assert_called_once()      # 走包装器
+    assert fake.posts == []         # 一个 HTTP 请求都没发
+
+
+def test_update_all_bypasses_manager_api_even_when_available(tmp_path):
+    """同上：update_all 不碰 Manager 队列 API。"""
+    svc = _svc_for_api(tmp_path)
+    fake = _FakeHttp(_api_route_installed())
+    with patch.object(svc, "is_available", return_value=True),          patch.object(svc, "_http_json", fake),          patch.object(svc, "_run_cmcli") as cmcli:
+        svc.update_all()
+    cmcli.assert_called_once()
+    assert fake.posts == []
+
+
+def test_install_bypasses_manager_api_even_when_available(tmp_path):
+    """同上：install（含 CNR id 规格）不碰 Manager 队列 API。"""
+    svc = _svc_with_cnr_cache(tmp_path, [
+        {"id": "comfyui-foo", "repository": "https://github.com/a/foo",
+         "latest_version": {"version": "1.2.3"}},
+    ])
+    svc.app.custom_port.get.return_value = "8188"
+    fake = _FakeHttp(_api_route_installed())
+    with patch.object(svc, "_comfyui_dir", return_value=tmp_path / "ComfyUI"),          patch.object(svc, "_http_json", fake),          patch.object(svc, "_run_cmcli") as cmcli:
+        cmcli.return_value = {"returncode": 0, "stdout": "ok", "stderr": "",
+                              "error": None}
+        res = svc.install("comfyui-foo")
+    assert res["ok"] is True
+    cmcli.assert_called_once()
+    assert fake.posts == []
+
+
+def test_update_selected_streaming_progress_callbacks(tmp_path):
+    """on_progress 提供时走流式管道：cm-cli 逐插件行解析成 (k, N, name) 回调，
+    噪声行不回调；不再调整体捕获的 _run_cmcli。"""
+    svc = _svc_for_api(tmp_path)
+    NL = chr(10)
+    lines = [
+        "[ComfyUI-Manager] The ComfyRegistry cache update is still in progress." + NL,
+        "FETCH DATA from: C:/x/custom-node-list.json [DONE]" + NL,
+        "1/3 [  UPDATED ]: comfyui-enricos-nodes => done" + NL,
+        "2/3 [  SKIPPED  ]: ComfyUI-LTXVideo => skipped" + NL,
+        "3/3 [  UPDATED ]: comfyui-multigpu => done" + NL,
+    ]
+
+    def fake_stream(args, on_output=None, cancel_event=None, timeout=None):
+        assert args[:1] == ["update"]
+        for l in lines:
+            if on_output:
+                on_output(l)
+        return {"returncode": 0, "stdout": "".join(lines), "stderr": "", "error": None}
+
+    got = []
+    with patch.object(svc, "is_available", return_value=True), \
+         patch.object(svc, "_run_cmcli_streaming", side_effect=fake_stream), \
+         patch.object(svc, "_run_cmcli") as cmcli, \
+         patch.object(svc, "_evict_git_info_cache"):
+        def record(done, total, name):
+            got.append((done, total, name))
+        res = svc.update_selected(["A", "B", "C"], on_progress=record)
+
+    cmcli.assert_not_called()  # 流式路径不落回整体捕获
+    assert got == [(1, 3, "comfyui-enricos-nodes"),
+                   (2, 3, "ComfyUI-LTXVideo"),
+                   (3, 3, "comfyui-multigpu")]
+    assert res["updated"] is True and res["error"] is None
+
+
+def test_update_selected_without_progress_uses_plain_run(tmp_path):
+    """不传 on_progress 时保持原行为（整体捕获），不改契约。"""
+    svc = _svc_for_api(tmp_path)
+    with patch.object(svc, "is_available", return_value=True), \
+         patch.object(svc, "_run_cmcli",
+                      return_value={"returncode": 0, "stdout": "ok", "stderr": "",
+                                    "error": None}) as cmcli, \
+         patch.object(svc, "_run_cmcli_streaming") as stream, \
+         patch.object(svc, "_evict_git_info_cache"):
+        res = svc.update_selected(["A"])
+    cmcli.assert_called_once()
+    stream.assert_not_called()
+    assert res["updated"] is True

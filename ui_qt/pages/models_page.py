@@ -14,6 +14,84 @@ from ui_qt.widgets import (
 from ui_qt.widgets.dialog_helper import DialogHelper
 
 
+class _ProbeSignals(QtCore.QObject):
+    """跨线程回传结果的信号载体。
+
+    必须挂在 GUI 线程里的 QObject 上：连接建立时 PyQt 才会按「接收方所在
+    线程」排队投递，槽函数也才会回到 GUI 线程执行。用 lambda 直连的话
+    PyQt 走的是 DirectConnection，槽会在子线程里碰 UI 控件 —— 轻则更新
+    不生效，重则整个窗口僵住。
+    """
+
+    probe_done = QtCore.pyqtSignal(object, object, object, object)  # token, lib_id, mappings, status
+
+
+class _ApplySignals(QtCore.QObject):
+    apply_done = QtCore.pyqtSignal(bool, object)  # ok, report
+
+
+class _MappingProbeTask(QtCore.QRunnable):
+    """后台扫描外置库目录。
+
+    外置库可能指向局域网共享：目录大时扫描要几十秒，对端关机时又会等到
+    SMB 超时。放在 GUI 线程里做，用户看到的就是「切到模型库管理页整窗
+    无响应」。这里把它挪到线程池，结果通过信号回主线程刷新表格。
+    """
+
+    def __init__(self, service, token, lib_id, base_path, force, signals):
+        super().__init__()
+        self._service = service
+        self._token = token
+        self._lib_id = lib_id
+        self._base_path = base_path
+        self._force = force
+        self._signals = signals
+
+    def run(self):
+        status = {}
+        try:
+            status = self._service.library_status(self._base_path, force=self._force)
+        except Exception:
+            status = {"base_path": self._base_path, "remote": False,
+                      "reachable": True, "offline": False}
+        mappings = []
+        try:
+            mappings = self._service.get_mappings_for_base(self._base_path)
+        except Exception:
+            mappings = []
+        self._signals.probe_done.emit(self._token, self._lib_id, mappings, status)
+
+
+class _ApplyTask(QtCore.QRunnable):
+    """后台重写 extra_model_paths.yaml。
+
+    写 yaml 前要扫描每个启用库的真实目录（网络库很慢），不能占着 GUI
+    线程，否则「刷新/应用更改」按钮按下去整个窗口就没反应了。
+    """
+
+    def __init__(self, service, force, signals):
+        super().__init__()
+        self._service = service
+        self._force = force
+        self._signals = signals
+
+    def run(self):
+        ok = False
+        try:
+            try:
+                ok = bool(self._service.apply_libraries(force=self._force))
+            except TypeError:
+                ok = bool(self._service.apply_libraries())
+        except Exception:
+            ok = False
+        report = {"ok": ok, "skipped": []}
+        try:
+            report = self._service.get_apply_report() or report
+        except Exception:
+            pass
+        self._signals.apply_done.emit(ok, report)
+
+
 class ModelsPage(BasePage):
     """Multi-library external models page."""
 
@@ -30,6 +108,14 @@ class ModelsPage(BasePage):
         # Convenience handles
         self._model_path = getattr(self.app.services, "model_path", None)
         self._is_silent = False  # suppress listbox signal during bulk refresh
+        # 后台任务：映射扫描 / yaml 重写都不在 GUI 线程做（网络库会卡死整窗）
+        self._probe_token = 0
+        self._probe_signals = None
+        self._apply_busy = False
+        self._apply_callback = None
+        self._apply_pending = False
+        self._apply_signals = None
+        self._offline_ids = set()
 
         self.library_list = QtWidgets.QListWidget()
         self._library_list_min_width_base = 220
@@ -101,6 +187,17 @@ class ModelsPage(BasePage):
         self.status_label.setStyleSheet(
             f"color: {self.theme_manager.colors.get('label_muted')};"
         )
+
+        # 网络库状态行：显示「正在检测…」/「对端不可达」等。放在映射卡片里，
+        # 不动 _global_actions_card 的既有布局（状态行 → 按钮 → 提示）。
+        self.net_status_label = QtWidgets.QLabel("")
+        self.net_status_label.setWordWrap(True)
+        self.net_status_label.setStyleSheet(
+            f"color: {self.theme_manager.colors.get('label_muted')};"
+            " background: transparent;"
+            f" font: {self._pt(9)}pt \"Microsoft YaHei UI\";"
+        )
+        self.net_status_label.setVisible(False)
 
         # Global action buttons. They live in _global_actions_card (top of page)
         # rather than in the per-library editor, because they manage either the
@@ -202,6 +299,7 @@ class ModelsPage(BasePage):
         right_layout.setSpacing(12)
         right_layout.addWidget(self.editor_panel["container"])
         mapping_card = InfoCard("映射列表", self.theme_manager.styles)
+        mapping_card.layout().addWidget(self.net_status_label)
         mapping_card.layout().addWidget(self.mapping_table)
         right_layout.addWidget(mapping_card)
         split.addWidget(right_widget)
@@ -325,9 +423,7 @@ class ModelsPage(BasePage):
 
     def _append_library_row(self, lib):
         item = QtWidgets.QListWidgetItem()
-        prefix = "★ " if lib.get("is_default") else "  "
-        flag = "" if lib.get("enabled") else " (停用)"
-        item.setText(f"{prefix}{lib.get('name', '(未命名)')}{flag}")
+        item.setText(self._row_text(lib, lib.get("id") in self._offline_ids))
         item.setData(QtCore.Qt.UserRole, lib["id"])
         # Per-item foreground so the row reads regardless of palette.
         color = self._label_muted_color if not lib.get("enabled") else self._label_color
@@ -383,11 +479,95 @@ class ModelsPage(BasePage):
         if self._is_silent:
             return
         lib_id = self.selected_library_id()
-        if not lib_id:
+        if not lib_id or not self._model_path:
             return
-        if self._model_path:
-            self._model_path.enable_library(lib_id, bool(self.editor_panel["enable_check"].isChecked()))
+        self._model_path.enable_library(lib_id, bool(self.editor_panel["enable_check"].isChecked()))
+        # 勾选框就是「应用更改」的语义：写完 config 必须立刻重写 yaml，
+        # 否则 config 说禁用、ComfyUI 仍读着旧块加载该库的路径（静默失败）。
+        # 只重写被勾选的那个库（only_ids），其余库沿用 yaml 里已有的块 ——
+        # 免得每勾一次就去重扫所有共享（网络库扫一次好几秒）。
+        try:
+            ok = self._model_path.apply_libraries(only_ids=[lib_id])
+        except TypeError:
+            ok = self._model_path.apply_libraries()
+        if ok:
+            try:
+                self._model_path.clear_drift_notice()
+            except Exception:
+                pass
+            self._save_config()
         self.refresh_from_config()
+
+    # ---------- 后台重写 yaml ----------
+
+    def _apply_libraries_async(self, on_done=None, force=False):
+        """后台重写 extra_model_paths.yaml，完成后回到主线程收尾。"""
+        if not self._model_path:
+            return
+        if self._apply_busy:
+            # 已经在写了：记一笔，等这一轮结束后再补一次（用户连点时不能丢）
+            self._apply_pending = True
+            return
+        self._apply_busy = True
+        self._apply_callback = on_done
+        self._set_busy(True)
+        signals = _ApplySignals(self)
+        self._apply_signals = signals
+        signals.apply_done.connect(self._on_apply_done)
+        task = _ApplyTask(self._model_path, force, signals)
+        QtCore.QThreadPool.globalInstance().start(task)
+
+    def _on_apply_done(self, ok, report):
+        callback = self._apply_callback
+        self._apply_callback = None
+        self._apply_busy = False
+        self._set_busy(False)
+        skipped = (report or {}).get("skipped") or []
+        if ok:
+            try:
+                self._model_path.clear_drift_notice()
+            except Exception:
+                pass
+            self._save_config()
+        self.refresh_from_config()
+        # 强制重探一次可达性：NAS 可能刚刚开机，映射表要跟着更新
+        try:
+            self._refresh_mapping_table(force=True)
+        except Exception:
+            pass
+        if skipped:
+            names = "、".join(
+                lib.get("name") or lib.get("base_path", "") for lib in skipped
+            )
+            DialogHelper.show_warning(
+                self, "部分库未刷新",
+                f"以下外置模型库当前无法访问（对端未开机或共享不可用）：\n\n{names}\n\n"
+                "已保留它们原有的配置，本次没有刷新映射。\n等对方机器开机后再点「刷新/应用更改」即可。")
+        if callback:
+            try:
+                callback(ok, report)
+            except Exception:
+                pass
+        if self._apply_pending:
+            self._apply_pending = False
+            self._apply_libraries_async()
+
+    def _set_busy(self, busy):
+        for b in (self._btn_save, self._btn_open_yaml, self._btn_add,
+                  self._btn_remove, self._btn_builtin, self._btn_restore):
+            try:
+                b.setEnabled(not busy)
+            except Exception:
+                pass
+        if busy:
+            self._btn_save.setText("应用中…")
+        else:
+            self._btn_save.setText("刷新/应用更改")
+            # 「移除所选」依赖当前选中项，别被 busy 收尾时顺手打开
+            try:
+                self._btn_remove.setEnabled(bool(self.selected_library_id()))
+            except Exception:
+                pass
 
     def _on_default_toggled(self, checked):
         if self._is_silent:
@@ -428,8 +608,9 @@ class ModelsPage(BasePage):
         self._model_path.update_library(lib_id, **kwargs)
         if is_default:
             self._model_path.set_default_library(lib_id)
-        if self._model_path.apply_libraries():
-            self._save_config()
+        # 写 yaml 要扫描各库目录（网络库可能很慢），后台做，页面不卡。
+        # force=True：绕过可达性缓存重新探一次（用户可能刚把 NAS 开机）。
+        self._apply_libraries_async(force=True)
         self.refresh_from_config()
 
     def _on_add_library(self):
@@ -437,21 +618,23 @@ class ModelsPage(BasePage):
         if not d:
             return
         try:
-            p = Path(d).resolve()
-            if p.name.lower() == "models":
-                pass
+            # 网络路径不做 Path.resolve()（Windows 上会真的去问网络，对端关机即卡死）
+            resolved = self._model_path._safe_resolve(d) if self._model_path else str(Path(d).resolve())
+            p = Path(resolved)
         except Exception:
             p = Path(d)
         name = p.name or "library"
         lib = self._model_path.add_library(str(p), name=name) if self._model_path else None
         if lib:
-            if self._model_path:
-                self._model_path.apply_libraries()
-            self._save_config()
             self.select_library(lib["id"])
             self.refresh_from_config()
-            DialogHelper.show_info(self, "已添加",
-                f"已添加库: {lib['name']}\n请重启 ComfyUI 生效。\n\n后续在外置库目录下新建或删除子文件夹，\n需要再次点击「应用更改」刷新映射。")
+
+            def _added(ok, _report):
+                DialogHelper.show_info(self, "已添加",
+                    f"已添加库: {lib['name']}\n请重启 ComfyUI 生效。\n\n后续在外置库目录下新建或删除子文件夹，\n需要再次点击「应用更改」刷新映射。")
+
+            # 写 yaml 要扫描各库目录（网络库可能很慢），后台做，页面不卡。
+            self._apply_libraries_async(on_done=_added)
 
     def _on_remove_library(self):
         lib_id = self.selected_library_id()
@@ -462,8 +645,7 @@ class ModelsPage(BasePage):
         if not DialogHelper.show_confirmation(self, "确认", "移除所选模型库？此操作不会删除磁盘文件。"):
             return
         self._model_path.remove_library(lib_id)
-        if self._model_path.apply_libraries():
-            self._save_config()
+        self._apply_libraries_async()
         self.refresh_from_config()
 
     def _on_use_builtin_only(self):
@@ -492,6 +674,8 @@ class ModelsPage(BasePage):
             shutil.copy2(bak, yp)
             bak.unlink()
         self.app.config["models"]["disable_external"] = False
+        if hasattr(self._model_path, "clear_drift_notice"):
+            self._model_path.clear_drift_notice()
         self._save_config()
         self.refresh_from_config()
         DialogHelper.show_info(self, "已恢复", "外置模型库配置已恢复。")
@@ -513,7 +697,13 @@ class ModelsPage(BasePage):
             DialogHelper.show_info(self, "提示", "请先选择一个库再打开目录。")
             return
         import os, subprocess, platform
-        if os.path.isdir(base_path):
+        # 有界检查：网络库对端关机时 os.path.isdir 会等 SMB 超时，卡住整个窗口
+        try:
+            exists = self._model_path._path_is_dir(base_path) if self._model_path \
+                else os.path.isdir(base_path)
+        except Exception:
+            exists = False
+        if exists:
             try:
                 if platform.system() == "Windows":
                     subprocess.Popen(["explorer", base_path])
@@ -526,16 +716,39 @@ class ModelsPage(BasePage):
         else:
             DialogHelper.show_warning(self, "失败", f"目录不存在: {base_path}")
 
-    def _refresh_mapping_table(self):
+    def _refresh_mapping_table(self, force=False):
         lib_id = self.selected_library_id()
         lib = self._find_lib_by_id(lib_id) if lib_id else None
         if not lib or not self._model_path:
             self.mapping_table.setRowCount(0)
+            self._set_net_status(None)
             return
+        base_path = lib.get("base_path", "")
+        if not base_path:
+            self.mapping_table.setRowCount(0)
+            self._set_net_status(None)
+            return
+
+        # 网络路径：目录扫描放到后台线程。对端关机时扫描要等 SMB 超时，
+        # 放 GUI 线程里就是「切到这一页整窗没反应」。
         try:
-            mappings = self._model_path.get_mappings_for_base(lib.get("base_path", ""))
+            remote = bool(self._model_path.is_remote_path(base_path))
+        except Exception:
+            remote = False
+        if remote:
+            self._start_probe(lib_id, base_path, force=force)
+            return
+
+        try:
+            mappings = self._model_path.get_mappings_for_base(base_path)
         except Exception:
             mappings = []
+        self._populate_mapping_table(mappings)
+        self._set_net_status({"base_path": base_path, "remote": False,
+                               "reachable": True, "offline": False})
+        self._mark_offline(lib_id, False)
+
+    def _populate_mapping_table(self, mappings):
         self.mapping_table.setRowCount(len(mappings))
         for i, (k, v) in enumerate(mappings):
             name_item = QtWidgets.QTableWidgetItem(k)
@@ -545,6 +758,77 @@ class ModelsPage(BasePage):
             path_item.setFlags(path_item.flags() & ~QtCore.Qt.ItemIsEditable)
             path_item.setToolTip(v)
             self.mapping_table.setItem(i, 1, path_item)
+
+    # ---------- 网络库后台探测 ----------
+
+    def _start_probe(self, lib_id, base_path, force=False):
+        self._probe_token += 1
+        token = self._probe_token
+        self._set_net_status({"base_path": base_path, "remote": True,
+                               "checking": True, "offline": False})
+        # 信号载体挂在页面（GUI 线程）上 → 结果会排队回到 GUI 线程再刷新 UI
+        signals = _ProbeSignals(self)
+        self._probe_signals = signals
+        signals.probe_done.connect(self._on_probe_done)
+        task = _MappingProbeTask(self._model_path, token, lib_id, base_path,
+                                 force, signals)
+        QtCore.QThreadPool.globalInstance().start(task)
+
+    def _on_probe_done(self, token, lib_id, mappings, status):
+        if token != self._probe_token:
+            return  # 过期结果：用户已经切到别的库了
+        self._populate_mapping_table(mappings)
+        self._set_net_status(status)
+        self._mark_offline(lib_id, bool(status.get("offline")))
+
+    def _set_net_status(self, status):
+        if not status:
+            self.net_status_label.setText("")
+            self.net_status_label.setVisible(False)
+            return
+        base_path = status.get("base_path", "")
+        if status.get("checking"):
+            text = f"正在检测网络库 {base_path} …（对端较慢时可能需要几秒）"
+            color = self.theme_manager.colors.get("label_muted")
+        elif status.get("offline"):
+            text = (f"⚠ {base_path} 当前无法访问（对端未开机 / 共享不可用）。"
+                    f"已保留原有配置，未刷新该库的映射。")
+            color = self.theme_manager.colors.get("warning")
+        elif status.get("remote"):
+            text = f"已连接 {base_path}"
+            color = self.theme_manager.colors.get("label_muted")
+        else:
+            text = ""
+            color = self.theme_manager.colors.get("label_muted")
+        self.net_status_label.setStyleSheet(
+            f"color: {color}; background: transparent;"
+            f" font: {self._pt(9)}pt \"Microsoft YaHei UI\";"
+        )
+        self.net_status_label.setText(text)
+        self.net_status_label.setVisible(bool(text))
+
+    def _mark_offline(self, lib_id, offline):
+        if not lib_id:
+            return
+        if offline:
+            self._offline_ids.add(lib_id)
+        else:
+            self._offline_ids.discard(lib_id)
+        lib = self._find_lib_by_id(lib_id)
+        if not lib:
+            return
+        for i in range(self.library_list.count()):
+            item = self.library_list.item(i)
+            if item.data(QtCore.Qt.UserRole) == lib_id:
+                item.setText(self._row_text(lib, offline))
+                break
+
+    def _row_text(self, lib, offline=False):
+        prefix = "★ " if lib.get("is_default") else "  "
+        flag = "" if lib.get("enabled") else " (停用)"
+        if offline:
+            flag += " ⚠离线"
+        return f"{prefix}{lib.get('name', '(未命名)')}{flag}"
 
     def _update_status(self, libs):
         total = len(libs)

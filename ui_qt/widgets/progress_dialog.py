@@ -19,6 +19,8 @@ class ProgressDialog(FramelessDraggableDialog):
         _pt = _styles._pt if _styles else (lambda b: b)
         self._cancelled = False
         self._backgrounded = False
+        # 已进入完成态：此后 set_status / set_progress 一律忽略（见 mark_complete 注释）。
+        self._completed = False
         self._on_cancel_callback = None
         self._on_background_callback = None
         self._on_complete_callback = None
@@ -252,12 +254,20 @@ class ProgressDialog(FramelessDraggableDialog):
         已完成的任务不需要「取消」（任务都结束了，取消无意义且会触发二次确认），
         也不该再留「后台运行」（任务结束，后台运行毫无意义）。统一改成「关闭」按钮，
         用户看完结果点关闭即可。
+
+        收尾时置 _completed：set_status / set_progress 里的 processEvents() 会把
+        事件队列**嵌套**排干，on_done 在最内层跑完 mark_complete 后，外层帧才
+        继续执行各自的 set_status(旧进度文案) —— 没有这道门，完成文案会被最后
+        退回的进度文案盖掉，弹窗停在「正在查询第 63/72 个插件…」+ 满进度条 +
+        「关闭」按钮的观感，看着像卡死（2026-10-04 实测：检查早已完成，只是
+        文案被覆盖，用户以为停在最后一格）。
         """
         try:
             self.set_status(message)
             self.set_progress(1, maximum=1)
         except Exception:
             pass
+        self._completed = True
         # 隐藏取消按钮
         try:
             if self.btn_cancel is not None:
@@ -287,6 +297,10 @@ class ProgressDialog(FramelessDraggableDialog):
         self._on_complete_callback = callback
 
     def set_status(self, text):
+        # 完成态之后不再改文案：挡住 mark_complete 完成后外层重入帧的旧进度
+        # （见 mark_complete 注释）。重试/复用的弹窗请新建实例。
+        if self._completed:
+            return
         self.lbl_status.setText(text)
         # 状态文字换行后弹窗高度要跟着变，避免文字被切。adjustSize() 会
         # 按布局 minimumSizeHint 重设 size，受 setMaximumWidth 限制。
@@ -296,6 +310,8 @@ class ProgressDialog(FramelessDraggableDialog):
 
     def set_progress(self, value, maximum=100):
         """设置进度条。value 为 None 表示息式 (脉冲)模式。"""
+        if self._completed:
+            return
         if value is None or maximum <= 0:
             self.pbar.setRange(0, 0)
         else:

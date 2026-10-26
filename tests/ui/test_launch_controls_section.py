@@ -296,19 +296,23 @@ class TestBrowserSelection:
         assert browser_combo is not None, "Browser open mode combo not found"
 
     def test_has_select_browser_button(self, app_context, qtbot):
-        """Section should have a 'Select browser...' button."""
+        """浏览器选择按钮现在是紧凑的图标按钮（没有文字），按 objectName 定位。
+
+        背景：原来是一个写着「选择浏览器…」的长文本按钮，后来为了不挤占
+        启动控制区的横向空间改成 32px 宽的目录图标按钮（文字为空，只剩
+        tooltip）。所以不能再按文字找，改用 objectName 找，并校验图标与
+        tooltip 都在。
+        """
         from ui_qt.pages.launch_page import LaunchControlsSection
         from PyQt5.QtWidgets import QPushButton
         section = LaunchControlsSection(app_context)
         qtbot.addWidget(section)
-        
-        # Find button with "选择浏览器" or similar text
-        cpath_btn = None
-        for btn in section.findChildren(QPushButton):
-            if hasattr(btn, 'text') and ("浏览器" in btn.text() or "browser" in btn.text().lower()):
-                cpath_btn = btn
-                break
+
+        cpath_btn = section.findChild(QPushButton, "browserPathButton")
         assert cpath_btn is not None, "Select browser button not found"
+        assert not cpath_btn.icon().isNull(), "浏览器选择按钮应有目录图标"
+        assert "浏览器" in (cpath_btn.toolTip() or ""), \
+            f"浏览器选择按钮应有说明 tooltip，实际 {cpath_btn.toolTip()!r}"
 
 
 class TestAutoOpenBrowserCheckbox:
@@ -677,15 +681,25 @@ class TestButtonStateChanges:
             assert btn.isEnabled(), f"Button '{btn.text()}' should be enabled"
 
     def test_buttons_have_text(self, app_context, qtbot):
-        """Buttons should have text labels."""
+        """按钮要么有文字，要么是图标按钮。
+
+        紧凑图标按钮（如「选择浏览器程序」的目录图标）本来就没有文字，
+        它靠图标 + tooltip 表达含义，所以这里允许「无文字但有图标」。
+        """
         from ui_qt.pages.launch_page import LaunchControlsSection
         from PyQt5.QtWidgets import QPushButton
         section = LaunchControlsSection(app_context)
         qtbot.addWidget(section)
-        
+
         buttons = section.findChildren(QPushButton)
+        assert buttons, "启动控制区应该有按钮"
         for btn in buttons:
-            assert btn.text(), f"Button should have text label"
+            has_text = bool(btn.text())
+            has_icon = not btn.icon().isNull()
+            assert has_text or has_icon, (
+                f"Button '{btn.objectName()}' 既没有文字也没有图标，"
+                "用户会看到一个认不出来的空按钮"
+            )
 
 
 class TestFormGroup:

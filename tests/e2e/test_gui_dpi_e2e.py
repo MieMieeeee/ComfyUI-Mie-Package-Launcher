@@ -34,6 +34,10 @@ from pathlib import Path
 
 import pytest
 
+# e2e：会真的拉起子进程/打包产物，单次约 16s。
+# 日常回归用 `-m "not e2e"` 跳过。
+pytestmark = pytest.mark.e2e
+
 REPO_ROOT = Path(__file__).resolve().parent.parent.parent
 PYTHON = sys.executable
 
@@ -349,6 +353,7 @@ print('ALL_LAUNCHER_CHECKS_PASSED', flush=True)
 
 
 @pytest.mark.e2e
+@_skip_if_gui_unimportable
 def test_pyqtlauncher_build_and_theme_scale(tmp_path):
     """Build the real PyQtLauncher + switch themes + change scale, in a subprocess.
 
@@ -360,10 +365,13 @@ def test_pyqtlauncher_build_and_theme_scale(tmp_path):
         (the nav_style bug — .format() interprets {_pt(11)} as a lookup key).
       - Any widget/page that crashes during _setup_ui construction under scaling.
 
-    Uses sys.executable (the pytest Python). In the dev .venv this can build
-    PyQtLauncher; if the env can't (pre-existing ABI crash), the test reports
-    the real failure rather than skipping — because a launch-path regression
-    MUST surface.
+    Uses sys.executable (the pytest Python). 在 GUI 能正常起来的机器上，这个
+    用例是启动路径的硬防线：任何启动期崩溃都必须冒出来。
+
+    但在 sip ABI 不匹配的环境里，``import ui_qt.qt_app`` 会在类定义那一步
+    直接 access violation —— 进程死在**任何检查跑起来之前**，跟启动路径本
+    身无关。这种环境必须 skip（和本文件另外三个用例同一个处理），否则报出
+    的是一个「假回归」，把真正的回归信号淹掉。
     """
     env = os.environ.copy()
     env["QT_QPA_PLATFORM"] = "offscreen"

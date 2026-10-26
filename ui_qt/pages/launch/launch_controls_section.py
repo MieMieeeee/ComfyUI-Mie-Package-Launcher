@@ -373,6 +373,8 @@ class LaunchControlsSection(QtWidgets.QWidget):
         cpath_btn.setCursor(Qt.PointingHandCursor)
         cpath_btn.setFixedWidth(self._px(32))
         cpath_btn.setStyleSheet(self._get_input_style())
+        # 图标按钮没有文字，靠 objectName 定位（测试与样式表都用得上）
+        cpath_btn.setObjectName("browserPathButton")
         # 用一个紧凑的目录图标代替原来的"选择浏览器…"长文本按钮
         try:
             cpath_btn.setIcon(self.style().standardIcon(QtWidgets.QStyle.SP_DirOpenIcon))
@@ -499,34 +501,54 @@ class LaunchControlsSection(QtWidgets.QWidget):
             ))
         cb_console.setToolTip("启动时是否显示ComfyUI的命令行窗口（关闭后ComfyUI在后台运行）")
 
+        # ComfyUI 资源系统（Assets）。默认不勾 = 关闭。
+        # 之所以要显式给 --disable-assets：启动器一直带 --windows-standalone-build，
+        # 而那个开关会让 Assets 默认开启（ComfyUI 核心默认是关的）。实测代价：
+        # NAS / 网络盘模型库首次扫描要几分钟、硬盘狂响；同一目录第二个 ComfyUI
+        # 实例会因共用数据库直接退出。所以默认关、要用再勾。
+        cb_assets = QtWidgets.QCheckBox("启用资源系统")
+        if hasattr(self.app, 'enable_assets'):
+            cb_assets.setChecked(self.app.enable_assets.get())
+            cb_assets.toggled.connect(lambda v: (
+                self.app.enable_assets.set(v),
+                self._save_config()
+            ))
+        cb_assets.setToolTip(
+            "ComfyUI 0.40+ 的「资源系统」（侧边栏 Assets 面板：本地 SQLite 索引\n"
+            "models / input / output，支持浏览与持久化历史）。\n\n"
+            "默认关闭。开启后启动时会扫描模型目录建索引 —— 外置库在 NAS / 网络盘上\n"
+            "可能扫好几分钟且硬盘狂响；同一 ComfyUI 目录再起第二个实例会因共用数据库\n"
+            "直接退出。ComfyUI 需要 0.40 及以上才支持，旧版本此选项无效。"
+        )
+
         # 同一行 checkbox 起始点对齐：setMinimumWidth 不够（QCheckBox 内部 indicator 不一定严格左对齐）。
         # 改成把 cb 包到 fixed-width 容器 + AlignLeft，强制 indicator 落在容器左边缘。
-        _opt_fm = QtGui.QFontMetrics(self.font())
-        _opt_max_w = max(_opt_fm.horizontalAdvance(cb.text()) for cb in
-                         (cb_fast, cb_fast_disk, cb_disable_pinned_memory, cb_dynamic_vram, cb_api, cb_nodes, cb_console))
-        _opt_uniform_w = _opt_max_w + 50  # 30=indicator+4 padding 太小，
-                                                 # 最长 label "显示ComfyUI命令行窗口" 末尾被裁。加大到 50。
+        # 容器统一宽度由 _recompute_option_box_widths() 按 QSS 渲染字体计算，
+        # 构造时一次 + update_theme（主题切换 / set_scale）时重算。
+        self._option_checkboxes = [
+            cb_fast, cb_fast_disk, cb_disable_pinned_memory,
+            cb_dynamic_vram, cb_api, cb_nodes, cb_assets, cb_console,
+        ]
 
         def _align_wrap(cb):
             box = QtWidgets.QWidget()
-            box.setFixedWidth(_opt_uniform_w)
             lay = QtWidgets.QHBoxLayout(box)
             lay.setContentsMargins(0, 0, 0, 0)
             lay.setSpacing(0)
             lay.addWidget(cb, 0, Qt.AlignLeft | Qt.AlignVCenter)
             return box
 
+        self._option_boxes = [_align_wrap(cb) for cb in self._option_checkboxes]
+        self._recompute_option_box_widths()
+
         hbox_opts_row1 = QtWidgets.QHBoxLayout()
-        hbox_opts_row1.addWidget(_align_wrap(cb_fast))
-        hbox_opts_row1.addWidget(_align_wrap(cb_fast_disk))
-        hbox_opts_row1.addWidget(_align_wrap(cb_disable_pinned_memory))
-        hbox_opts_row1.addWidget(_align_wrap(cb_dynamic_vram))
+        for box in self._option_boxes[:4]:
+            hbox_opts_row1.addWidget(box)
         hbox_opts_row1.addStretch(1)
 
         hbox_opts_row2 = QtWidgets.QHBoxLayout()
-        hbox_opts_row2.addWidget(_align_wrap(cb_api))
-        hbox_opts_row2.addWidget(_align_wrap(cb_nodes))
-        hbox_opts_row2.addWidget(_align_wrap(cb_console))
+        for box in self._option_boxes[4:]:
+            hbox_opts_row2.addWidget(box)
         hbox_opts_row2.addStretch(1)
 
         form_layout.addLayout(hbox_opts_row1, 4, 0, 1, 4)
@@ -574,6 +596,40 @@ class LaunchControlsSection(QtWidgets.QWidget):
             (self._gpu_combo, "setMinimumWidth", 220),
             (self._cpath_btn, "setFixedWidth", 32),
         ]
+
+    # 与全局 QSS（qt_app._apply_theme / theme_styles.content_style_*）中
+    # QRadioButton/QCheckBox 的字体保持同源；QSS 改字体时这里要一起动。
+    _OPT_FONT_FAMILY = "Microsoft YaHei UI"
+
+    def _recompute_option_box_widths(self):
+        """按 checkbox 实际渲染字体重算 7 个对齐容器的统一固定宽度。
+
+        旧实现用 QFontMetrics(self.font()) 量宽，但样式表字体不写入
+        QWidget.font()——默认字体 ≠ QSS 渲染字体（_pt(10)pt YaHei），
+        scale>1 时 7 个 label 全部裁字（旧 +50 经验余量只在默认字体恰好
+        接近渲染字体且 scale=1 时碰巧够）。改为显式按 QSS 同款字体算
+        文本宽 + indicator/spacing/余量，并与已应用 QSS 后的 sizeHint
+        取大者兜底。_setup_ui 与 update_theme（含 set_scale 路径）调用。
+        """
+        cbs = getattr(self, "_option_checkboxes", None)
+        boxes = getattr(self, "_option_boxes", None)
+        if not cbs or not boxes:
+            return
+        try:
+            font = QtGui.QFont(self._OPT_FONT_FAMILY)
+            font.setPointSize(self._pt(10))
+            fm = QtGui.QFontMetrics(font)
+            text_w = max(fm.horizontalAdvance(cb.text()) for cb in cbs)
+            # indicator(_px 20) + QSS spacing(_px 6) + 样式边缘余量(_px 8)
+            w = text_w + self._px(20) + self._px(6) + self._px(8)
+            try:
+                w = max(w, max(cb.sizeHint().width() for cb in cbs))
+            except Exception:
+                pass
+            for box in boxes:
+                box.setFixedWidth(w)
+        except Exception:
+            pass
 
     def _get_label_color(self):
         """获取标签颜色"""
@@ -678,5 +734,7 @@ class LaunchControlsSection(QtWidgets.QWidget):
                 pass
 
         # DPI 变化时重算尺寸 + 重建阴影（消除 QGraphicsDropShadowEffect 缓存残影）
+        # + 重算 checkbox 对齐容器宽度（scale 变化 → QSS 字体变大）
         self._reapply_dpi_sizes()
+        self._recompute_option_box_widths()
         self._apply_shadow()

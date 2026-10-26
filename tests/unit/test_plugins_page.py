@@ -22,6 +22,46 @@ def qt_app():
     yield app
 
 
+@pytest.fixture(autouse=True)
+def _destroy_leftover_widgets(qt_app):
+    """每个用例结束后确定性销毁遗留的顶层 widget（仿 qtbot 的托管清理）。
+
+    背景：本文件的 PluginsPage 都是无 parent 的顶层 widget，也不经 qtbot
+    注册——销毁全靠 Python GC 在任意时机兜底。pytest-qt 在每个用例后调
+    QApplication.processEvents()，与「迟到析构的 widget + 仍挂着的事件」
+    叠加，在本机 offscreen PyQt5/Py3.12 组合下会腐蚀堆（0xc0000374，
+    连跑到 ~25 个用例时进程直接崩、exit 127）。这是 pytest-qt 文档明确
+    要求 widget 托管（qtbot.addWidget）的原因；本文件历史写法没走 qtbot，
+    这里用 teardown 统一 close + deleteLater + 冲刷事件，效果等价且不用
+    改 58 个用例。
+
+    注意：pytestqt 的 -p no:pytestqt 禁不掉本插件（注册名是 pytest-qt），
+    别用那个 flag「验证」——曾经因此误判「与 pytest-qt 无关」。
+    """
+    yield
+    import gc
+
+    app = QtWidgets.QApplication.instance()
+    if app is None:
+        return
+    # 先收 Python 引用（让 wrapper 析构发生在受控点），再处理 posted events
+    gc.collect()
+    for w in list(app.topLevelWidgets()):
+        try:
+            w.close()
+        except Exception:
+            pass
+    # deleteLater + 立刻冲刷 DeferredDelete，不让删除动作跨用例漂移
+    for w in list(app.topLevelWidgets()):
+        w.deleteLater()
+    try:
+        QtCore.QCoreApplication.sendPostedEvents(None, QtCore.QEvent.DeferredDelete)
+    except Exception:
+        pass
+    app.processEvents()
+    gc.collect()
+
+
 def _plugin(name, is_git=True, version="abc1234", remote="https://github.com/x/y",
             enabled=True, dir_name=None):
     """造一个插件 dict（含新字段 dir_name / enabled）。默认 dir_name=name。"""
@@ -86,6 +126,66 @@ def test_populate_marks_disabled_item_with_suffix_and_keeps_name(qt_app):
     assert "已禁用" in item.text()
     # plugin_names 返回纯 name（剥状态后缀）
     assert page.plugin_names() == ["MieNodes"]
+
+
+# ---- 全选 / 取消全选（用户反馈：60 个插件一个个勾太累）----
+
+def test_toggle_select_all_checks_every_item(qt_app):
+    from ui_qt.pages.plugins_page import PluginsPage
+
+    page = PluginsPage(theme_manager=_stub_theme())
+    page.populate([_plugin("A"), _plugin("B"), _plugin("C")])
+    page.toggle_select_all()
+    assert sorted(page.selected_dir_names()) == ["A", "B", "C"]
+
+
+def test_toggle_select_all_twice_unchecks_all(qt_app):
+    """再点一次取消全选（文案此时应变成「取消全选」）。"""
+    from ui_qt.pages.plugins_page import PluginsPage
+
+    page = PluginsPage(theme_manager=_stub_theme())
+    page.populate([_plugin("A"), _plugin("B")])
+    page.toggle_select_all()
+    assert page.select_all_btn.text() == "取消全选"
+    page.toggle_select_all()
+    assert page.selected_dir_names() == []
+    assert page.select_all_btn.text() == "全选"
+
+
+def test_select_all_button_visible_with_nothing_checked(qt_app):
+    """未勾选时全选按钮也必须可见——否则用户没法用它做第一次全选。"""
+    from ui_qt.pages.plugins_page import PluginsPage
+
+    page = PluginsPage(theme_manager=_stub_theme())
+    page.populate([_plugin("A"), _plugin("B")])
+    assert page.list_widget.item(0).checkState() == QtCore.Qt.Unchecked
+    assert page.select_all_btn.isVisible() or not page.isVisible()
+
+
+def test_selection_survives_populate_after_update(qt_app):
+    """回归：更新后 populate 会换掉整个 cache，勾选状态必须按 dir_name 继承回来。"""
+    from ui_qt.pages.plugins_page import PluginsPage
+
+    page = PluginsPage(theme_manager=_stub_theme())
+    page.populate([_plugin("A"), _plugin("B"), _plugin("C")])
+    page.list_widget.item(0).setCheckState(QtCore.Qt.Checked)
+    page.list_widget.item(1).setCheckState(QtCore.Qt.Checked)
+    # 模拟更新后的刷新（list_installed 返回全新 dict，不带 _sel）
+    page.populate([_plugin("A"), _plugin("B"), _plugin("C")], preserve_outdated=True)
+    assert sorted(page.selected_dir_names()) == ["A", "B"]
+
+
+def test_toggle_select_all_only_affects_visible_list(qt_app):
+    """只作用于当前可见列表（Tab 筛选/搜索后不应把看不见的也勾上）。"""
+    from ui_qt.pages.plugins_page import PluginsPage
+
+    page = PluginsPage(theme_manager=_stub_theme())
+    page.populate([_plugin("A"), _plugin("B")])
+    # 模拟筛选后只剩 1 项
+    page._render_from_list([p for p in page._all_plugins_cache
+                            if p["dir_name"] == "A"], preserve_outdated=False)
+    page.toggle_select_all()
+    assert page.selected_dir_names() == ["A"]
 
 
 # ---- 原有三按钮信号 ----
@@ -210,6 +310,167 @@ def test_mark_outdated_moves_outdated_to_top(qt_app):
     order = [page._item_name(page.list_widget.item(i)) for i in range(page.list_widget.count())]
     # Behind1/Behind2 在前（保留 name 排序），Alpha/Zeta 在后
     assert order == ["Behind1", "Behind2", "Alpha", "Zeta"], f"重排顺序错: {order}"
+
+
+# ---- 远端日期列：检查更新后整表可见（不只落后插件）----
+
+def test_remote_date_kept_for_all_rows_after_check(qt_app):
+    """回归（2026-10-04 用户反馈）：检查后「远端日期」列整表可见。
+
+    以前只在 outdated 插件上填远端日期，用户把唯一可更新的插件更新完之后整列全是
+    —，看不出任何插件的远端停在哪天。delegate 对 outdated 用强调色、其余弱化色。
+    """
+    from ui_qt.pages.plugins_page import PluginsPage, _REMOTE_DATE_ROLE
+
+    page = PluginsPage(theme_manager=_stub_theme())
+    page.populate([_plugin("Alpha"), _plugin("Beta")])
+    page.mark_outdated(["Alpha"],
+                       {"Alpha": "2025-06-01", "Beta": "2025-05-20"})
+
+    dates = {}
+    for i in range(page.list_widget.count()):
+        it = page.list_widget.item(i)
+        dates[page._item_name(it)] = it.data(_REMOTE_DATE_ROLE)
+    assert dates == {"Alpha": "2025-06-01", "Beta": "2025-05-20"}, f"远端日期没整表填充: {dates}"
+
+
+def test_remote_date_survives_repopulate_after_update(qt_app):
+    """更新后刷新（preserve_outdated）不能把「远端日期」列清空——那正是用户看到的
+    「更新完成、可更新 0、远端日期全 —」。"""
+    from ui_qt.pages.plugins_page import PluginsPage, _REMOTE_DATE_ROLE
+
+    page = PluginsPage(theme_manager=_stub_theme())
+    plugins = [_plugin("Alpha"), _plugin("Beta")]
+    page.populate(plugins)
+    page.mark_outdated(["Alpha"], {"Alpha": "2025-06-01", "Beta": "2025-05-20"})
+    page.repopulate_preserving_outdated([_plugin("Alpha"), _plugin("Beta")],
+                                       done_names={"Alpha"})
+
+    dates = {}
+    for i in range(page.list_widget.count()):
+        it = page.list_widget.item(i)
+        dates[page._item_name(it)] = it.data(_REMOTE_DATE_ROLE)
+    assert dates == {"Alpha": "2025-06-01", "Beta": "2025-05-20"}, \
+        f"更新后远端日期被清空: {dates}"
+
+
+def test_repopulate_after_update_keeps_current_filter_and_search(qt_app):
+    """回归（2026-10-04 反馈）：更新后不该把用户踢回「全部」Tab、清空搜索词。
+
+    用户正是在筛选视图里选插件更新的，刷完跳走既突兀，又看不到
+    repopulate_preserving_outdated 特意保留的「还剩哪些落后」。
+    """
+    from ui_qt.pages.plugins_page import PluginsPage
+
+    page = PluginsPage(theme_manager=_stub_theme())
+    page.populate([_plugin("Alpha"), _plugin("Beta"), _plugin("Gamma")])
+    page.mark_outdated(["Alpha", "Beta"], {"Alpha": "2025-06-01", "Beta": "2025-05-20"})
+    page._set_filter("outdated")
+    page._search_edit.setText("Beta")
+
+    page.repopulate_preserving_outdated([_plugin("Alpha"), _plugin("Beta"),
+                                         _plugin("Gamma")],
+                                       done_names={"Alpha"})
+
+    assert page._current_filter == "outdated", \
+        f"更新后应留在原 Tab，实际 {page._current_filter}"
+    assert page._search_edit.text() == "Beta", \
+        f"更新后搜索词不该被清空，实际 {page._search_edit.text()!r}"
+
+
+def test_full_repopulate_still_resets_filter_and_search(qt_app):
+    """对照组：全量 populate（刷新列表按钮）仍重置 Tab + 清搜索——那是「重新开始」的语义。"""
+    from ui_qt.pages.plugins_page import PluginsPage
+
+    page = PluginsPage(theme_manager=_stub_theme())
+    page.populate([_plugin("Alpha"), _plugin("Beta")])
+    page._set_filter("git")
+    page._search_edit.setText("Beta")
+
+    page.populate([_plugin("Alpha"), _plugin("Beta")])
+
+    assert page._current_filter == "all", f"全量刷新应回「全部」，实际 {page._current_filter}"
+    assert page._search_edit.text() == ""
+
+
+# ---- repopulate_preserving_outdated：更新后保留 🔄，不要求重新检查 ----
+
+def test_repopulate_keeps_outdated_mark_for_untouched_plugins(qt_app):
+    """更新指定插件后刷新：更新成功的摘掉 🔄，没动的保留（用户不用重新点「检查更新」）。"""
+    from ui_qt.pages.plugins_page import PluginsPage
+
+    page = PluginsPage(theme_manager=_stub_theme())
+    page.populate([_plugin("Alpha"), _plugin("Beta"), _plugin("Gamma")])
+    page.mark_outdated(["Alpha", "Beta", "Gamma"])
+    # 模拟「更新了 Alpha/Beta 成功，Gamma 仍落后」后的刷新
+    page.repopulate_preserving_outdated(
+        [_plugin("Alpha"), _plugin("Beta"), _plugin("Gamma")],
+        done_names={"Alpha", "Beta"})
+    assert page._outdated_dir_names == {"Gamma"}, \
+        f"只应保留 Gamma，实际 {page._outdated_dir_names}"
+
+
+def test_repopulate_clears_outdated_role_and_text_on_items(qt_app):
+    """回归：已更新插件的 item role 与文本都要还原（之前只写 True 不写 False，
+    且没人复原「🔄 … [可更新]」文本 → 更新完仍显示可更新、还挂在顶部）。"""
+    from ui_qt.pages.plugins_page import PluginsPage, _OUTDATED_ROLE
+
+    page = PluginsPage(theme_manager=_stub_theme())
+    page.populate([_plugin("Alpha"), _plugin("Beta"), _plugin("Gamma")])
+    page.mark_outdated(["Alpha", "Beta", "Gamma"])
+    page.repopulate_preserving_outdated(
+        [_plugin("Alpha"), _plugin("Beta"), _plugin("Gamma")],
+        done_names={"Alpha", "Beta"})
+
+    roles = {}
+    texts = {}
+    for i in range(page.list_widget.count()):
+        it = page.list_widget.item(i)
+        roles[page._item_name(it)] = bool(it.data(_OUTDATED_ROLE))
+        texts[page._item_name(it)] = it.text()
+    # role：更新的两个必须 False，仍落后的 True
+    assert roles == {"Gamma": True, "Alpha": False, "Beta": False}, f"role 不对: {roles}"
+    # 文本：还原成普通名，不残留「可更新」
+    assert "可更新" not in texts["Alpha"] and "可更新" not in texts["Beta"], \
+        f"已更新插件文本未还原: {texts}"
+    assert "可更新" in texts["Gamma"]
+    # 仍落后的置顶，已更新的排到后面
+    order = [page._item_name(page.list_widget.item(i)) for i in range(page.list_widget.count())]
+    assert order[0] == "Gamma", f"可更新项应置顶，实际 {order}"
+
+
+def test_repopulate_drops_ghost_marks_for_removed_plugins(qt_app):
+    """插件被卸载/重装换名后，旧 dir_name 的标记不该继续挂着（列表里已不存在）。"""
+    from ui_qt.pages.plugins_page import PluginsPage
+
+    page = PluginsPage(theme_manager=_stub_theme())
+    page.populate([_plugin("Alpha"), _plugin("Beta")])
+    page.mark_outdated(["Alpha", "Beta"])
+    # Beta 在刷新时已不在列表（被卸载）
+    page.repopulate_preserving_outdated([_plugin("Alpha")], done_names=set())
+    assert page._outdated_dir_names == {"Alpha"}, \
+        f"幽灵标记应被清掉，实际 {page._outdated_dir_names}"
+
+
+def test_repopulate_without_prior_check_falls_back_to_full_populate(qt_app):
+    """没做过检查时退化为普通 populate，不报错。"""
+    from ui_qt.pages.plugins_page import PluginsPage
+
+    page = PluginsPage(theme_manager=_stub_theme())
+    page.repopulate_preserving_outdated([_plugin("Alpha")], done_names={"Alpha"})
+    assert page.list_widget.count() == 1
+
+
+def test_populate_default_clears_outdated(qt_app):
+    """默认 populate（点「刷新」）仍是全量清空标记——不改变既有语义。"""
+    from ui_qt.pages.plugins_page import PluginsPage
+
+    page = PluginsPage(theme_manager=_stub_theme())
+    page.populate([_plugin("Alpha")])
+    page.mark_outdated(["Alpha"])
+    assert page._outdated_dir_names == {"Alpha"}
+    page.populate([_plugin("Alpha")])  # preserve_outdated 默认 False
+    assert page._outdated_dir_names == set()
 
 
 # ---- PluginController：编排（page 信号 → PluginService），可测 ----
@@ -487,9 +748,142 @@ def test_controller_check_updates_emits_outdated_reported(qt_app):
 
     page.check_updates_btn.click()
     svc.check_updates.assert_called_once()
-    svc.remote_dates.assert_called_once_with(["Behind", "MieNodes.disabled"])
+    # include_all_git=True：远端日期对整表取，列表「远端日期」列不该只有落后插件有值
+    svc.remote_dates.assert_called_once_with(["Behind", "MieNodes.disabled"],
+                                              include_all_git=True)
     assert reported == [(["Behind", "MieNodes.disabled"],
                          {"Behind": "2025-06-01", "MieNodes.disabled": "2025-05-20"})]
+
+
+# ---- 「检查中」状态药丸（未检查 / 检查中 / 有更新 / 无更新 四态）----
+
+def test_set_checking_marks_all_items(qt_app):
+    """检查进行中：所有 item 打上 _CHECKING_ROLE，delegate 据此画「检查中…」。"""
+    from ui_qt.pages.plugins_page import PluginsPage, _CHECKING_ROLE
+
+    page = PluginsPage(theme_manager=_stub_theme())
+    page.populate([_plugin("A"), _plugin("B")])
+    page.set_checking(True)
+    assert page._checking is True
+    assert all(bool(page.list_widget.item(i).data(_CHECKING_ROLE))
+               for i in range(page.list_widget.count()))
+    page.set_checking(False)
+    assert all(not page.list_widget.item(i).data(_CHECKING_ROLE)
+               for i in range(page.list_widget.count()))
+
+
+def test_mark_outdated_clears_checking_state(qt_app):
+    """检查出结果后「检查中」必须收掉（否则列表永远停在那个药丸）。"""
+    from ui_qt.pages.plugins_page import PluginsPage, _CHECKING_ROLE
+
+    page = PluginsPage(theme_manager=_stub_theme())
+    page.populate([_plugin("A"), _plugin("B")])
+    page.set_checking(True)
+    page.mark_outdated(["A"])
+    assert all(not page.list_widget.item(i).data(_CHECKING_ROLE)
+               for i in range(page.list_widget.count()))
+
+
+def test_checking_state_survives_filter_refresh(qt_app):
+    """检查期间切 Tab / 搜索过滤导致列表重建，「检查中」要保持。"""
+    from ui_qt.pages.plugins_page import PluginsPage, _CHECKING_ROLE
+
+    page = PluginsPage(theme_manager=_stub_theme())
+    page.populate([_plugin("A"), _plugin("B")])
+    page.mark_outdated(["A", "B"])
+    page.set_checking(True)
+    page._render_from_list(list(page._all_plugins_cache), preserve_outdated=True)
+    assert all(bool(page.list_widget.item(i).data(_CHECKING_ROLE))
+               for i in range(page.list_widget.count()))
+
+
+def test_controller_check_updates_clears_checking_on_exception(qt_app):
+    """检查抛异常也要收掉「检查中」，且 on_done 必达（2026-10-04：此前异常直接
+    raise 出线程被吞，弹窗永久冻在最后一格进度）。"""
+    from ui_qt.pages.plugins_page import PluginsPage, PluginController, _CHECKING_ROLE
+
+    page = PluginsPage(theme_manager=_stub_theme())
+    page.populate([_plugin("A")])
+    svc = MagicMock()
+    svc.check_updates.side_effect = RuntimeError("boom")
+    run_bg, post_ui = _sync_runner()
+    ctrl = PluginController(page, svc, run_bg, post_ui)
+
+    received = {}
+    ctrl.run_check_updates(on_done=lambda o, d, e=None: received.update(
+        outdated=o, dates=d, error=e))
+    # 不再向外抛（此前 pytest.raises(RuntimeError)）——异常走 on_done 的 error 通道
+    assert "RuntimeError: boom" in (received.get("error") or "")
+    assert received.get("outdated") == [] and received.get("dates") == {}
+    assert all(not page.list_widget.item(i).data(_CHECKING_ROLE)
+               for i in range(page.list_widget.count()))
+
+
+def test_mark_outdated_resets_page_checking_flag(qt_app):
+    """mark_outdated（=检查出结果）必须复位页面级 _checking 标志。
+
+    _render_from_list（切 Tab/搜索的重渲染）用这个标志回填 item 的
+    _CHECKING_ROLE。原先只清 item 不清标志：调用方一旦漏调
+    set_checking(False)（qt_app on_done 曾因 NameError 漏调），切一次
+    Tab 全列表永久卡「检查中」。复位收敛到这里，不再依赖调用方记得关。
+    """
+    from ui_qt.pages.plugins_page import PluginsPage, _CHECKING_ROLE
+
+    page = PluginsPage(theme_manager=_stub_theme())
+    page.populate([_plugin("A"), _plugin("B")])
+    page.set_checking(True)
+    page.mark_outdated(["A"])
+    assert page._checking is False
+    assert all(not page.list_widget.item(i).data(_CHECKING_ROLE)
+               for i in range(page.list_widget.count()))
+
+
+def test_no_stuck_checking_after_tab_roundtrip_without_set_checking_false(qt_app):
+    """回归：检查完成但调用方漏调 set_checking(False)（qt_app on_done 曾因
+    NameError 漏调），用户切可更新 Tab 全选→取消全选→回全部 Tab，
+    可更新列不得卡「检查中…」，远端日期标记也不得丢（用户实测报告的场景）。
+    """
+    from ui_qt.pages.plugins_page import (PluginsPage, _CHECKING_ROLE,
+                                          _OUTDATED_ROLE, _REMOTE_DATE_ROLE)
+
+    page = PluginsPage(theme_manager=_stub_theme())
+    page.populate([_plugin(n) for n in ["A", "B", "C", "D", "E"]])
+    dates = {"A": "2026-10-01", "C": "2026-10-02"}
+    page.set_checking(True)
+    page.mark_outdated(["A", "C"], dates)  # 模拟 on_done：mark_outdated 正常执行
+    # ……而 set_checking(False) 这一行因 bug 没有执行（此处故意不调）
+
+    page._set_filter("outdated")
+    page.toggle_select_all()      # 全选
+    page.toggle_select_all()      # 取消全选
+    page._set_filter("all")       # 回「全部」Tab
+
+    for i in range(page.list_widget.count()):
+        item = page.list_widget.item(i)
+        dn = str(item.data(QtCore.Qt.UserRole + 1))
+        assert not item.data(_CHECKING_ROLE), f"{dn} 卡在「检查中」"
+        if dn in ("A", "C"):
+            assert item.data(_OUTDATED_ROLE) is True
+            assert item.data(_REMOTE_DATE_ROLE) == dates[dn], f"{dn} 远端日期丢失"
+        else:
+            assert not item.data(_OUTDATED_ROLE)
+
+
+def test_outdated_first_order_restored_after_tab_roundtrip(qt_app):
+    """切 Tab 一圈回来，可更新插件仍应置顶（mark_outdated 的重排不因
+    filter 重建列表而丢失），否则用户在列表顶部只看到普通插件。"""
+    from ui_qt.pages.plugins_page import PluginsPage
+
+    page = PluginsPage(theme_manager=_stub_theme())
+    page.populate([_plugin(n) for n in ["A", "B", "C", "D", "E"]])
+    page.mark_outdated(["B", "E"], {"B": "2026-10-01", "E": "2026-10-02"})
+    assert [str(page.list_widget.item(i).data(QtCore.Qt.UserRole + 1))
+            for i in range(2)] == ["B", "E"]  # mark_outdated 置顶
+
+    page._set_filter("outdated")
+    page._set_filter("all")
+    assert [str(page.list_widget.item(i).data(QtCore.Qt.UserRole + 1))
+            for i in range(2)] == ["B", "E"], "Tab 一圈回来置顶丢失"
 
 
 # ---- showEvent + set_loading_state + load_if_not_loaded（BackgroundLoader 集成）----
@@ -611,6 +1005,36 @@ def test_controller_run_update_selected_success_refreshes_and_calls_on_done(qt_a
     assert done_called == [True], "on_done 应被调一次"
 
 
+def test_controller_refreshes_list_before_reporting_done(qt_app):
+    """回归：更新完成后必须**先刷列表再报完成**。
+
+    用户反馈「更新完了没刷新界面，还是那 6 个」+「没有完成提示」。根因是刷新走
+    _post_to_ui（Qt 信号，异步）而 on_done 紧随其后同步发出，完成提示先于列表
+    刷新到达。本测试记录 on_done 时刻的列表状态，确保它已是刷新后的。
+    """
+    from ui_qt.pages.plugins_page import PluginsPage, PluginController
+
+    page = PluginsPage(theme_manager=_stub_theme())
+    svc = MagicMock()
+    svc.update_selected.return_value = {"updated": True, "log": "", "error": None}
+    svc.outdated_plugins.return_value = []
+    svc.list_installed.return_value = [_plugin("A"), _plugin("B")]
+    run_bg, post_ui = _sync_runner()
+    ctrl = PluginController(page, svc, run_bg, post_ui)
+
+    seen = {}
+
+    def on_done(ok, msg):
+        # on_done 触发时列表应该已经重建（count=2）
+        seen["count_at_done"] = page.list_widget.count()
+        seen["called"] = True
+
+    ctrl.run_update_selected(["A", "B"], on_done=on_done)
+    assert seen.get("called") is True, "on_done 应被调"
+    assert seen["count_at_done"] == 2, \
+        f"on_done 时列表应已刷新（2 项），实际 {seen['count_at_done']} —— 完成提示跑在刷新前面了"
+
+
 def test_controller_run_update_selected_partial_failure_emits_force_update_and_calls_on_done(qt_app):
     """部分失败: force_update_suggested 发出 + on_done 仍然调 (让 qt_app 收尾弹窗)."""
     from ui_qt.pages.plugins_page import PluginsPage, PluginController
@@ -633,6 +1057,51 @@ def test_controller_run_update_selected_partial_failure_emits_force_update_and_c
     assert done_called == [True], "on_done 仍应在 finally 调, 让 qt_app 收尾"
 
 
+def test_controller_reports_failure_when_update_selected_returns_error(qt_app):
+    """回归（review H4）：update_selected 返回 error 时不能报「更新完成」。
+
+    Manager 未安装 / cm-cli 非零退出时 svc 返回 error 非空；原先返回值被直接
+    丢弃，ok 仍为 True，用户看到「更新完成」但插件一个没升。
+    """
+    from ui_qt.pages.plugins_page import PluginsPage, PluginController
+
+    page = PluginsPage(theme_manager=_stub_theme())
+    svc = MagicMock()
+    svc.update_selected.return_value = {
+        "updated": False, "up_to_date": False, "log": "",
+        "error": "cm-cli update 退出码 1"}
+    svc.list_installed.return_value = [_plugin("A"), _plugin("B")]
+    run_bg, post_ui = _sync_runner()
+    ctrl = PluginController(page, svc, run_bg, post_ui)
+
+    got = {}
+    ctrl.run_update_selected(["A", "B"],
+                             on_done=lambda ok, msg: got.update(ok=ok, msg=msg))
+    assert got["ok"] is False, "svc 返回 error 时必须报失败"
+    assert "cm-cli update 退出码 1" in got["msg"]
+    # 什么都没升成功 → 🔄 标记全量保留
+    assert page._outdated_dir_names == {"A", "B"}
+
+
+def test_controller_run_update_selected_keeps_marks_on_success(qt_app):
+    """成功路径：已更新的摘掉 🔄，其余保留。"""
+    from ui_qt.pages.plugins_page import PluginsPage, PluginController
+
+    page = PluginsPage(theme_manager=_stub_theme())
+    svc = MagicMock()
+    svc.update_selected.return_value = {
+        "updated": True, "up_to_date": False, "log": "", "error": None}
+    svc.outdated_plugins.return_value = ["B"]   # A 升好了，B 仍落后
+    svc.list_installed.return_value = [_plugin("A"), _plugin("B")]
+    run_bg, post_ui = _sync_runner()
+    ctrl = PluginController(page, svc, run_bg, post_ui)
+
+    # 用户先点过「检查更新」，A/B 都被标记可更新
+    page.mark_outdated(["A", "B"])
+    ctrl.run_update_selected(["A", "B"], on_done=lambda ok, msg: None)
+    assert page._outdated_dir_names == {"B"}, "只剩仍落后的 B 保留标记"
+
+
 def test_controller_run_update_selected_swallows_svc_exception_still_calls_on_done(qt_app):
     """svc.update_selected 抛 -> 兜住, on_done 仍调, 不冒泡 (不阻断退出/后续操作)."""
     from ui_qt.pages.plugins_page import PluginsPage, PluginController
@@ -653,3 +1122,29 @@ def test_controller_run_update_selected_swallows_svc_exception_still_calls_on_do
 
 if __name__ == "__main__":
     pytest.main([__file__, "-v"])
+
+
+def test_controller_update_selected_streams_progress_to_ui(qt_app):
+    """run_update_selected 的 on_progress 透传：service 层流式回调经 post_to_ui
+    派回 UI 线程（驱动进度弹窗 k/N 进度条）。"""
+    from ui_qt.pages.plugins_page import PluginsPage, PluginController
+
+    page = PluginsPage(theme_manager=_stub_theme())
+    page.populate([_plugin("A"), _plugin("B")])
+    svc = MagicMock()
+    svc.update_selected.return_value = {"updated": True, "up_to_date": False,
+                                        "log": "", "error": None}
+    svc.outdated_plugins.return_value = []
+    svc.list_installed.return_value = []
+    run_bg, post_ui = _sync_runner()
+    ctrl = PluginController(page, svc, run_bg, post_ui)
+
+    got = []
+    ctrl.run_update_selected(["A", "B"], on_done=None,
+                             on_progress=lambda c, t, n: got.append((c, t, n)))
+    kw = svc.update_selected.call_args.kwargs
+    assert callable(kw.get("on_progress")), "service 层应收到 on_progress 回调"
+    # 模拟 service 在工作线程里发逐插件进度（post_to_ui 同步执行，直达 UI 侧）
+    kw["on_progress"](1, 2, "A")
+    kw["on_progress"](2, 2, "B")
+    assert got == [(1, 2, "A"), (2, 2, "B")]

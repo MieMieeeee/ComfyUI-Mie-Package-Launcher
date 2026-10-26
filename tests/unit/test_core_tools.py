@@ -159,7 +159,14 @@ class TestCoreTools(unittest.TestCase):
         self.assertIn("Comfy UI", str(run_cwd))
 
     def test_probe_find_pids_by_port_netstat(self):
-        import types
+        """netstat 兜底路径的解析（psutil 关闭时才走）。
+
+        密闭性（2026-10-03 修复）：本机 8188 真有 ComfyUI 在跑时 psutil 快路径
+        返回真实 PID，压过 fake netstat 的 1234 → 假失败。测试意图是 netstat
+        解析，必须关掉 psutil；顺带把裸赋值 run_hidden 换成可恢复的 patch
+        （原写法永久污染 core.probe.run_hidden，泄漏给后续所有用例）。
+        """
+        from unittest import mock
         from core import probe
 
         # monkeypatch run_hidden to simulate netstat output
@@ -169,17 +176,22 @@ class TestCoreTools(unittest.TestCase):
                 "\n TCP    127.0.0.1:8188     0.0.0.0:0      LISTENING       1234\n"
             )
 
-        probe.run_hidden = lambda *a, **k: R()
-        pids = probe.find_pids_by_port_safe("8188")
+        with mock.patch.object(probe, "psutil", None), \
+             mock.patch.object(probe, "run_hidden", lambda *a, **k: R()):
+            pids = probe.find_pids_by_port_safe("8188")
         self.assertIn(1234, pids)
 
     def test_probe_is_http_reachable_returns_false_when_urlopen_fails(self):
-        """当端口上无服务监听时 urlopen 失败，is_http_reachable 返回 False。
+        """当端口上无服务监听时探测失败，is_http_reachable 返回 False。
 
         历史说明：原 test_probe_is_http_reachable_fallback 期望 PID 兜底分支
         （socket.create_connection / find_pids_by_port_safe）触发时返回 True。
         但 core.probe.is_http_reachable 已简化为纯 urlopen 探测（urlopen 失败即
         返回 False），兜底路径被移除。详见 notes/codex_test_repair_report.md 「#5」节。
+
+        密闭性（2026-10-03 修复）：is_http_reachable 优先走模块级缓存的
+        _NO_PROXY_OPENER.open（绕代理），只 patch urlopen 拦不到主路径——本机
+        8188 真有 ComfyUI 在跑时会拿到 True → 假失败。必须 patch _NO_PROXY_OPENER。
         """
         from core import probe
 
@@ -187,11 +199,15 @@ class TestCoreTools(unittest.TestCase):
             def __init__(self):
                 self.custom_port = _Var("8188")
 
-        # 让 urlopen 直接抛错，模拟端口无服务
-        with mock.patch.object(
-            probe, "urlopen",
-            side_effect=lambda *_a, **_k: (_ for _ in ()).throw(OSError("Connection refused")),
-        ):
+        class _RaisingOpener:
+            def open(self, *_a, **_k):
+                raise OSError("Connection refused")
+
+        with mock.patch.object(probe, "_NO_PROXY_OPENER", _RaisingOpener()), \
+             mock.patch.object(
+                 probe, "urlopen",
+                 side_effect=lambda *_a, **_k: (_ for _ in ()).throw(OSError("Connection refused")),
+             ):
             self.assertFalse(probe.is_http_reachable(A()))
 
     def test_kill_pids_windows(self):

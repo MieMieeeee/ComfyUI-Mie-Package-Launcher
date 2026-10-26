@@ -306,44 +306,29 @@ def test_tray_menu_has_quit_and_quit_and_stop_actions(qt_app):
     assert "退出并关闭 ComfyUI" in texts
 
 
-def test_tray_quit_and_stop_disabled_when_comfyui_not_running(qt_app):
-    """ComfyUI 未运行时，"退出并关闭 ComfyUI" 应保持禁用。"""
+def test_tray_quit_and_stop_always_enabled(qt_app):
+    """issue #108：「退出并关闭 ComfyUI」永远可点——ComfyUI 未跑时禁用会让
+    用户以为菜单坏了（点了没反应）。未跑时点击=直接退出（qt_app 场景 1b 幂等），
+    状态推送（update_comfyui_status）不得联动可用性。
+    """
     from ui_qt.widgets import tray_icon as ti
 
     fake_menu = _FakeMenu()
     app_stub = type("A", (), {"logger": None})()
 
-    with patch.object(ti.QtWidgets, "QSystemTrayIcon", _FakeTray), \
-         patch.object(ti.QtWidgets, "QMenu", lambda: fake_menu):
+    with patch.object(ti.QtWidgets, "QSystemTrayIcon", _FakeTray),          patch.object(ti.QtWidgets, "QMenu", lambda: fake_menu):
         tray = ti.LauncherTray(app=app_stub, theme_manager=None, parent=None)
         tray.init()
     stop_action = next(a for a in fake_menu.actions if a.text() == "退出并关闭 ComfyUI")
-    assert stop_action.isEnabled() is False
-
-
-def test_tray_quit_and_stop_enables_when_comfyui_running(qt_app):
-    """ComfyUI 运行中时，"退出并关闭 ComfyUI" 应启用。"""
-    from ui_qt.widgets import tray_icon as ti
-
-    fake_menu = _FakeMenu()
-    app_stub = type("A", (), {"logger": None})()
-
-    with patch.object(ti.QtWidgets, "QSystemTrayIcon", _FakeTray), \
-         patch.object(ti.QtWidgets, "QMenu", lambda: fake_menu):
-        tray = ti.LauncherTray(app=app_stub, theme_manager=None, parent=None)
-        tray.init()
-    stop_action = next(a for a in fake_menu.actions if a.text() == "退出并关闭 ComfyUI")
+    assert stop_action.isEnabled() is True      # 初始即可点（不再禁用）
     tray.update_comfyui_status(True)
     assert stop_action.isEnabled() is True
     tray.update_comfyui_status(False)
-    assert stop_action.isEnabled() is False
+    assert stop_action.isEnabled() is True      # 状态推送不再联动可用性
 
 
-def test_tray_about_to_show_disables_stop_when_not_running(qt_app):
-    """菜单弹出（aboutToShow）据 is_running_fast 复核：未跑时「退出并关闭」必置灰。
-
-    回归：即便动作此前被异步推送误置为 enabled，弹出时也要纠正回来。
-    """
+def test_tray_about_to_show_keeps_stop_enabled(qt_app):
+    """菜单弹出（aboutToShow）刷新状态文案，但不得禁用「退出并关闭」项（#108）。"""
     from ui_qt.widgets import tray_icon as ti
 
     fake_menu = _FakeMenu()
@@ -352,38 +337,16 @@ def test_tray_about_to_show_disables_stop_when_not_running(qt_app):
         "process_manager": type("PM", (), {"is_running_fast": lambda self: False})(),
     })()
 
-    with patch.object(ti.QtWidgets, "QSystemTrayIcon", _FakeTray), \
-         patch.object(ti.QtWidgets, "QMenu", lambda: fake_menu):
+    with patch.object(ti.QtWidgets, "QSystemTrayIcon", _FakeTray),          patch.object(ti.QtWidgets, "QMenu", lambda: fake_menu):
         tray = ti.LauncherTray(app=app_stub, theme_manager=None, parent=None)
         tray.init()
 
     stop_action = next(a for a in fake_menu.actions if a.text() == "退出并关闭 ComfyUI")
-    stop_action.setEnabled(True)  # 模拟异步推送留下的过时 enabled 态
     assert stop_action.isEnabled() is True
-    tray._on_about_to_show()
-    assert stop_action.isEnabled() is False
-
-
-def test_tray_about_to_show_enables_stop_when_running(qt_app):
-    """is_running_fast=True 时，aboutToShow 启用「退出并关闭」项。"""
-    from ui_qt.widgets import tray_icon as ti
-
-    fake_menu = _FakeMenu()
-    app_stub = type("A", (), {
-        "logger": None,
-        "process_manager": type("PM", (), {"is_running_fast": lambda self: True})(),
-    })()
-
-    with patch.object(ti.QtWidgets, "QSystemTrayIcon", _FakeTray), \
-         patch.object(ti.QtWidgets, "QMenu", lambda: fake_menu):
-        tray = ti.LauncherTray(app=app_stub, theme_manager=None, parent=None)
-        tray.init()
-
-    stop_action = next(a for a in fake_menu.actions if a.text() == "退出并关闭 ComfyUI")
-    tray._on_about_to_show()
-    assert stop_action.isEnabled() is True
-
-
+    tray._on_about_to_show()                    # 未跑状态弹出菜单
+    assert stop_action.isEnabled() is True      # 不再被置灰
+    status_action = next(a for a in fake_menu.actions if a.text().startswith("ComfyUI 状态"))
+    assert "未启动" in status_action.text()     # 状态文案照常刷新
 def test_tray_emits_quit_and_stop_signal(qt_app):
     """点击"退出并关闭 ComfyUI"应发射 quit_and_stop_requested 信号。"""
     from ui_qt.widgets import tray_icon as ti

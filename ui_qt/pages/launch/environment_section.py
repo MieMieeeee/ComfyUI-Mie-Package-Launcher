@@ -280,17 +280,194 @@ class EnvironmentSection(QtWidgets.QWidget):
         form_layout.addWidget(pypi_label, 2, 0)
         form_layout.addWidget(_add_pypi_container, 2, 1)
 
+        # ============== 本地代理（Clash 等，issue #109）================
+        # 与上面三段「镜像」正交：镜像换的是「连哪」，本地代理换的是「怎么连」。
+        # 启用后启动器自身 + ComfyUI + git + pip + HF 下载的全部**非本地**出网
+        # 流量都经这个代理（内部实现见 utils/net.apply_local_proxy_env：
+        # 写 HTTP(S)_PROXY 并强制 NO_PROXY 排除 127.0.0.1，否则 Manager API 会被绕死）。
+        self._lp_check = QtWidgets.QCheckBox("启用")
+        self._lp_check.setStyleSheet(lbl_style)
+        try:
+            self._lp_check.setChecked(bool(
+                (getattr(self.app, 'config', None) or {}).get('proxy_settings', {}).get('local_proxy_enabled')
+            ))
+        except Exception:
+            pass
+
+        self._lp_entry = QtWidgets.QLineEdit()
+        self._lp_entry.setStyleSheet(self._get_input_style())
+        self._lp_entry.setSizePolicy(QtWidgets.QSizePolicy.Expanding, QtWidgets.QSizePolicy.Fixed)
+        self._lp_entry.setMinimumWidth(self._px(300))
+        self._lp_entry.setPlaceholderText("http://127.0.0.1:7890")
+        try:
+            self._lp_entry.setText(
+                (getattr(self.app, 'config', None) or {}).get('proxy_settings', {}).get('local_proxy_url')
+                or "http://127.0.0.1:7890"
+            )
+        except Exception:
+            self._lp_entry.setText("http://127.0.0.1:7890")
+
+        self._lp_test_btn = QtWidgets.QPushButton("测试连接")
+        self._lp_test_btn.setStyleSheet(self._get_primary_button_style())
+        self._lp_test_btn.setToolTip("只测试本地端口是否在监听（Clash 需处于运行状态）")
+
+        _add_lp_container = QtWidgets.QWidget()
+        _add_lp_layout = QtWidgets.QHBoxLayout(_add_lp_container)
+        _add_lp_layout.setContentsMargins(0, 0, 0, 0)
+        _add_lp_layout.setSpacing(10)
+        _add_lp_layout.addWidget(self._lp_check)
+        _add_lp_layout.addWidget(self._lp_entry)
+        _add_lp_layout.addWidget(self._lp_test_btn)
+        _add_lp_layout.addStretch(1)
+
+        lp_label = QtWidgets.QLabel("本地代理：")
+        lp_label.setStyleSheet(lbl_style)
+        lp_label.setAlignment(Qt.AlignRight | Qt.AlignVCenter)
+        lp_label.setFixedWidth(self._px(100))
+        lp_label.setToolTip(
+            "Clash / v2ray / sing-box 等本地正向代理地址（填 HTTP 混合端口）。\n"
+            "启用后所有非本地出网流量（GitHub / HF / PyPI / 插件拉图）都经它，\n"
+            "镜像源设置仍然生效。改动需要重启启动器后完全生效。"
+        )
+
+        form_layout.addWidget(lp_label, 3, 0)
+        form_layout.addWidget(_add_lp_container, 3, 1)
+
+        self._lp_test_btn.clicked.connect(self._test_local_proxy)
+        self._lp_check.stateChanged.connect(self._on_local_proxy_checkbox_toggled)
+        self._lp_entry.editingFinished.connect(lambda: self._on_local_proxy_changed(save=True))
+
         # 注：根目录 / Python 路径选择已移除 —— 它们属于「环境」定义，
         # 现在由顶部环境栏（EnvironmentSelector）的路径摘要 + 管理弹窗统一展示和编辑，
-        # 不再在此重复。代理设置（HF/GitHub/PyPI）保留。
+        # 不再在此重复。代理设置（HF/GitHub/PyPI/本地代理）保留。
 
         # DPI 相关尺寸：DPI 变化时需重算（见 _reapply_dpi_sizes / update_theme）。
         # 元素：(widget, setter_name, base_int_or_tuple)；setter_name 为原生 Qt setter（getattr 分发）。
         self._dpi_sized_widgets = [
             (env_hf_combo, "setMinimumWidth", 120), (env_gh_combo, "setMinimumWidth", 120), (env_pypi_combo, "setMinimumWidth", 120),
             (env_hf_entry, "setMinimumWidth", 520), (env_gh_entry, "setMinimumWidth", 520), (env_pypi_entry, "setMinimumWidth", 520),
-            (hf_label, "setFixedWidth", 100), (gh_label, "setFixedWidth", 100), (pypi_label, "setFixedWidth", 100),
+            (self._lp_entry, "setMinimumWidth", 300),
+            (hf_label, "setFixedWidth", 100), (gh_label, "setFixedWidth", 100),
+            (pypi_label, "setFixedWidth", 100), (lp_label, "setFixedWidth", 100),
         ]
+
+    def _local_proxy_prereq_text(self, url: str, probe: str = "") -> str:
+        """启用前给用户看的前置条件清单。
+
+        本地代理是「全局开关」性质：一旦打开，启动器自身 + ComfyUI + git + pip +
+        模型下载的**所有非本机出网**都改走它。配错了不会只坏一处，而是到处都连不上，
+        所以启用前必须把前置条件和后果讲清楚，让用户确认。
+        """
+        lines = [
+            "启用后，以下组件的出网流量都会改走这个本地代理：",
+            "  · 启动器自身的检查更新 / 公告 / Launcher 版本",
+            "  · ComfyUI 内核更新、插件安装（cm-cli）",
+            "  · 模型与工作流下载（HuggingFace）",
+            "  · 插件运行时拉取远程图片等出网请求",
+            "",
+            "启用前请确认：",
+            "  1. 代理软件（Clash / v2ray / sing-box 等）已经启动并在运行中；",
+            "  2. 端口填的是 HTTP 端口，不是 SOCKS 端口"
+            "（Clash 默认混合端口 7890，SOCKS 端口 7891 本设置不支持）；",
+            "  3. 本机地址（127.0.0.1）始终绕过代理，"
+            "所以不会影响 ComfyUI 与 Manager 的本地通信；",
+            "  4. 代理中途关闭会导致上述功能无法联网，需要重新打开代理软件。",
+            "",
+            "补充说明：",
+            "  · 镜像站设置（HF / GitHub / PyPI）不受影响，两者可以同时使用；",
+            "  · 本设置只作用于启动器及其子进程，不修改 Windows 系统代理；",
+            "  · 正在运行的 ComfyUI 需要重启后才会走代理。",
+        ]
+        if probe:
+            lines.insert(0, probe + "\n")
+        return "\n".join(lines)
+
+    def _on_local_proxy_checkbox_toggled(self, state):
+        """勾上「启用」时先讲前置条件 + 探端口，用户确认后才真正打开。"""
+        if getattr(self, "_lp_guard", False):
+            return
+        if not self._lp_check.isChecked():
+            self._on_local_proxy_changed(save=True)
+            return
+
+        from utils import net as NET
+        url = (self._lp_entry.text() or '').strip()
+        norm = NET.normalize_local_proxy_url(url)
+        if not norm:
+            self._revert_local_proxy_check()
+            from ui_qt.widgets.dialog_helper import DialogHelper
+            DialogHelper.show_warning(
+                self, "本地代理",
+                "地址无效，请填写 HTTP 代理地址，例如 http://127.0.0.1:7890"
+                "（只填 127.0.0.1:7890 也可以，会自动补 http://）。\n"
+                "本设置不支持 SOCKS 端口（Clash 的 7891）。",
+            )
+            return
+
+        ok, detail = NET.check_local_proxy_reachable(norm)
+        probe = ("检测到本地代理端口正在监听：%s" % detail) if ok else (
+            "⚠ 当前检测不到代理端口有响应：%s\n"
+            "代理软件可能没启动或端口填错。此时启用会导致上面的功能都无法联网。" % detail
+        )
+        try:
+            from ui_qt.widgets.dialog_helper import DialogHelper
+            confirmed = DialogHelper.show_confirmation(
+                self, "启用本地代理", self._local_proxy_prereq_text(norm, probe),
+                yes_text="启用", no_text="取消",
+            )
+        except Exception:
+            confirmed = True  # 弹窗异常不该拦住用户操作
+        if not confirmed:
+            self._revert_local_proxy_check()
+            return
+        self._on_local_proxy_changed(save=True)
+
+    def _revert_local_proxy_check(self):
+        """把勾选框弹回去（带 guard 防止递归触发 stateChanged）。"""
+        try:
+            self._lp_guard = True
+            self._lp_check.setChecked(False)
+        finally:
+            self._lp_guard = False
+
+    def _on_local_proxy_changed(self, save: bool = False):
+        try:
+            cfg = getattr(self.app, 'config', None) or {}
+            cfg.setdefault('proxy_settings', {})['local_proxy_enabled'] = bool(self._lp_check.isChecked())
+            cfg.setdefault('proxy_settings', {})['local_proxy_url'] = (self._lp_entry.text() or '').strip()
+            if save:
+                self._save_config()
+            # 立刻生效：GUI 里改完代理不用重启启动器（子进程仍需重启才继承）
+            from utils import net as NET
+            ps = cfg.get('proxy_settings')
+            if self._lp_check.isChecked():
+                res = NET.apply_local_proxy_env(ps, logger=getattr(self.app, 'logger', None))
+                if res.get('reason'):
+                    self._lp_test_btn.setText("地址无效")
+            else:
+                # 关掉开关要真的把变量撤掉，否则本进程后半程还在走代理，
+                # 表现为「界面显示已关闭，但联网行为没变」。
+                NET.clear_local_proxy_env(ps, logger=getattr(self.app, 'logger', None))
+                self._lp_test_btn.setText("测试连接")
+        except Exception:
+            pass
+
+    def _test_local_proxy(self):
+        from utils import net as NET
+        url = (self._lp_entry.text() or '').strip()
+        ok, detail = NET.check_local_proxy_reachable(url)
+        self._lp_test_btn.setText("可连接" if ok else "无响应")
+        try:
+            from ui_qt.widgets.dialog_helper import DialogHelper
+            if ok:
+                DialogHelper.show_info(self, "本地代理", "%s\n该端口在监听。" % detail)
+            else:
+                DialogHelper.show_warning(
+                    self, "本地代理",
+                    "%s\n请确认代理软件已启动且端口填对（Clash 默认混合端口 7890）。" % detail,
+                )
+        except Exception:
+            pass
 
     def _get_label_color(self):
         """获取标签颜色"""
@@ -533,8 +710,15 @@ class EnvironmentSection(QtWidgets.QWidget):
             # 跳过 GroupBox 的标题
             if label.parent() and isinstance(label.parent(), QtWidgets.QGroupBox):
                 parent_title = label.parent().title()
-                if parent_title == "环境配置" and label.text() in ["HF 镜像源：", "GitHub 代理：", "PyPI 代理：", "根目录：", "Python 路径："]:
+                if parent_title == "环境配置" and label.text() in ["HF 镜像源：", "GitHub 代理：", "PyPI 代理：", "本地代理：", "根目录：", "Python 路径："]:
                     label.setStyleSheet(lbl_style)
+
+        # 本地代理的「启用」勾选框用的是 lbl_style，上面那圈只管 QLabel
+        try:
+            if getattr(self, '_lp_check', None) is not None:
+                self._lp_check.setStyleSheet(lbl_style)
+        except Exception:
+            pass
         
         # 更新输入框样式
         input_style = self._get_input_style()

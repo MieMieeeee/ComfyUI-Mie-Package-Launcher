@@ -2,7 +2,7 @@
 侧边栏组件
 """
 
-from PyQt5 import QtWidgets, QtCore
+from PyQt5 import QtWidgets, QtCore, QtGui
 from ui_qt.theme_styles import ThemeStyles
 
 

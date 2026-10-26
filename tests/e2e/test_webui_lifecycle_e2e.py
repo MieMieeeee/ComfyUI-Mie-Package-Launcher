@@ -22,6 +22,10 @@ from unittest.mock import MagicMock, patch
 
 import pytest
 
+# e2e：会真的拉起子进程/打包产物，单次约 16s。
+# 日常回归用 `-m "not e2e"` 跳过。
+pytestmark = pytest.mark.e2e
+
 
 # === helpers ===
 
@@ -62,7 +66,16 @@ def _is_pid_alive(pid):
 # === fake_webui_script: 写个 stdlib HTTP server 模拟 webui ===
 
 def _write_fake_webui_script(path: Path) -> None:
-    """写个 stdlib HTTP server, 监听 port, 写一行到 log."""
+    """写个 stdlib HTTP server, 监听 port, 写一行到 log.
+
+    文件名必须含 ``flask_app``：webui 的身份校验
+    （``core.webui_process_manager._is_webui_pid``）是看 cmdline 里有没有
+    ``flask_app`` 的 —— 真实形态是 ``python -m app.flask_app`` 或
+    ``python -c "...from app.flask_app import main..."``。假进程不带这个特征
+    的话，pidfile 里的 PID 会被判成「不是 webui 进程」：start 不会短路成
+    already_running，stop 也不会去杀它（2026-10-03 加身份门就是为了防
+    PID 复用误杀）。
+    """
     # 用 + chr(10) 而不是 b'\\n' 避免源文件 \n 转义问题
     lines = [
         "import http.server, socketserver, sys, os",
@@ -85,7 +98,10 @@ def _write_fake_webui_script(path: Path) -> None:
 
 @pytest.fixture
 def fake_webui_script(tmp_path):
-    script = tmp_path / "fake_webui.py"
+    # 路径里必须带 flask_app：webui 进程身份校验看的就是 cmdline 里的
+    # flask_app 特征（见 _write_fake_webui_script 的说明）。
+    script = tmp_path / "fake_app" / "flask_app.py"
+    script.parent.mkdir(parents=True, exist_ok=True)
     _write_fake_webui_script(script)
     return script
 

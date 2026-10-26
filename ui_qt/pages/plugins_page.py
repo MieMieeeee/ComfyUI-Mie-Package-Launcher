@@ -16,12 +16,17 @@
 - enabled:  是否启用（据 dir_name 是否以 .disabled 结尾判断）
 - is_git/version/remote_url: git 元信息
 """
-from typing import Any  # B8 CR：run_force_update 里用了局部注解 `Any`，不跑运行时求值但
+from typing import Any, Optional  # B8 CR：run_force_update 里用了局部注解 `Any`，不跑运行时求值但
                          # 一旦移到模块级或加 from __future__ import annotations 前就会
-                         # NameError，提前 import 消除隐患。
+                         # NameError，提前 import 消除隐患。Optional 供 run_check_updates
+                         # 的错误通道注解用。
+import logging
+
 from PyQt5 import QtCore, QtGui, QtWidgets
 
 from .base_page import BasePage
+
+logger = logging.getLogger("comfyui_launcher")  # 与 services/plugin_service 同名，进 launcher.log
 
 
 # UserRole+2：标记「有更新」，由 mark_outdated 写入，delegate 读它画紫色徽章
@@ -30,8 +35,12 @@ _OUTDATED_ROLE = QtCore.Qt.UserRole + 2
 # UserRole+3：远端 commit 日期（YYYY-MM-DD），仅 outdated 插件有，delegate 读它画远端日期列。
 _REMOTE_DATE_ROLE = QtCore.Qt.UserRole + 3
 # UserRole+4：标记「已检查更新」。mark_outdated 后所有插件都置 True；
-# delegate 据此区分「有更新/无更新/未检查/无法检查」四态。
+# delegate 据此区分「有更新/无更新/未检查/无法检查/检查中」五态。
 _CHECKED_ROLE = QtCore.Qt.UserRole + 4
+# UserRole+5：标记「正在检查更新」。点「检查更新」到 on_done 之间为 True，
+# delegate 显示「检查中」而不是「未检查」或过期的「无更新」——否则用户点完按钮
+# 只能看到一片「未检查」，不知道系统在跑（检查 60 个插件要几秒）。
+_CHECKING_ROLE = QtCore.Qt.UserRole + 5
 
 
 def _column_geometry(width, px):
@@ -191,6 +200,7 @@ class PluginItemDelegate(QtWidgets.QStyledItemDelegate):
         plugin = index.data(QtCore.Qt.UserRole) or {}
         outdated = bool(index.data(_OUTDATED_ROLE))
         checked_update = bool(index.data(_CHECKED_ROLE))  # 是否已点过「检查更新」
+        checking = bool(index.data(_CHECKING_ROLE))        # 是否正在检查
         remote_date = index.data(_REMOTE_DATE_ROLE) or ""
         enabled = plugin.get("enabled", True)
         name = plugin.get("name", index.data(QtCore.Qt.DisplayRole) or "")
@@ -270,7 +280,15 @@ class PluginItemDelegate(QtWidgets.QStyledItemDelegate):
         muted = c.get("label_muted", "#9CA3AF")
         dim = c.get("label_dim", "#6B7280")
         success = "#22C55E"
-        if outdated:
+        if checking:
+            # 正在检查：临时状态，优先级最高（盖住过期的「有更新/无更新」）。
+            # 点「检查更新」到出结果之间可能是好几秒，不能让用户对着「未检查」干等。
+            painter.setBrush(QtGui.QColor(107, 114, 128, 32))
+            painter.setPen(QtCore.Qt.NoPen)
+            painter.drawRoundedRect(pill, pill_h // 2, pill_h // 2)
+            painter.setPen(QtGui.QColor(muted))
+            painter.drawText(pill, QtCore.Qt.AlignCenter, "检查中…")
+        elif outdated:
             # 有更新：紫色药丸
             painter.setBrush(QtGui.QColor(127, 86, 217, 50))
             painter.setPen(QtCore.Qt.NoPen)
@@ -631,7 +649,7 @@ class PluginsPage(BasePage):
     update_all_requested = QtCore.pyqtSignal()
     update_selected_requested = QtCore.pyqtSignal(list)
     refresh_requested = QtCore.pyqtSignal()
-    force_update_suggested = QtCore.pyqtSignal(list)  # 正常更新后仍有失败 → 建议强制更新（带名字）
+    force_update_suggested = QtCore.pyqtSignal(list)  # 正常更新后仍有失败 → 自动触发强制更新（qt_app 接线，带名字）
 
     # 新增操作信号：disable/enable 传 dir_name list；uninstall 走二次确认（见 controller/qt_app）
     disable_selected_requested = QtCore.pyqtSignal(list)
@@ -646,6 +664,16 @@ class PluginsPage(BasePage):
         super().__init__(theme_manager, parent)
         self.app = app
         self._outdated_dir_names = set()  # 当前标记为「有更新」的 dir_name（populate 时清空）
+        # preserve_outdated 刷新用：上次检查得到的远端日期 {dir_name: "YYYY-MM-DD"}，
+        # 以及本次要从 outdated 集合里摘掉的 dir_name（已成功更新的）。
+        self._outdated_remote_dates = {}
+        self._preserve_drop = set()
+        # 上次检查有多少插件连不上远端（代理/网络故障）。controller 在后台线程写，
+        # qt_app 的 on_done 在 UI 线程读；不用信号是为了避免每次调用都 connect 一个
+        # 捕获局部变量的 lambda 且从不 disconnect（review H1 的泄漏）。
+        self._last_unreachable = 0
+        # 「正在检查更新」：页面级临时状态，列表重建时据此回填 item
+        self._checking = False
         self._loader = None  # 由 PluginController.set_loader 注入；showEvent 据它触发首次加载
         self._setup_ui()
 
@@ -845,7 +873,7 @@ class PluginsPage(BasePage):
         ab_layout.setContentsMargins(_px(14), _px(6), _px(14), _px(6))
         ab_layout.setSpacing(_px(8))
         # 未勾选：提示文字胶囊 + 占位
-        self._ab_hint_label = QtWidgets.QLabel("勾选插件以显示批量操作")
+        self._ab_hint_label = QtWidgets.QLabel("勾选插件以显示批量操作（可用「全选」一键勾选）")
         self._ab_hint_label.setStyleSheet(
             f"color: {c['label_dim']}; font: {_pt(9.5)}pt 'Microsoft YaHei UI';"
         )
@@ -865,17 +893,22 @@ class PluginsPage(BasePage):
             f" border-radius: {_px(8)}px;"
             f" font: bold {_pt(9)}pt 'Microsoft YaHei UI'; }}")
         # 按钮
+        self.select_all_btn = QtWidgets.QPushButton("全选")
+        self.select_all_btn.setToolTip(
+            "勾选/取消当前列表（按当前 Tab 与搜索结果）里的所有插件")
         self.update_selected_btn = QtWidgets.QPushButton("更新选中")
         self.enable_btn = QtWidgets.QPushButton("启用选中")
         self.disable_btn = QtWidgets.QPushButton("禁用选中")
         self.uninstall_btn = QtWidgets.QPushButton("卸载选中")
         try:
+            self.select_all_btn.setStyleSheet(s.link_button_style())
             self.update_selected_btn.setStyleSheet(s.secondary_button_style())
             self.enable_btn.setStyleSheet(s.secondary_button_style())
             self.disable_btn.setStyleSheet(s.destructive_outline_button_style())
             self.uninstall_btn.setStyleSheet(s.destructive_outline_button_style())
         except Exception:
             pass
+        self.select_all_btn.clicked.connect(self.toggle_select_all)
         self.update_selected_btn.clicked.connect(self._emit_update_selected)
         self.enable_btn.clicked.connect(
             lambda: self.enable_selected_requested.emit(self.selected_dir_names()))
@@ -891,12 +924,14 @@ class PluginsPage(BasePage):
         ab_layout.addWidget(ab_label)
         ab_label.hide()
         ab_layout.addWidget(self._ab_count_label)
+        ab_layout.addWidget(self.select_all_btn)
+        self.select_all_btn.hide()
         ab_layout.addSpacing(_px(14))
         for b in (self.update_selected_btn, self.enable_btn,
                   self.disable_btn, self.uninstall_btn):
             ab_layout.addWidget(b)
             b.hide()
-        self._ab_active_widgets = [ab_label, self._ab_count_label,
+        self._ab_active_widgets = [ab_label, self._ab_count_label, self.select_all_btn,
                                    self.update_selected_btn, self.enable_btn,
                                    self.disable_btn, self.uninstall_btn]
         self._ab_layout = ab_layout
@@ -923,7 +958,7 @@ class PluginsPage(BasePage):
         self.list_widget.setStyleSheet(self._build_list_qss(c))
         lc_l.addWidget(self.list_widget)
 
-        self.list_widget.itemChanged.connect(lambda _item: self._refresh_action_bar())
+        self.list_widget.itemChanged.connect(self._on_item_changed)
         layout.addWidget(list_container, 1)
         self._list_container = list_container
         self._root_layout = layout
@@ -1333,7 +1368,11 @@ class PluginsPage(BasePage):
                 item.setData(QtCore.Qt.UserRole, p)
                 item.setData(QtCore.Qt.UserRole + 1, dir_name)
                 item.setFlags(item.flags() | QtCore.Qt.ItemIsUserCheckable)
-                item.setCheckState(QtCore.Qt.Unchecked)
+                # 勾选状态从 cache 回填（1340 附近是新建 item 分支）——全选后切 Tab
+                # 再切回来，勾选不该丢。没记录过（_sel 为 None）才默认 Unchecked。
+                _sel = p.get("_sel")
+                item.setCheckState(
+                    QtCore.Qt.Checked if _sel is True else QtCore.Qt.Unchecked)
                 # tooltip
                 tip_lines = [f"{name}"]
                 if not enabled:
@@ -1344,7 +1383,7 @@ class PluginsPage(BasePage):
                     tip_lines.append(f"版本: {ver or '(未知)'}")
                     tip_lines.append(f"来源: {remote or '(未知)'}")
                 else:
-                    tip_lines.append("（非 git 插件，无法更新/强制更新）")
+                    tip_lines.append("（CNR/local 插件，无法 git 更新；CNR 可强制更新走重装）")
                 item.setToolTip("\n".join(tip_lines))
                 if not enabled:
                     item.setForeground(QtGui.QBrush(QtGui.QColor(
@@ -1362,25 +1401,66 @@ class PluginsPage(BasePage):
         # 如果是 filter 场景且全局 mark_outdated 过，同步插回的 item 的三个 role 标记
         # （上面只从 plugin dict 回填，对 mark_outdated 后再 filter 的情况需要从
         #  _outdated_dir_names 比对再写一次 item.data，因为 delegate 只看 item.data）
+        #
+        # 更新后的增量刷新（preserve_outdated=True）必须**双向**同步：既把仍在
+        # _outdated_dir_names 里的写 True，也把已被摘掉的（本次更新成功的）写回
+        # False。原先只写 True，导致已更新插件的 🔄 标记留在 item 上（delegate 只看
+        # item.data），用户看到「更新完了还是显示可更新」且列表还留在「可更新」区。
         if preserve_outdated:
             try:
                 od = getattr(self, "_outdated_dir_names", None) or set()
+                dates = getattr(self, "_outdated_remote_dates", None) or {}
                 for i in range(lw.count()):
                     it = lw.item(i)
                     dn = it.data(QtCore.Qt.UserRole + 1)
-                    if str(dn) in od:
-                        it.setData(_OUTDATED_ROLE, True)
-                        it.setData(_CHECKED_ROLE, True)
+                    is_od = str(dn) in od
+                    it.setData(_OUTDATED_ROLE, is_od)
+                    it.setData(_CHECKED_ROLE, True)
+                    # 「检查中」是页面级临时状态，检查期间刷新列表也要保持
+                    it.setData(_CHECKING_ROLE,
+                               bool(getattr(self, "_checking", False)))
+                    # 远端日期整表回填（含已更新的那些）：更新后刷新不该把「远端日期」
+                    # 列清空——那正是用户看到的「更新完全是 —」。
+                    it.setData(_REMOTE_DATE_ROLE, dates.get(dn, ""))
             except Exception:
                 pass
+            # 重排：可更新插件置顶只在 mark_outdated 做过一次，这里按 plugin 顺序
+            # 重建后置顶就丢了（mark_outdated → 切可更新 Tab → 回全部 Tab，可更新
+            # 插件散回原位，用户在列表顶部只看到一片「检查中/—」）。补一次重排恢复。
+            try:
+                self._reorder_outdated_first()
+            except Exception:
+                pass
+
+    def _on_item_changed(self, item):
+        """勾选框变化 → 记进 _all_plugins_cache（_sel）+ 刷新操作栏。
+
+        cache 里的 _sel 让勾选状态跨 Tab 筛选 / 搜索保留：全选一批后切去别的 Tab
+        再切回来，勾选还在（_render_from_list 建新 item 时据此回填 CheckState）。
+        """
+        try:
+            dn = str(item.data(QtCore.Qt.UserRole + 1) or "")
+            if dn:
+                for p in getattr(self, "_all_plugins_cache", []):
+                    if str(p.get("dir_name") or "") == dn:
+                        p["_sel"] = (item.checkState() == QtCore.Qt.Checked)
+                        break
+        except Exception:
+            pass
+        self._refresh_action_bar()
 
     def _refresh_action_bar(self):
         """勾选状态变化 → 切换 ActionBar 内容（提示文字 ↔ 操作按钮），ActionBar 本身始终占位。
 
         关键：ActionBar 高度固定不变（44px），只切换内部组件显隐，杜绝勾选导致表格抖动。
+
+        「全选」按钮两种状态都显示（其他批量按钮只在有勾选时显示）——它是唯一的
+        入口，没有勾选时用户点不到就永远无法全选。按钮文案随勾选情况翻转成
+        「全选 / 取消全选」。
         """
         n = len(self.selected_dir_names())
         self._ab_count_label.setText(str(n))
+        total = self.list_widget.count()
         if n > 0:
             self._ab_hint_label.hide()
             for w in self._ab_active_widgets:
@@ -1389,21 +1469,45 @@ class PluginsPage(BasePage):
             self._ab_hint_label.show()
             for w in self._ab_active_widgets:
                 w.hide()
+        # 全选按钮常驻（有列表就可见），文案跟随「是否已全选」
+        if total > 0:
+            self.select_all_btn.show()
+            self.select_all_btn.setText("取消全选" if n >= total else "全选")
+        else:
+            self.select_all_btn.hide()
 
     def _emit_update_selected(self):
         self.update_selected_requested.emit(self.selected_dir_names())
 
-    def populate(self, plugins):
+    def populate(self, plugins, preserve_outdated=False):
         """用 PluginService.list_installed() 的结果填充列表。每项可勾选。
 
         显示规则与原版保持一致（兼容旧测试）：
         - item 文本 = 纯 name（禁用项加「（已禁用）」）
         - git 插件 tooltip 显示版本/来源
         - 全量重填后，把 plugins 缓存到 self._all_plugins_cache（便于 Tab/搜索过滤）
-        - mark_outdated 标记清空（和旧行为一致）
+        - mark_outdated 标记默认清空（和旧行为一致）
+
+        preserve_outdated=True（更新后的增量刷新）：保留上次「检查更新」的 🔄 标记
+        和 remote_date，只把 caller 传入的 done_names（本次已成功更新的插件）从
+        outdated 集合里摘掉。不这样的话，用户更新完插件就得重新点一次「检查更新」
+        才能看到剩下哪些还落后（issue #107 后的体验问题）。
         """
         plugins = list(plugins)
-        self._outdated_dir_names = set()
+        if preserve_outdated:
+            self._outdated_dir_names = {
+                dn for dn in self._outdated_dir_names
+                if dn not in (self._preserve_drop or set())
+            }
+        else:
+            self._outdated_dir_names = set()
+        # 把上一次的勾选状态（_sel）按 dir_name 继承过来：list_installed 返回的是
+        # 全新 dict 不带 _sel，直接换 cache 会让「全选 → 更新 → 勾选全丢」。
+        prev_sel = {}
+        for p in getattr(self, "_all_plugins_cache", []) or []:
+            dn = str(p.get("dir_name") or "")
+            if dn and p.get("_sel") is not None:
+                prev_sel[dn] = bool(p.get("_sel"))
         self._all_plugins_cache = list(plugins)
         # 清掉上次 filter 塞进去的 _outdated/_checked/_remote_date 残留，重新 populate 就是干净新列表
         for p in self._all_plugins_cache:
@@ -1413,12 +1517,22 @@ class PluginsPage(BasePage):
                         del p[k]
                     except Exception:
                         p[k] = False if k == "_outdated" else ""
-        self._render_from_list(plugins, preserve_outdated=False)
+        for p in self._all_plugins_cache:
+            dn = str(p.get("dir_name") or "")
+            if dn in prev_sel:
+                p["_sel"] = prev_sel[dn]
+        self._render_from_list(plugins, preserve_outdated=preserve_outdated)
         # 首次 populate 后重刷统计 & 重置 Tab/搜索
         self._refresh_stats(plugins)
         # 列表重建后 checkbox 全 unchecked（批量替换不触发 itemChanged），
         # 必须重刷 ActionBar 计数 badge + 按钮显隐，否则 badge 残留旧数字。
         self._refresh_action_bar()
+        # Tab/搜索只在**全量**刷新（刷新列表 / 首次进入）时重置。更新后的增量刷新
+        # （preserve_outdated=True）保持用户所在的 Tab 和搜索词——用户正是在
+        # 「可更新」Tab 里选插件更新的，刷完被踢回「全部」既突兀，又看不到
+        # repopulate_preserving_outdated 特意保留的「还剩哪些落后」（2026-10-04 反馈）。
+        if preserve_outdated:
+            return
         try:
             if getattr(self, "_current_filter", None) != "all":
                 self._set_filter("all")
@@ -1432,15 +1546,69 @@ class PluginsPage(BasePage):
         except Exception:
             pass
 
+    def repopulate_preserving_outdated(self, plugins, done_names=None, force_hint=None):
+        """更新若干插件后刷新列表：保留上次「检查更新」的结果，只摘掉已更新的。
+
+        done_names：本次成功更新的 dir_name 集合（从 🔄 标记里移除）。其余落后插件
+        继续显示 🔄——用户更新完不必再点一次「检查更新」才知道还剩哪些（issue #107
+        后的体验问题）。没有做过检查（_outdated_dir_names 为空）时退化成普通 populate。
+
+        实现要点：先算出「摘掉已更新后的剩余集合」，再走 populate(preserve) 重建 item，
+        最后**复用 mark_outdated 重新应用完整标记**（双向写 role / 改文本 / 刷统计 /
+        重排置顶）。不能只依赖 _render_from_list 的回填——它只写 True 不写 False，
+        且不做重排，会让已更新的插件继续挂在「可更新」区（实测复现过）。
+        """
+        if not self._outdated_dir_names and not force_hint:
+            self._preserve_drop = set()
+            self.populate(plugins)
+            return
+        done = {str(d) for d in (done_names or set())}
+        # 摘掉本次更新成功的（已经最新了），其余继续标记为可更新
+        base_set = set(self._outdated_dir_names) | {str(d) for d in (force_hint or [])}
+        remaining = {dn for dn in base_set if dn not in done}
+        # 已被卸载/重装换名的 dir_name 不该继续挂标记（列表里已不存在，标记是幽灵）
+        live = {str(p.get("dir_name") or p.get("name") or "") for p in (plugins or [])}
+        remaining = {dn for dn in remaining if dn in live}
+        self._preserve_drop = done
+        dates = dict(self._outdated_remote_dates or {})
+        self.populate(plugins, preserve_outdated=True)
+        # 复用 mark_outdated 完整重应用：双向同步 role/文本/统计 + 可更新置顶重排
+        self.mark_outdated(remaining, dates)
+        self._preserve_drop = set()
+
+    def set_checking(self, checking: bool):
+        """切换「正在检查更新」状态：True = 检查进行中，False = 结束（无论成败）。
+
+        只改 _CHECKING_ROLE，不动 _OUTDATED_ROLE —— 检查期间的旧标记（上一轮结果）
+        保留在 item 上，检查完成后 mark_outdated 会覆盖。delegate 里 checking 优先级
+        最高，所以用户看到的是「检查中…」而不是过期的「无更新」。
+        """
+        self._checking = bool(checking)
+        for i in range(self.list_widget.count()):
+            self.list_widget.item(i).setData(_CHECKING_ROLE, bool(checking))
+        try:
+            self.list_widget.viewport().update()
+        except Exception:
+            pass
+
     def mark_outdated(self, dir_names, remote_dates=None):
         """controller 通过 outdated_reported 推回 → 标记对应项并重排（可更新置顶）。
 
         新增：同步把 _outdated/_checked/_remote_date 写回 self._all_plugins_cache，
         这样 filter 切换 Tab 时，item 上的过时标志不会丢（_render_from_list 在 filter 模式下会
         从 plugin dict 回填 UserRole）。
+
+        出结果即退出「检查中」：除了逐 item 清 _CHECKING_ROLE，还必须复位页面级
+        self._checking——_render_from_list（切 Tab/搜索的重渲染）用它回填 item 的
+        _CHECKING_ROLE。原先只清 item 不清标志，一旦调用方漏调 set_checking(False)
+        （qt_app on_done 曾因 NameError 漏调），切一次 Tab 全列表就永久卡「检查中」。
+        复位收敛到这里，标志的生命周期就不再依赖每个调用方记得关。
         """
+        self._checking = False
         self._outdated_dir_names = {str(d) for d in dir_names}
         remote_dates = remote_dates or {}
+        # 存一份供 preserve_outdated 刷新复用（更新后局部刷新时不重新查远端日期）
+        self._outdated_remote_dates = dict(remote_dates)
         # 先同步回 _all_plugins_cache
         dn_to_plugin = {}
         for p in getattr(self, "_all_plugins_cache", []):
@@ -1451,7 +1619,9 @@ class PluginsPage(BasePage):
             is_od = dn in self._outdated_dir_names
             p["_outdated"] = is_od
             p["_checked"] = True
-            p["_remote_date"] = remote_dates.get(dn, "") if is_od else ""
+            # 远端日期对整表保留（不再只给 outdated）：delegate 对 outdated 用强调色、
+            # 其余用弱化色，一眼能看出「哪些落后」+「各插件远端停在哪天」。
+            p["_remote_date"] = remote_dates.get(dn, "")
         # 再更新 list widget 上每个 item 的三个 role + text
         for i in range(self.list_widget.count()):
             item = self.list_widget.item(i)
@@ -1459,8 +1629,9 @@ class PluginsPage(BasePage):
             is_outdated = str(dir_name) in self._outdated_dir_names
             item.setData(_OUTDATED_ROLE, is_outdated)
             item.setData(_CHECKED_ROLE, True)
-            item.setData(_REMOTE_DATE_ROLE,
-                         remote_dates.get(dir_name, "") if is_outdated else "")
+            # 检查已出结果 → 无论调用方是否显式 set_checking(False)，这里都清掉
+            item.setData(_CHECKING_ROLE, False)
+            item.setData(_REMOTE_DATE_ROLE, remote_dates.get(dir_name, ""))
             if is_outdated:
                 accent = self.theme_manager.colors.get("btn_primary_bg", "#6366F1")
                 base = item.data(QtCore.Qt.UserRole) or {}
@@ -1469,6 +1640,17 @@ class PluginsPage(BasePage):
                 display = name if enabled else f"{name}（已禁用）"
                 item.setText(f"🔄 {display}  [可更新]")
                 item.setForeground(QtGui.QBrush(QtGui.QColor(accent)))
+            else:
+                # 增量刷新场景：上次标过时文本带「🔄 … [可更新]」，这次已更新完成 →
+                # 必须还原成普通文本，否则文本和 role 不一致（role 已 False 但仍显示
+                # 「可更新」）。全量检查时这里也安全（初始文本本就是普通名）。
+                base = item.data(QtCore.Qt.UserRole) or {}
+                name = base.get("name", "")
+                enabled = base.get("enabled", True)
+                if name:
+                    item.setText(name if enabled else f"{name}（已禁用）")
+                item.setForeground(QtGui.QBrush(QtGui.QColor(
+                    self.theme_manager.colors.get("label", "#E5E7EB"))))
         # 刷新状态卡「可更新」数字
         self._refresh_stats()
         # 重排：outdated 项移到顶部
@@ -1533,6 +1715,40 @@ class PluginsPage(BasePage):
                 dir_names.append(str(dn))
         return dir_names
 
+    def toggle_select_all(self):
+        """全选 / 取消全选当前列表里的所有插件。
+
+        作用于**当前可见列表**（受 Tab 筛选与搜索框影响），不是所有已装插件——用户
+        在「可更新」Tab 点全选，预期是把这批要更新的全勾上，而不是把 60 个插件
+        全选出来接着误点卸载。
+
+        文案随状态翻转：全选 → 「取消全选」，全选或取消后都叫全选。
+        勾选状态同步回 _all_plugins_cache，切 Tab 时不丢（与 _CHECKED_ROLE 同源）。
+        """
+        total = self.list_widget.count()
+        if total == 0:
+            return
+        all_checked = all(
+            self.list_widget.item(i).checkState() == QtCore.Qt.Checked
+            for i in range(total))
+        target = QtCore.Qt.Unchecked if all_checked else QtCore.Qt.Checked
+        # 屏蔽信号：批量 setCheckState 逐个触发 itemChanged → _refresh_action_bar
+        # 被调 N 次，计数/按钮显隐反复闪。
+        self.list_widget.blockSignals(True)
+        try:
+            for i in range(total):
+                self.list_widget.item(i).setCheckState(target)
+        finally:
+            self.list_widget.blockSignals(False)
+        # 回写 cache（filter 切 Tab 时靠 _sel 恢复勾选）
+        live = {str(self.list_widget.item(i).data(QtCore.Qt.UserRole + 1) or "")
+                for i in range(total)}
+        for p in getattr(self, "_all_plugins_cache", []):
+            dn = str(p.get("dir_name") or "")
+            if dn in live:
+                p["_sel"] = (target == QtCore.Qt.Checked)
+        self._refresh_action_bar()
+
 
 class PluginController:
     """把 PluginsPage 的信号编排到 PluginService（可单测）。
@@ -1578,47 +1794,75 @@ class PluginController:
     def _on_update_all(self):
         self._run_in_background(self._update_all_work)
 
-    def run_update_all(self, on_status=None, on_done=None):
-        """qt_app 触发：带进度回调的「更新全部」。on_status(str)/on_done(success, message) 派回 UI 线程。"""
+    def run_update_all(self, on_status=None, on_done=None, on_progress=None):
+        """qt_app 触发：带进度回调的「更新全部」。
+
+        on_status(str)/on_done(success, message) 派回 UI 线程。
+        on_progress(done, total, name)：cm-cli 逐插件进度（流式解析，见
+        plugin_service._cmcli_update_progress），派回 UI 线程驱动 k/N 进度条。"""
         def work():
             failed = []
+            all_names = []
+            force_hint = None  # 失败兜底：把这些插件标为可更新
             try:
                 if on_status:
-                    self._post_to_ui(lambda: on_status("正在更新全部插件（cm-cli update all，含 pip 依赖修复）..."))
-                self.svc.update_all()
+                    self._post_to_ui(lambda: on_status("正在更新全部插件（含 pip 依赖修复）..."))
+                # 同 run_update_selected：必须看返回值，失败不能报「更新完成」
+                if on_progress is not None:
+                    def svc_progress(done, total, name):
+                        self._post_to_ui(lambda d=done, t=total, n=name: on_progress(d, t, n))
+                    res = self.svc.update_all(on_progress=svc_progress)
+                else:
+                    res = self.svc.update_all()
                 # P1-4 meta-review：update_selected 会再跑 outdated_plugins 检测 cm-cli 没更新的
                 # 插件（脏树/冲突）并发 force_update_suggested；update_all 缺这一步，漏网
                 # 插件永远不被提出来。现在对齐 selected 的行为。
                 names = [p["dir_name"] for p in self.svc.list_installed()]
+                all_names = list(names)
                 # B4 CR：P1-3 TTL 缓存并不覆盖这里的 list_installed —— update_all() 内部
                 # 已经整表 evict 过缓存（必须的，HEAD 动了），所以 list_installed() 是全量
                 # cache miss，照常跑 ~150 个 git 进程；最终 populate() 吃到这次的热缓存，
                 # 实际净增量 +~100 git 子进程，可接受但不是 0。注释别误导后来者。
-                failed = self.svc.outdated_plugins(names)
-                if failed:
-                    self._post_to_ui(lambda f=list(failed): self.page.force_update_suggested.emit(f))
-                msg = "插件更新全部完成，重启 ComfyUI 后生效" + (f"（{len(failed)} 个建议强制更新）" if failed else "")
-                ok = True
+                if isinstance(res, dict) and res.get("error"):
+                    ok = False
+                    failed = list(names)  # 什么都没升成功，全量保留 🔄
+                    force_hint = list(names)
+                    msg = f"更新全部失败：{res.get('error')}"
+                else:
+                    failed = self.svc.outdated_plugins(names)
+                    if failed:
+                        self._post_to_ui(lambda f=list(failed): self.page.force_update_suggested.emit(f))
+                    msg = "插件更新全部完成，重启 ComfyUI 后生效" + (f"（{len(failed)} 个已自动开始强制更新）" if failed else "")
+                    ok = True
             except Exception as e:
                 ok = False
+                all_names = []
                 msg = f"更新全部失败：{e}"
             finally:
-                self._populate_from_service()
-                if on_done:
-                    # 兼容旧 on_done() 零参数 / 新 on_done(ok, message) 两参数签名。
-                    # meta-review 前的测试用 lambda: done_called.append(True)（零参），
-                    # 改漏 2 后加了两参数，直接调用会 TypeError。先试两参失败再兜底。
-                    def _safe_on_done(o=bool(ok), m=msg):
-                        try:
-                            on_done(o, m)
-                        except TypeError:
+                # 更新全部 = 全部都算已处理，failed（仍落后）保留 🔄 标记，
+                # 其余摘掉——用户更新完不用再点「检查更新」才知道还剩哪些。
+                # 先刷列表再报完成（见 run_update_selected 同款注释）。
+                def _finish():
+                    if on_done:
+                        # 兼容旧 on_done() 零参数 / 新 on_done(ok, message) 两参数签名。
+                        def _safe_on_done(o=bool(ok), m=msg):
                             try:
-                                on_done()
+                                on_done(o, m)
+                            except TypeError:
+                                try:
+                                    on_done()
+                                except Exception:
+                                    pass
                             except Exception:
                                 pass
+                        try:
+                            _safe_on_done()
                         except Exception:
                             pass
-                    self._post_to_ui(_safe_on_done)
+
+                self._populate_preserving_outdated(
+                    set(all_names) - set(failed), before_done=_finish,
+                    force_hint=force_hint)
         self._run_in_background(work)
 
     def _update_all_work(self):
@@ -1626,6 +1870,8 @@ class PluginController:
         # P1-4 meta-review：页面内「更新全部」按钮也做二次检测（与 run_update_all 同模式），
         # 脏树/冲突的插件被提出来，用户能直接看到「有 N 个需要强制更新」提示。
         plugins_list = None
+        names = []
+        failed = []
         try:
             plugins_list = self.svc.list_installed()
             names = [p["dir_name"] for p in plugins_list]
@@ -1634,15 +1880,18 @@ class PluginController:
                 self._post_to_ui(lambda f=list(failed): self.page.force_update_suggested.emit(f))
         except Exception:
             pass
-        # 刷新列表：二次检测已经拿到过最新 plugins_list，直接用它 populate，
+        # 刷新列表：二次检测已经拿到过最新 plugins_list，直接用它重建，
         # 避免 loader.load() 再调一次 svc.list_installed（P1-4 新二次检测导致双重调用）。
+        # 用 repopulate_preserving_outdated：已更新的摘掉 🔄、仍落后的（failed）保留，
+        # 用户更新完不必重新点「检查更新」（issue #107 体验问题）。
         if plugins_list is not None:
-            snapshot = list(plugins_list)
-            self._post_to_ui(lambda: self.page.populate(snapshot))
+            self._post_to_ui(
+                lambda pl=list(plugins_list), f=list(failed), ns=list(names):
+                self.page.repopulate_preserving_outdated(pl, set(ns) - set(f)))
         else:
             self._populate_from_service()
 
-    def run_update_selected(self, names, on_status=None, on_done=None):
+    def run_update_selected(self, names, on_status=None, on_done=None, on_progress=None):
         """qt_app 触发: 带进度回调的「更新选中」。
 
         on_status(str): 任务起始时回调一次, 派回 UI 线程.
@@ -1652,37 +1901,69 @@ class PluginController:
         """
         def work():
             failed = []
+            force_hint = None  # 非 None：本次要把这些插件标为可更新（失败兜底）
             msg = f"选中插件更新完成 ({len(names)} 个)，重启 ComfyUI 后生效"
             ok = True
+            updated_ok = set(names)  # 默认全算已处理；post-check 会把仍落后的挪进 failed
             try:
                 if on_status:
                     label = f"正在更新选中插件 ({len(names)} 个)"
                     self._post_to_ui(lambda: on_status(label))
-                self.svc.update_selected(names)
-                failed = self.svc.outdated_plugins(names)
-                if failed:
-                    self._post_to_ui(lambda f=list(failed): self.page.force_update_suggested.emit(f))
-                    msg = msg + f"（{len(failed)} 个建议强制更新）"
+                # 必须看返回值：update_selected 在 Manager 未安装 / cm-cli 非零
+                # 退出时返回 error 非空，原先直接丢弃 → 失败也报「更新完成」，
+                # 接着 post-check 发现仍落后又触发强制更新（review H4）。
+                if on_progress is not None:
+                    def svc_progress(done, total, name):
+                        self._post_to_ui(lambda d=done, t=total, n=name: on_progress(d, t, n))
+                    res = self.svc.update_selected(names, on_progress=svc_progress)
+                else:
+                    res = self.svc.update_selected(names)
+                if isinstance(res, dict) and res.get("error"):
+                    ok = False
+                    updated_ok = set()
+                    msg = f"更新选中失败：{res.get('error')}"
+                    # 全量保留 🔄（什么都没升成功）；force_hint 兜住「本次之前没检查过」
+                    # 的场景——那时 _outdated_dir_names 是空的，不显式标记的话
+                    # repopulate 会退化成全清空，用户看不到任何失败痕迹。
+                    failed = list(names)
+                    force_hint = list(names)
+                else:
+                    failed = self.svc.outdated_plugins(names)
+                    if failed:
+                        self._post_to_ui(lambda f=list(failed): self.page.force_update_suggested.emit(f))
+                        msg = msg + f"（{len(failed)} 个已自动开始强制更新）"
+                    # 已成功的从 🔄 标记里摘掉，剩下的保留（用户不必再点「检查更新」）
+                    updated_ok = {n for n in names if n not in set(failed)}
             except Exception as e:
                 # 漏 2 meta-review：原 except:pass 把所有异常吞掉，finally 里 on_done()
                 # 永远按成功流程走。现在存 error，on_done 带 (False, 异常文案)，
                 # 让 qt_app 弹 show_error（非取消）或 registry 标错。
                 ok = False
+                updated_ok = set()
                 msg = f"更新选中失败：{e}"
             finally:
-                self._populate_from_service()
-                if on_done:
-                    def _safe_on_done(o=bool(ok), m=msg):
-                        try:
-                            on_done(o, m)
-                        except TypeError:
+                # 顺序：先把列表刷好（before_done 钩子），再发完成提示。
+                # 反过来的话用户看到「完成」时列表还是旧的（反馈：「更新完没刷新，
+                # 还是那 6 个」），提示还会一闪而过。
+                def _finish():
+                    if on_done:
+                        def _safe_on_done(o=bool(ok), m=msg):
                             try:
-                                on_done()
+                                on_done(o, m)
+                            except TypeError:
+                                try:
+                                    on_done()
+                                except Exception:
+                                    pass
                             except Exception:
                                 pass
+                        try:
+                            _safe_on_done()
                         except Exception:
                             pass
-                    self._post_to_ui(_safe_on_done)
+
+                self._populate_preserving_outdated(updated_ok, before_done=_finish,
+                                                  force_hint=force_hint)
         self._run_in_background(work)
 
 
@@ -1694,8 +1975,8 @@ class PluginController:
         failed = self.svc.outdated_plugins(names)
         if failed:
             self._post_to_ui(lambda: self.page.force_update_suggested.emit(failed))
-        else:
-            self._populate_from_service()
+        # 保留 🔄 标记：已成功的摘掉，别的插件的「可更新」不该跟着消失
+        self._populate_preserving_outdated({n for n in names if n not in set(failed)})
 
     # ---- disable / enable（service 单 target，循环调用）----
     def _on_disable_selected(self, dir_names):
@@ -1856,25 +2137,66 @@ class PluginController:
         """qt_app 触发：带逐插件进度的「检查更新」。
 
         on_progress(current, total, name)：每个插件查完回调（派回 UI 线程）。
-        on_done(outdated_list, remote_dates_dict)：全部完成回调（派回 UI 线程）。
+        on_done(outdated_list, remote_dates_dict, error)：收尾回调（派回 UI 线程），
+        **任何路径都会调用**（含后台异常——error 为异常文案时 outdated/dates 为空集）。
+        2026-10-04 修复：原先 work() 里 check_updates/remote_dates 抛异常会直接
+        raise 出线程（打包 exe 的 stderr 无处可去、无任何日志），on_done 永不执行
+        → 检查弹窗永久冻在最后一格进度（实测 11:02 会话：git 池跑完、remote_dates
+        一条命令都没发出）。现在异常也必达 on_done，弹窗能落到完成/错误态。
+        额外把「连不上远端」的插件数写进 page._last_unreachable 供 UI 提示。
         """
         def work():
             # 进度回调包一层派回 UI 线程
             def svc_progress(cur, tot, name):
                 if on_progress:
                     self._post_to_ui(lambda c=cur, t=tot, n=name: on_progress(c, t, n))
-            outdated = self.svc.check_updates(on_progress=svc_progress)
-            remote_dates = self.svc.remote_dates(outdated) if outdated else {}
+            # 开始检查：列表状态药丸切成「检查中…」，用户知道系统在跑
+            self._post_to_ui(lambda: self.page.set_checking(True))
+            outdated: list = []
+            remote_dates: dict = {}
+            error: Optional[str] = None
+            unreachable: list = []
+            try:
+                outdated = self.svc.check_updates(on_progress=svc_progress,
+                                                  unreachable=unreachable)
+                # 远端日期对**整表**取（不只 outdated）：否则更新完唯一的落后插件后
+                # 「远端日期」列全是 —，用户看不到任何插件的远端日期（2026-10-04 反馈）。
+                # 纯本地 git log，不联网。
+                remote_dates = self.svc.remote_dates(outdated, include_all_git=True)
+            except Exception as e:
+                logger.exception("插件检查更新后台任务异常")
+                error = f"{type(e).__name__}: {e}"
+                # 页面级保证不依赖 on_done 实现：异常也要收掉「检查中」药丸
+                self._post_to_ui(lambda: self.page.set_checking(False))
+            # 直接写 page 属性（qt_app 的 on_done 在 UI 线程读它），不用信号——信号方案
+            # 每次调用都要 connect 一个捕获局部变量的 lambda 且从不 disconnect，
+            # 连点 N 次「检查更新」就泄漏 N 个回调 + N 个 dict（review H1）。
+            try:
+                self.page._last_unreachable = len(unreachable)
+            except Exception:
+                pass
             if on_done:
-                self._post_to_ui(lambda: on_done(list(outdated), remote_dates))
+                # mark_outdated 内部会清 _CHECKING_ROLE（出结果即不再是「检查中」）
+                self._post_to_ui(lambda: on_done(list(outdated), remote_dates, error))
             else:
-                self._post_to_ui(lambda: self.page.outdated_reported.emit(list(outdated), remote_dates))
+                if error:
+                    # 无 on_done 的调用方（默认信号路径）：异常也得收掉「检查中」
+                    self._post_to_ui(lambda: self.page.set_checking(False))
+                else:
+                    self._post_to_ui(lambda: self.page.outdated_reported.emit(
+                        list(outdated), remote_dates))
         self._run_in_background(work)
 
     def _check_updates_work(self):
-        outdated = self.svc.check_updates()
+        self._post_to_ui(lambda: self.page.set_checking(True))
+        try:
+            outdated = self.svc.check_updates()
+        except Exception:
+            self._post_to_ui(lambda: self.page.set_checking(False))
+            raise
         # 对落后的插件取远端 commit 日期（数量少，控制网络成本），随结果一起回推
-        remote_dates = self.svc.remote_dates(outdated) if outdated else {}
+        # 整表都取（纯本地 git log），理由同 run_check_updates
+        remote_dates = self.svc.remote_dates(outdated, include_all_git=True)
         self._post_to_ui(lambda: self.page.outdated_reported.emit(list(outdated), remote_dates))
 
     # ---- force-update（qt_app 二次确认后调 apply_force_update）----
@@ -1890,7 +2212,9 @@ class PluginController:
                 self._sync_deps()
             except Exception:
                 pass
-        self._populate_from_service()
+        done_ok = {r.get("name") for r in results
+                   if r.get("ok", False) and not r.get("skipped", False)}
+        self._populate_preserving_outdated(done_ok)
         return results
 
     # ---- 漏 1 meta-review：强制更新带反馈版（仿 run_update_selected 契约）----
@@ -1908,7 +2232,7 @@ class PluginController:
             err_msg = None
             try:
                 if on_status:
-                    label = f"正在强制更新插件 ({len(names)} 个，git stash + pull --ff-only)..."
+                    label = f"正在强制更新插件 ({len(names)} 个，git 强拉 / CNR 重装)..."
                     self._post_to_ui(lambda: on_status(label))
                 results = list(self.svc.force_update_selected(names) or [])
                 # 复用普通更新的「同步依赖库」
@@ -1924,6 +2248,15 @@ class PluginController:
                 summary = f"强制更新完成：成功 {ok_count} 个，跳过 {skip_count} 个，失败 {fail_count} 个"
                 if err_msg:
                     summary = summary + f"；{err_msg}"
+                # 用户反馈：强制更新不再弹确认框了（issue #107 那些「正常更新没搞定」的
+                # 插件直接处理），但 CNR 插件重装会替换整个目录——这里在结果里说一声，
+                # 免得用户手动改过的文件莫名消失却不知情。
+                cnr_done = [r.get("name") for r in results
+                            if r.get("ok", False) and not r.get("skipped", False)
+                            and str(r.get("detail") or "").startswith("CNR 重装")]
+                if cnr_done:
+                    summary = (summary + f"\n\n· {len(cnr_done)} 个 CNR 插件已用 registry 官方版"
+                               f"重装（目录已替换，手动改过的文件不再保留）: " + ", ".join(cnr_done))
                 # B5 CR：GUI 用户必须能看到 per_plugin 的 [警告] 和失败 detail。
                 # 原先 qt_app._adapted_done 会把 per_plugin 整个丢掉，强制更新 stash 冲突时
                 # 用户看不到任何冲突提示（以为成功了）。这里把 failed + 有警告的 detail
@@ -1941,15 +2274,25 @@ class PluginController:
                 if notable:
                     joined = "\n".join("· " + s for s in notable)
                     summary = f"{summary}\n\n{joined}"
-                if on_done:
-                    self._post_to_ui(lambda o=bool(ok_all), s=summary, p=list(results): on_done(o, s, p))
             except Exception as e:
                 ok_all = False
                 summary = f"强制更新异常：{e}"
-                if on_done:
-                    self._post_to_ui(lambda o=False, s=summary, p=list(results): on_done(o, s, p))
             finally:
-                self._populate_from_service()
+                # 成功的从 🔄 标记里摘掉，失败/跳过的保留（issue #107 体验：更新后
+                # 不必重新点「检查更新」才知道还剩哪些落后）。
+                # 先刷列表再报完成（见 run_update_selected 同款注释）。
+                done_ok = {r.get("name") for r in results
+                           if r.get("ok", False) and not r.get("skipped", False)}
+
+                def _finish():
+                    # 已在 UI 线程（before_done 由 _post_to_ui 派发进来），直接调
+                    if on_done:
+                        try:
+                            on_done(bool(ok_all), summary, list(results))
+                        except Exception:
+                            pass
+
+                self._populate_preserving_outdated(done_ok, before_done=_finish)
         self._run_in_background(work)
 
     def _populate_from_service(self):
@@ -1960,3 +2303,43 @@ class PluginController:
         调用时前一次加载已完成（is_loading=False），load() 会照常执行。
         """
         self._loader.load()
+
+    def _populate_preserving_outdated(self, done_names=None, before_done=None,
+                                      force_hint=None):
+        """更新后刷新：保留「检查更新」结果，只摘掉 done_names 里已更新的插件。
+
+        直接取 list_installed 后派回 UI 线程走 page.repopulate_preserving_outdated，
+        不走 loader.load()（那是给「刷新」用的全量清空路径）。不保留标记的话，用户
+        更新完插件就得重新点「检查更新」才知道还剩哪些落后（issue #107 后的体验问题）。
+
+        before_done：可选回调，**在列表刷好之后、on_done 完成提示之前**触发。
+        用户反馈「更新完没刷新，还是那 6 个」+「没有完成提示，得去后台任务看」：
+        根因是刷新走 _post_to_ui（Qt 信号派发，异步），而 on_done 紧随其后同步发出，
+        于是完成提示先于列表刷新到达，提示还一闪而过。这个钩子保证先刷界面、
+        再报完成，顺序与用户预期一致。
+
+        force_hint：可选 dir_name 列表，本次要**强制标为可更新**（更新失败的兜底）。
+        之前没检查过时 _outdated_dir_names 是空的，不给 hint 的话刷新会退化成全清空，
+        用户看不到任何失败痕迹。
+        """
+        def work():
+            try:
+                plugins = self.svc.list_installed()
+            except Exception:
+                plugins = None
+            if plugins is not None:
+                def _apply():
+                    try:
+                        hint = list(force_hint) if force_hint else None
+                        self.page.repopulate_preserving_outdated(
+                            plugins, list(done_names or set()), force_hint=hint)
+                    finally:
+                        if before_done is not None:
+                            try:
+                                before_done()
+                            except Exception:
+                                pass
+                self._post_to_ui(_apply)
+            elif before_done is not None:
+                self._post_to_ui(before_done)
+        self._run_in_background(work)

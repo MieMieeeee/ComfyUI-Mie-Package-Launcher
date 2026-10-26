@@ -138,6 +138,38 @@ class TestPyPIProxy:
         assert len(entries) >= 2, "PyPI proxy URL entry not found"
 
 
+def _env_edit_dialog(qtbot):
+    """构建环境编辑弹窗（根目录 / Python 路径现在在这里编辑）。
+
+    注意：不要给弹窗再套一个临时 parent widget —— 那个临时 widget 在函数
+    返回后就会被 GC，PyQt 连带把子对象（弹窗）一起析构，调用方拿到的就是
+    一个「已删除的 C++ 对象」。
+    """
+    from ui_qt.pages.environment_manager_section import _EnvEditDialog
+    from ui_qt.theme_manager import ThemeManager
+
+    theme = ThemeManager(dark=True)
+    dlg = _EnvEditDialog(None, "编辑环境", "测试环境", "", "", None, theme)
+    qtbot.addWidget(dlg)
+    return dlg
+
+
+def _form_field(dlg, label_text):
+    """按 QFormLayout 的行标签找该行的字段控件。"""
+    from PyQt5 import QtWidgets
+
+    for form in dlg.findChildren(QtWidgets.QFormLayout):
+        for row in range(form.rowCount()):
+            lbl_item = form.itemAt(row, QtWidgets.QFormLayout.LabelRole)
+            field_item = form.itemAt(row, QtWidgets.QFormLayout.FieldRole)
+            if lbl_item is None or field_item is None:
+                continue
+            lbl = lbl_item.widget()
+            if lbl is not None and lbl.text() == label_text:
+                return field_item.widget()
+    return None
+
+
 class TestRootDirectorySelector:
     """Test root directory display and selection button."""
 
@@ -157,20 +189,29 @@ class TestRootDirectorySelector:
                     break
         assert root_edit is not None, "Root directory display not found"
 
-    def test_has_root_select_button(self, app_context, qtbot):
-        """Section should have a root directory selection button."""
+    def test_root_selection_lives_in_environment_edit_dialog(self, app_context, qtbot):
+        """根目录选择已从启动页环境区块移到「环境管理」弹窗。
+
+        一个「环境」= ComfyUI 根目录 + python 路径，这两项属于环境定义，
+        所以启动页的环境区块不再重复提供，改为由顶部环境栏的路径摘要 +
+        环境编辑弹窗统一编辑。这里守住新归属：弹窗里必须有「ComfyUI 根目录」
+        行和浏览按钮；启动页区块则不该再有根目录选择按钮（避免两处各改一处）。
+        """
         from ui_qt.pages.launch import EnvironmentSection
         from PyQt5.QtWidgets import QPushButton
         section = EnvironmentSection(app_context)
         qtbot.addWidget(section)
-        
-        # Find button with "根目录" or "选择" text
-        root_btn = None
+
         for btn in section.findChildren(QPushButton):
-            if hasattr(btn, 'text') and ("根目录" in btn.text() or "选择" in btn.text()):
-                root_btn = btn
-                break
-        assert root_btn is not None, "Root directory select button not found"
+            assert "根目录" not in btn.text(), \
+                "根目录选择已移到环境管理弹窗，启动页环境区块不该重复提供"
+
+        dlg = _env_edit_dialog(qtbot)
+        field = _form_field(dlg, "ComfyUI 根目录")
+        assert field is not None, "环境编辑弹窗缺少「ComfyUI 根目录」行"
+        btns = field.findChildren(QPushButton)
+        assert any("浏览" in b.text() for b in btns), \
+            "环境编辑弹窗的根目录行缺少「浏览…」按钮"
 
 
 class TestPythonPathSelector:
@@ -192,20 +233,27 @@ class TestPythonPathSelector:
                     break
         assert py_edit is not None, "Python path display not found"
 
-    def test_has_python_select_button(self, app_context, qtbot):
-        """Section should have a Python path selection button."""
+    def test_python_selection_lives_in_environment_edit_dialog(self, app_context, qtbot):
+        """Python 路径选择同样已从启动页环境区块移到「环境管理」弹窗。
+
+        见 test_root_selection_lives_in_environment_edit_dialog 的说明：
+        python 路径属于「环境」定义，只在环境编辑弹窗里编辑。
+        """
         from ui_qt.pages.launch import EnvironmentSection
         from PyQt5.QtWidgets import QPushButton
         section = EnvironmentSection(app_context)
         qtbot.addWidget(section)
-        
-        # Find button with "Python" or "选择" text
-        py_btn = None
+
         for btn in section.findChildren(QPushButton):
-            if hasattr(btn, 'text') and ("Python" in btn.text() or "python" in btn.text().lower() or "选择" in btn.text()):
-                py_btn = btn
-                break
-        assert py_btn is not None, "Python path select button not found"
+            assert "Python" not in btn.text(), \
+                "Python 路径选择已移到环境管理弹窗，启动页环境区块不该重复提供"
+
+        dlg = _env_edit_dialog(qtbot)
+        field = _form_field(dlg, "Python 路径")
+        assert field is not None, "环境编辑弹窗缺少「Python 路径」行"
+        btns = field.findChildren(QPushButton)
+        assert any("浏览" in b.text() for b in btns), \
+            "环境编辑弹窗的 Python 路径行缺少「浏览…」按钮"
 
 
 class TestGroupBox:

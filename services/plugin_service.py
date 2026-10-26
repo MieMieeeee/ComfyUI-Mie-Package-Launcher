@@ -5,6 +5,12 @@
 - cm-cli.py 用 ComfyUI 内置 python + COMFYUI_PATH 即可**独立运行**（import manager_core，
   不 import manager_server），复用 Manager 全部能力：git 更新 + 每个插件的 pip 依赖
   （PIPFixer）+ CNR registry + snapshot。
+- 队列 API 只用于 uninstall/disable/enable（纯目录操作）。install/update 明确**不走**
+  队列 API（2026-10 策略调整）：队列任务完成后 Manager 网页前端会弹「Apply/重启」，
+  用户点击产生 os.execv 换 PID 的重启（启动器跟踪不到），且更新写入的依赖会被
+  「预约」到启动脚本列表，下次启动触发 prestartup 的「Restarting to reapply
+  dependency installation」二次重启链（Windows 下其 execv 命令不可靠）——曾把
+  运行中的 ComfyUI 静默搞死。启动器语义是「重启 ComfyUI 后生效」，重启时机自己掌握。
 
 调用形态（优先 cm_fast 包装器，失败退原生 cm-cli）：
     [python_path, cm_fast.py|cm_cli_path, "update", "all"]
@@ -68,6 +74,18 @@ _CM_FAST_EXIT_CACHE_MISSING = 3
 # Manager HTTP API 探测缓存 TTL（秒）；轮询间隔（秒）。
 _API_PROBE_TTL = 30.0
 _API_POLL_INTERVAL = 1.0
+# git pull 失败 stderr 命中这些特征 → 归类为网络/镜像问题（区别于代码冲突），
+# detail 明确提示重试/换代理，避免用户当成插件本身坏了（issue #107 截图里的
+# gh-proxy.com schannel SSL 握手失败即此类）。
+_GIT_NET_ERR_MARKERS = (
+    "schannel", "ssl", "tls", "unable to access", "could not resolve host",
+    "failed to connect", "connection was reset", "connection timed out",
+    "rpc failed", "failed to receive handshake",
+)
+# outdated_plugins 的 git ls-remote 并发度。IO 等待型（网络往返），线程数翻倍
+# 不增加 CPU 压力；8 是实测平衡点（30+ git 插件：串行 ~50s → 8 并发 ~7s）。
+# 再高会撞镜像/远端的并发限流，得不偿失。
+_OUTDATED_MAX_WORKERS = 8
 
 logger = logging.getLogger("comfyui_launcher")
 # 流式执行 cm-cli 时的日志序号（便于在 launcher.log 检索某次 install 的完整原始输出）
@@ -80,6 +98,32 @@ def _truncate(text: str, limit: int = _LOG_LIMIT) -> str:
     if len(text) <= limit:
         return text
     return text[:limit] + f"\n...[truncated {len(text) - limit} chars]"
+
+
+def _cmcli_update_progress(raw: str) -> Optional[tuple[int, int, str]]:
+    """解析 cm-cli update 的逐插件进度行，供进度弹窗驱动 k/N 进度条。
+
+    cm-cli（含 cm_fast 包装器，输出行一致）每完成一个插件打一行：
+        "1/5 [  UPDATED ]: comfyui-foo => done"
+        "3/12 [  SKIPPED  ]: ComfyUI-MiniMaxH3-Context-Loop => Not installed"
+    即 "{done}/{total} [ {状态} ]: {插件名} => {结果}"（名字可能带 => 后的结果尾巴，
+    结果本身可能折行——只取 => 前的名字）。FETCH DATA / git 原始输出等噪声行返回
+    None。返回 (done, total, name)。
+    """
+    if not raw:
+        return None
+    line = raw.strip()
+    m = re.match(r"^(\d+)\s*/\s*(\d+)\s*\[\s*[^\]]*\]\s*:\s*(.+?)(?:\s*=>.*)?$", line)
+    if not m:
+        return None
+    try:
+        done, total = int(m.group(1)), int(m.group(2))
+    except ValueError:
+        return None
+    if done < 1 or total < 1 or done > total:
+        return None
+    name = m.group(3).strip()
+    return (done, total, name) if name else None
 
 
 def _cmcli_install_stage(raw: str) -> Optional[str]:
@@ -131,6 +175,11 @@ class PluginService:
         self._reg_index_cache: tuple = (None, None, None)
         # Manager API 可用性探测缓存 (port, ts, ok)，TTL 见 _API_PROBE_TTL
         self._api_probe_cache: tuple = (None, 0.0, False)
+        # issue #107：CNR 插件重装后版本未动过的抑制集。
+        # key: str(plugin_dir)，value: (重装后 pyproject version, 当时的 registry latest)。
+        # outdated_plugins 对命中且两元组都没变的插件不再重复标记「有更新」——
+        # 否则上游元数据不一致时「扫描说有更新 → 更新 → 版本没动」永久循环。
+        self._cnr_nomove: dict[str, tuple] = {}
 
     # ---- 缓存辅助（P1-3 meta-review）----
     def _evict_git_info_cache(self, target: Any = None) -> None:
@@ -421,11 +470,28 @@ class PluginService:
         """
         return self._git_out(["log", "-1", "--format=%cs"], plugin_dir)
 
+    def _git_env(self) -> dict:
+        """git 子进程的 env：透传启动器自己的 git 代理配置（GIT_CONFIG_GLOBAL）。
+
+        关键（review H3）：代理原先只透给 cm-cli 子进程（_run_cmcli_script），
+        启动器自己跑的 git（_git_out / _git_run：rev-parse、**ls-remote**、log）
+        没带 env → 配置了 gh-proxy 的用户，「检查更新」的 ls-remote 直连 github
+        失败 → _git_out 返回空串 → 判定「取不到远端 = 不落后」→ 误报
+        「所有插件均为最新」。同一时刻「更新全部」走 cm-cli（有代理）却能成功。
+        """
+        env = os.environ.copy()
+        try:
+            self._apply_git_proxy_env(env)
+        except Exception:
+            pass
+        return env
+
     def _git_out(self, args: list[str], cwd: Path) -> str:
         """跑一条 git 命令，成功返回 strip 后的 stdout，否则空串。"""
         try:
             r = run_hidden([self._git_exec(), *args], cwd=str(cwd),
-                           capture_output=True, text=True, timeout=15)
+                           capture_output=True, text=True, timeout=15,
+                           env=self._git_env())
             if r.returncode == 0:
                 return (r.stdout or "").strip()
         except Exception:
@@ -436,7 +502,8 @@ class PluginService:
         """跑一条 git 命令，返回 {rc, stdout, stderr}（保留退出码，供强制更新判断）。"""
         try:
             r = run_hidden([self._git_exec(), *args], cwd=str(cwd),
-                           capture_output=True, text=True, timeout=timeout)
+                           capture_output=True, text=True, timeout=timeout,
+                           env=self._git_env())
             return {"rc": r.returncode, "stdout": r.stdout or "", "stderr": r.stderr or ""}
         except Exception as e:
             return {"rc": -1, "stdout": "", "stderr": str(e)}
@@ -707,7 +774,8 @@ class PluginService:
         except Exception as e:
             return {"ok": False, "error": str(e), "count": 0}
 
-    def outdated_plugins(self, names: list[str], on_progress=None) -> list[str]:
+    def outdated_plugins(self, names: list[str], on_progress=None,
+                         unreachable: list | None = None) -> list[str]:
         """返回 names 中「有可用更新」的子集，支持 git 和 CNR 两类插件。
 
         - git 插件：本地 HEAD != origin HEAD（git ls-remote 比对）。dirty 树/无网则不当落后。
@@ -718,8 +786,17 @@ class PluginService:
         正常更新后仍落后 = 该插件没被更新成功（如 dirty 树被 cm-cli 拒），
         也可作为「更新选中」后的失败检测。
 
+        并发：git 检测每插件一次 `ls-remote` 网络往返（实测 ~1.5s），串行 60 个
+        插件要 ~50s。改为线程池并发（_OUTDATED_MAX_WORKERS，默认 8，IO 等待型
+        翻倍不增加 CPU 压力），31 个 git 插件实测 50s → ~7s。CNR/local 检测是
+        纯本地文件读，留在主线程顺带做。on_progress 语义不变（完成计数）。
+
         on_progress(current, total, name)：每查完一个插件调一次，供 UI 显示
         逐插件进度（如「正在查询第 3/60 个...」）。None 则不回调。
+
+        unreachable（可选 list）：跑完后把「git 仓库存在但连不上远端」的 dir_name
+        追加进去。取不到远端时不能静默当「没有更新」——代理/网络故障会让用户误以为
+        所有插件都最新（review H3 的可观测性补齐）。
         """
         result = []
         cn_dir = PATHS.plugins_dir(self._comfyui_dir())
@@ -727,39 +804,110 @@ class PluginService:
         # CNR 检测依赖 registry 缓存，按需加载一次（git 检测不需要）
         cnr_map = None  # 懒加载
         installed = None  # list_installed 结果（CNR 需要 version/remote_url），懒加载
-        for i, name in enumerate(names):
+
+        # 第一遍（纯文件系统，便宜）：把 names 分成 git（要联网，并发查）和
+        # 非 git（本地读，主线程查）。顺序照旧以保持 result 的稳定顺序。
+        # 用 _resolve_plugin_dir 解析真实路径：.disabled/ 下的插件裸目录名拼
+        # cn_dir/name 会指向不存在的路径，静默被判成「local 无更新源」
+        # （review L4 / H2 同源问题）。
+        git_names: list[str] = []
+        cnr_names: list[str] = []
+        dir_cache: dict[str, Path] = {}
+        for name in names:
+            d = self._resolve_plugin_dir(name)
+            if d is None:
+                continue  # 目录已被外部删掉/改名：不属于「无更新」，直接跳过
+            dir_cache[name] = d
+            if (d / ".git").exists():
+                git_names.append(name)
+            else:
+                cnr_names.append(name)
+
+        done = 0
+
+        def _tick(name: str):
+            """完成一个插件的检测后推进进度（UI 只读完成数，异常吞掉）。"""
+            nonlocal done
+            done += 1
             if on_progress:
                 try:
-                    on_progress(i, total, name)
+                    on_progress(done, total, name)
                 except Exception:
                     pass
-            d = cn_dir / name
-            has_git = (d / ".git").exists()
-            if has_git:
-                # git 插件：ls-remote 比对
-                local = self._git_out(["rev-parse", "HEAD"], d)
-                remote = self._git_remote_head(d)
-                if remote and local and remote != local:
-                    result.append(name)
-                continue
-            # 非 git：可能是 CNR 插件（有 pyproject.toml），用 registry 版本比较
-            py = self._read_pyproject(d)
-            if not py or not py.get("version"):
-                continue  # local 插件无更新源
-            if cnr_map is None:
-                cnr_map = self._cnr_registry_map()
-            if not cnr_map:
-                continue  # registry 缓存不可用，无法判断
-            repo_url = (py.get("repository") or "").rstrip("/")
-            latest = cnr_map.get(repo_url)
-            if latest and _parse_version(latest) > _parse_version(py["version"]):
-                result.append(name)
-        if on_progress:
+
+        # --- git 插件：并发跑 rev-parse + ls-remote ---
+        def _check_git(name: str) -> tuple[str | None, bool]:
+            """返回 (落后的 name 或 None, 是否连不上远端)。
+
+            连不上远端时**不能**当成「不落后」：代理/网络故障会让用户以为所有插件
+            都最新（review H3）。这里如实回报 unreachable，交给调用方提示。
+            """
+            d = dir_cache.get(name) or (cn_dir / name)
+            local = self._git_out(["rev-parse", "HEAD"], d)
+            remote = self._git_remote_head(d)
+            if not remote:
+                # 取不到远端：git 仓库存在但网络/代理/无 origin 都落这里
+                return (None, True)
+            if local and remote != local:
+                return (name, False)
+            return (None, False)
+
+        git_outdated: dict[str, bool] = {}
+        unreachable_hits: list[str] = []
+        if git_names:
             try:
-                on_progress(total, total, "")
+                with concurrent.futures.ThreadPoolExecutor(
+                        max_workers=_OUTDATED_MAX_WORKERS) as ex:
+                    futs = {ex.submit(_check_git, n): n for n in git_names}
+                    for fut in concurrent.futures.as_completed(futs):
+                        n = futs[fut]
+                        try:
+                            hit, un = fut.result()
+                        except Exception:
+                            hit, un = (None, False)  # 单个插件异常不影响整体
+                        if hit:
+                            git_outdated[n] = True
+                        if un:
+                            unreachable_hits.append(n)
+                        _tick(n)
             except Exception:
-                pass
-        return result
+                # 并发调度整体失败（极罕见）→ 回退串行，保证结果完整
+                for n in git_names:
+                    try:
+                        hit, un = self._check_git(n)
+                        if hit:
+                            git_outdated[n] = True
+                        if un:
+                            unreachable_hits.append(n)
+                    except Exception:
+                        pass
+                    _tick(n)
+        if unreachable is not None and unreachable_hits:
+            unreachable.extend(unreachable_hits)
+
+        # --- CNR / local 插件：纯本地判定，主线程顺带做 ---
+        for name in cnr_names:
+            hit = False
+            d = dir_cache.get(name) or (cn_dir / name)
+            py = self._read_pyproject(d)
+            if py and py.get("version"):
+                if cnr_map is None:
+                    cnr_map = self._cnr_registry_map()
+                if cnr_map:
+                    repo_url = (py.get("repository") or "").rstrip("/")
+                    latest = cnr_map.get(repo_url)
+                    if latest and _parse_version(latest) > _parse_version(py["version"]):
+                        # issue #107：重装后版本仍不动的插件不再重复标记
+                        # （见 _cnr_nomove 注释）。版本或 registry latest 任一
+                        # 变化（真升级 / 出了更高版）即自动解除。
+                        if self._cnr_nomove.get(str(d)) != (py["version"], latest):
+                            hit = True
+            if hit:
+                git_outdated[name] = True
+            _tick(name)
+
+        # 按 names 原顺序返回（并发完成顺序不固定，这里重排保证 UI 展示稳定）
+        return [n for n in names if git_outdated.get(n)]
 
     def _git_remote_head(self, plugin_dir: Path) -> str:
         """git ls-remote origin HEAD → 远端 HEAD sha（取不到返回空串）。"""
@@ -767,18 +915,33 @@ class PluginService:
         parts = out.split()
         return parts[0] if parts else ""
 
-    def remote_dates(self, names: list[str]) -> dict[str, str]:
+    def remote_dates(self, names: list[str], include_all_git: bool = False) -> dict[str, str]:
         """取这些插件远端 HEAD 的 commit 日期，{dir_name: "YYYY-MM-DD"}。
 
         用 git log -1 --format=%cs origin/HEAD —— 依赖本地已 fetch 过 origin/HEAD ref
         （ComfyUI 插件通常都有）。取不到（未 fetch / 无网）的插件不进结果 dict，
-        delegate 对缺失项不画远端日期列。仅对 outdated 插件调用，控制网络/IO 成本。
+        delegate 对缺失项不画远端日期列。默认只查 names 里传入的那些（控制 IO 成本）。
+
+        include_all_git=True（UI「检查更新」默认走这条）：额外把**所有**已装 git 插件
+        的远端日期也带上，让列表的「远端日期」列对整表可见，而不是只有落后插件才有值
+        ——用户反馈「更新完之后整列全是 —，看不出各插件远端停在哪天」。git log 读的是
+        本地已有的 origin/HEAD ref，**不联网**，62 个插件约 2-3s（实测），只在点
+        「检查更新」时跑一次。CNR 插件没有远端 commit，仍只在 names 里（即 outdated
+        的那些）才给 registry 最新版本号。
         """
         cn_dir = PATHS.plugins_dir(self._comfyui_dir())
         result: dict[str, str] = {}
         cnr_map = None
+        if include_all_git:
+            # 保持 names 在前的顺序：已有结果优先（CNR 的版本号不会被后面覆盖）。
+            extra = [str(p.get("dir_name") or "") for p in self.list_installed()
+                     if p.get("kind") == "git"]
+            seen = set(names)
+            names = list(names) + [n for n in extra if n and n not in seen]
         for name in names:
-            d = cn_dir / name
+            d = self._resolve_plugin_dir(name)
+            if d is None:
+                continue  # 目录已不存在
             if (d / ".git").exists():
                 # git 插件：远端 commit 日期
                 date = self._git_out(["log", "-1", "--format=%cs", "origin/HEAD"], d)
@@ -796,18 +959,20 @@ class PluginService:
                 result[name] = latest
         return result
 
-    def check_updates(self, on_progress=None) -> list[str]:
+    def check_updates(self, on_progress=None, unreachable: list | None = None) -> list[str]:
         """检查全部已装插件是否有更新（批量 git ls-remote 比对）。
 
         复用 outdated_plugins：把 list_installed() 的 dir_name 全传过去，
         返回落后于 origin 的 dir_name 子集。供 UI「检查更新」按钮和
         CLI `plugins check-updates` 共用，避免两处重复拼 names。
-        ls-remote 取不到（无网）的插件不当成落后，离线友好。
+        ls-remote 取不到（无网/代理故障）的插件不当成落后，离线友好，但会填进
+        unreachable（可选 list）供 UI 提示「N 个未能检查」，避免用户误以为全最新。
 
         on_progress(current, total, name)：透传给 outdated_plugins，供 UI 逐插件进度。
         """
         names = [p["dir_name"] for p in self.list_installed()]
-        return self.outdated_plugins(names, on_progress=on_progress)
+        return self.outdated_plugins(names, on_progress=on_progress,
+                                     unreachable=unreachable)
 
     # ---- cm_fast 包装器物化 ----
     def _cm_fast_source(self) -> Optional[Path]:
@@ -1388,14 +1553,29 @@ class PluginService:
         """为已安装插件构造 queue API 身份 payload（分类与 Manager 自身一致：
         InstalledNodePackage.from_fullpath → resolve_from_path）。
 
-        - .tracking/ + pyproject.toml → CNR 固定版：{id, version=semver}
+        - .tracking + pyproject.toml   → CNR 固定版：{id, version=semver}
         - .git url 命中 registry      → nightly：{id, version='nightly'}
         - 其他 .git                    → unknown：{version='unknown', files=[url]}
         - 都凑不出（无 git / worktree）→ None（调用方降级包装器，cm-cli 原生鲁棒）
+
+        issue #107：CNR 分支原先是坏的，两个叠加缺陷导致所有 CNR 插件
+        （multigpu / rgthree / impact-pack …）拿不到身份 → update_selected 因
+        「任一身份构造失败 → 整批降级」而放弃 API 路径 → 什么都没升 → 反复提示
+        强制更新：
+        1. `.tracking` 用 is_dir() 判断，但 Manager 写的是**文件**（prestartup_script
+           的 `open(tracking_info_file, "w")` 记文件清单用于清理垃圾），永远为假。
+        2. cnr_id 只从 `.git/.cnr-id` 读，而 CNR 插件根本不是 git 仓库（无 .git），
+           恒为 None → 分支内直接落空。
+        修法：.tracking 存在即可；cnr_id 依次取 .git/.cnr-id → pyproject 的
+        repository 反查 registry → 目录名刻 @ 版本尾巴（Manager 的 <id>@<ver> 命名）。
         """
         try:
-            plugin_dir = PATHS.plugins_dir(self._comfyui_dir()) / str(name)
-            if not plugin_dir.is_dir():
+            # 用 _resolve_plugin_dir 而非 cn_dir/name：list_installed 的扫描源含
+            # .disabled/ 子目录，dir_name 是裸目录名（10s-nodes@1_0_0），直接
+            # cn_dir/name 指向不存在的顶层路径 → identity 恒 None → 禁用插件的
+            # API 快路径全线失效（review H2）。
+            plugin_dir = self._resolve_plugin_dir(str(name))
+            if plugin_dir is None or not plugin_dir.is_dir():
                 return None
             cnr_id = None
             id_file = plugin_dir / ".git" / ".cnr-id"
@@ -1404,10 +1584,21 @@ class PluginService:
                     cnr_id = id_file.read_text(encoding="utf-8", errors="ignore").strip() or None
                 except Exception:
                     cnr_id = None
-            if (plugin_dir / ".tracking").is_dir() and (plugin_dir / "pyproject.toml").is_file():
+            # Manager 把 .tracking 写成**文件**（文件清单），不是目录——用 exists()。
+            if (plugin_dir / ".tracking").exists() and (plugin_dir / "pyproject.toml").is_file():
                 ver = self._pyproject_version(plugin_dir)
-                if ver and cnr_id:
-                    return {"id": cnr_id, "version": ver}
+                if ver:
+                    if not cnr_id:
+                        # CNR 插件无 .git/.cnr-id → 用 pyproject 的 repository 反查
+                        # registry 拿真实 CNR id（与 _cnr_registry_map 同源数据）。
+                        repo = (self._read_pyproject(plugin_dir).get("repository") or "").rstrip("/")
+                        entry = self._cnr_lookup(repo) if repo else None
+                        cnr_id = (entry or {}).get("id") or None
+                    if not cnr_id:
+                        # 兜底：Manager 禁用目录用 <id>@<ver> 命名，刻掉尾巴当 id 候选
+                        cnr_id = str(name).split("@", 1)[0] or None
+                    if cnr_id:
+                        return {"id": cnr_id, "version": ver}
             url = self._plugin_git_url(plugin_dir)
             if url:
                 entry = self._cnr_lookup(url)
@@ -1419,35 +1610,6 @@ class PluginService:
         except Exception:
             logger.debug("plugin identity 构造失败: %s", name, exc_info=True)
             return None
-
-    def _api_try_install(self, node_spec, on_stage=None,
-                         cancel_event=None) -> Optional[dict[str, Any]]:
-        """install 的 API 快路径（CNR id）。None=不适用/前置失败（降级包装器）。"""
-        spec = str(node_spec or "").strip()
-        if not spec or spec.lower().startswith(("http://", "https://")):
-            return None  # git URL：listen_all 下 API 高风险分支必被安全门拒 → 包装器
-        entry = self._cnr_lookup(spec)
-        if not entry or not entry.get("id") or not entry.get("version"):
-            return None  # registry 查不到（非 CNR id / 缓存缺失）→ cm-cli 解析更全
-        body = {"id": entry["id"], "version": entry["version"],
-                "selected_version": entry["version"],
-                "channel": "default", "mode": "cache"}
-        logger.info("manager-api: install %s@%s", entry["id"], entry["version"])
-
-        def _prog(done, tot):
-            if on_stage:
-                on_stage(f"正在安装...（Manager 队列 {done}/{tot}）")
-
-        if on_stage:
-            on_stage("开始安装...")
-        res = self._api_run_queue([("/manager/queue/install", body)],
-                                  on_progress=_prog, cancel_event=cancel_event)
-        if res is not None and res.get("ok"):
-            try:
-                self._evict_git_info_cache(None)  # 结果目录名未知 → 全清（对齐 _lifecycle install 分支）
-            except Exception:
-                pass
-        return res
 
     def _api_try_lifecycle(self, op: str, target) -> Optional[dict[str, Any]]:
         """uninstall/disable/enable 的 API 快路径。"""
@@ -1474,68 +1636,32 @@ class PluginService:
                 pass
         return res
 
-    def _api_try_update_selected(self, nodes: list[str]) -> Optional[dict[str, Any]]:
-        """update_selected 的 API 快路径。任一插件身份构造失败 → 整批降级。"""
-        posts = []
-        for n in nodes:
-            ident = self._plugin_queue_identity(str(n))
-            if ident is None:
-                return None
-            body = dict(ident)
-            body.update({"channel": "default", "mode": "cache"})
-            posts.append(("/manager/queue/update", body))
-        logger.info("manager-api: update ×%d（与网页版同路径）", len(posts))
-        res = self._api_run_queue(posts)
-        if res is None:
-            return None
-        if res.get("ok"):
-            try:
-                self._evict_git_info_cache(list(nodes))
-            except Exception:
-                pass
-            return {"updated": True, "up_to_date": False, "log": res["log"], "error": None}
-        return {"updated": False, "up_to_date": False, "log": res.get("log", ""),
-                "error": res.get("error") or "Manager API 更新失败"}
-
-    def _api_try_update_all(self) -> Optional[dict[str, Any]]:
-        """update_all 的 API 快路径。body 必须带 mode=cache：服务端 reload(mode) 未传
-        dont_wait（默认 True → 过期缓存本地读），但 mode 非 'cache' 时
-        get_cnr_data(cache_mode=False) 会跳过全部缓存分支 → 同步全量拉取 5 分钟。
-        401（worker 占用）等非 2xx → None 降级包装器。
-        """
-        logger.info("manager-api: update_all（mode=cache，与网页版同路径）")
-        res = self._api_run_queue([("/manager/queue/update_all", {"mode": "cache"})])
-        if res is None:
-            return None
-        if res.get("ok"):
-            try:
-                self._evict_git_info_cache(None)
-            except Exception:
-                pass
-            return {"updated": True, "up_to_date": False, "log": res["log"], "error": None}
-        return {"updated": False, "up_to_date": False, "log": res.get("log", ""),
-                "error": res.get("error") or "Manager API 更新失败"}
-
     # ---- 更新操作 ----
-    def update_all(self) -> dict[str, Any]:
-        """更新全部插件（优先 Manager API，降级 cm-cli update all，含 pip 依赖修复）。
+    # 2026-10 策略调整（曾致 ComfyUI 被静默关闭，见下）：install/update 不再走
+    # Manager 队列 API，一律直接 cm_fast/cm-cli。队列在「运行中的 ComfyUI 进程内」
+    # 执行，任务完成后 Manager 网页前端会弹「Apply/重启」提示——用户在浏览器里
+    # 点了就产生 os.execv 换 PID 的重启，启动器 pidfile/进程句柄完全跟踪不到；
+    # 且更新写入的插件依赖会被 Manager「预约」到启动脚本列表，下次启动 prestartup
+    # 消费后再触发一次「Restarting to reapply dependency installation」（其
+    # Windows 下双引号 execv 命令不可靠），重启链断裂后 ComfyUI 直接没了。
+    # 启动器的语义是「重启 ComfyUI 后生效」——重启时机由启动器/用户掌握。
+    # uninstall/disable/enable 保留 API（纯目录操作，无依赖 reapply 重启链）。
+    def update_all(self, on_progress=None) -> dict[str, Any]:
+        """更新全部插件（cm-cli update all，含 pip 依赖修复；不走 Manager 队列 API）。
 
+        on_progress(done, total, name)：可选，逐插件进度回调（流式管道）。
         返回契约（对齐 services.update_service）：{updated, up_to_date, log, error}
         """
-        api = self._api_try_update_all()
-        if api is not None:
-            return api
-        return self._do_update(["all"])
+        return self._do_update(["all"], on_progress=on_progress)
 
-    def update_selected(self, nodes: list[str]) -> dict[str, Any]:
-        """更新指定插件（优先 Manager API，降级 cm-cli update <node>...）。"""
+    def update_selected(self, nodes: list[str], on_progress=None) -> dict[str, Any]:
+        """更新指定插件（cm-cli update <node>...；不走 Manager 队列 API）。
+
+        on_progress(done, total, name)：可选，逐插件进度回调（流式管道）。"""
         if not nodes:
             return {"updated": False, "up_to_date": False, "log": "",
                     "error": "未指定要更新的插件"}
-        api = self._api_try_update_selected([str(n) for n in nodes])
-        if api is not None:
-            return api
-        return self._do_update([str(n) for n in nodes])
+        return self._do_update([str(n) for n in nodes], on_progress=on_progress)
 
     def uninstall(self, target):
         """卸载插件（Manager API → 启动器磁盘直连，见 _lifecycle）。"""
@@ -1550,10 +1676,8 @@ class PluginService:
         return self._lifecycle("enable", target)
 
     def install(self, node_spec):
-        """安装插件（优先 Manager API，降级 cm-cli install <CNR id | git url>）。"""
-        api = self._api_try_install(node_spec)
-        if api is not None:
-            return api
+        """安装插件（cm-cli install <CNR id | git url>；不走 Manager 队列 API，见上方
+        2026-10 策略调整注释）。"""
         # install 需要 git clone + pip 依赖安装，无法本地替代 → 保留 cm-cli 路径
         res = self._run_cmcli(["install", str(node_spec)])
         if res["error"]:
@@ -1583,10 +1707,8 @@ class PluginService:
         再对应杀；若 owner_map 还没注册（极端时序 race），兜底只杀自己 cmd_id 注册到
         _active_streaming_procs 的最后一个（避免空扫）。
         """
-        # 优先 Manager API（ComfyUI 在跑时与网页版同路径；不适用自动落回下方包装器路径）
-        api = self._api_try_install(node_spec, on_stage=on_stage, cancel_event=cancel_event)
-        if api is not None:
-            return api
+        # 2026-10 策略调整：install 不再走 Manager 队列 API（队列完成会在网页端弹
+        # 「Apply/重启」，用户点击产生启动器跟踪不到的 os.execv 重启链）——直接包装器。
         # cancel_event 包装：set 时立刻 tree-kill 自己 event 归属的 cmd_id 对应 proc，不等 readline
         if cancel_event is not None:
             _orig_set = cancel_event.set
@@ -1665,12 +1787,20 @@ class PluginService:
             if op == "uninstall":
                 if (cn_dir / base).exists() or (cn_dir / f"{base}.disabled").exists():
                     return False
-                dd = cn_dir / ".disabled"
-                if dd.exists() and any(dd.glob(f"{base}*")):
+                # 精确匹配（base 本身 + base@ver），不用 base* 前缀 glob：
+                # 同前缀的无关插件（FooBar）存在不该让本次卸载被判「没达成终态」
+                if self._disabled_dir_candidates(cn_dir, base):
                     return False
                 return True
             if op == "disable":
-                return not (cn_dir / str(target)).exists()
+                # 顶层启用态目录必须消失（改名成 .disabled 或搬进 .disabled/ 都算达成）
+                if (cn_dir / str(target)).exists():
+                    return False
+                # 终态里应该留下某种禁用痕迹：顶层 <base>.disabled 或 .disabled/<base>@*。
+                # 都不在说明 disable 其实没生效（review M8）。
+                if (cn_dir / f"{base}.disabled").exists():
+                    return True
+                return bool(self._disabled_dir_candidates(cn_dir, base))
             if op == "enable":
                 if (cn_dir / base).exists():
                     return True
@@ -1697,6 +1827,50 @@ class PluginService:
                 raise
         shutil.rmtree(p, onexc=_onexc)
 
+    @staticmethod
+    def _disabled_dir_candidates(cn_dir: Path, base: str) -> list[Path]:
+        """`.disabled/` 子目录下属于 base 的目录（精确语义，不做前缀 glob）。
+
+        Manager 的禁用目录命名是 `<id>@<ver>`（如 `ComfyUI-Impact-Pack@8.1`），同名的
+        历史版本目录也该一起删。**绝不能用 `glob(f"{base}*")`**：那会把同前缀的
+        无辜插件（卸载 Foo 连带删掉 FooBar / FooControl）误删——review 发现的数据
+        丢失级 bug。`_lifecycle_effect_ok` 的终态核实同样必须用这个。
+        """
+        dd = cn_dir / ".disabled"
+        out: list[Path] = []
+        if not dd.is_dir():
+            return out
+        try:
+            for e in dd.iterdir():
+                if e.is_dir() and (e.name == base or e.name.startswith(base + "@")):
+                    out.append(e)
+        except OSError:
+            pass
+        return sorted(out)
+
+    def _resolve_plugin_dir(self, name: str) -> Optional[Path]:
+        """dir_name（list_installed 返回的裸目录名）→ 磁盘上的真实目录。
+
+        list_installed 的扫描源包含 `.disabled/` 子目录，dir_name 是**裸目录名**
+        （如 `10s-comfy-nodes@1_0_0`），直接 `cn_dir / name` 会指向不存在的顶层目录。
+        依次尝试：顶层同名 / 顶层 <name>.disabled / .disabled/<name> / .disabled/<base>@*。
+        找不到返回 None（调用方应明确报「找不到」而不是静默当「无更新」）。
+        """
+        cn_dir = PATHS.plugins_dir(self._comfyui_dir())
+        for cand in (cn_dir / str(name), cn_dir / f"{name}.disabled"):
+            if cand.is_dir():
+                return cand
+        dd = cn_dir / ".disabled"
+        if dd.is_dir():
+            ent = dd / str(name)
+            if ent.is_dir():
+                return ent
+            base = self._lifecycle_base_name(name)
+            for e in sorted(dd.glob(f"{base}@*")):
+                if e.is_dir():
+                    return e
+        return None
+
     def _disk_lifecycle(self, op: str, target: str) -> tuple[bool, str]:
         """B3/B5：uninstall/disable/enable 的磁盘直连执行（主路径，不经 cm-cli）。
 
@@ -1714,7 +1888,7 @@ class PluginService:
             if op == "uninstall":
                 removed = []
                 for cand in [cn_dir / base, cn_dir / f"{base}.disabled",
-                             *sorted((cn_dir / ".disabled").glob(f"{base}*"))]:
+                             *self._disabled_dir_candidates(cn_dir, base)]:
                     if cand.exists():
                         self._rmtree_force(cand)
                         removed.append(cand.name)
@@ -1789,9 +1963,12 @@ class PluginService:
                 "error": note or f"{op} {target} 未生效"}
 
     def force_update_selected(self, names: list[str]) -> list[dict[str, Any]]:
-        """强制更新选中的插件：确认是 git 仓库则 git stash + git pull --ff-only。
+        """强制更新选中的插件：git 插件 stash + git pull --ff-only；CNR 插件重装。
 
-        绕过 cm-cli（dirty 树会被它拒），直接对每个 git 插件 stash 本地改动后强拉。
+        git 插件绕过 cm-cli（dirty 树会被它拒），直接 stash 本地改动后强拉。
+        CNR（非 git 有 pyproject）插件经 install()（Manager API 优先，降级
+        cm_fast 包装器 / 原生 cm-cli）重装 registry 最新版；重装后版本没动的
+        记入 _cnr_nomove，outdated_plugins 不再重复标记（issue #107 死循环）。
         返回每插件结果 [{name, ok, skipped, detail}]。
         """
         results = [self._force_update_one(str(n)) for n in names]
@@ -1803,12 +1980,25 @@ class PluginService:
         return results
 
     def _force_update_one(self, name: str) -> dict[str, Any]:
-        cn_dir = PATHS.plugins_dir(self._comfyui_dir())
-        plugin_dir = cn_dir / name
-        if not plugin_dir.exists():
+        # _resolve_plugin_dir 而非 cn_dir/name：.disabled/ 下的插件裸目录名拼
+        # cn_dir/name 指向不存在路径 → 永远「目录不存在」skipped（review H2）。
+        plugin_dir = self._resolve_plugin_dir(name)
+        if plugin_dir is None:
             return {"name": name, "ok": False, "skipped": True, "detail": "目录不存在"}
-        if not (plugin_dir / ".git").exists():
-            return {"name": name, "ok": False, "skipped": True, "detail": "非 git 仓库，跳过强制更新"}
+        if (plugin_dir / ".git").exists():
+            return self._force_update_git_one(name, plugin_dir)
+        py = self._read_pyproject(plugin_dir)
+        if py.get("version") or py.get("repository"):
+            return self._force_update_cnr_one(name, plugin_dir, py)
+        return {"name": name, "ok": False, "skipped": True,
+                "detail": "local 插件（非 git 且无 pyproject），无更新源，跳过强制更新"}
+
+    @staticmethod
+    def _is_network_error(err: str) -> bool:
+        low = (err or "").lower()
+        return any(m in low for m in _GIT_NET_ERR_MARKERS)
+
+    def _force_update_git_one(self, name: str, plugin_dir: Path) -> dict[str, Any]:
         # B6 CR：pull 失败也 pop stash，避免反复强制更新堆 10+ 个 entry。
         # --ff-only 是全有或全无：pull 失败后工作树一定是干净的（没应用任何提交），pop 是安全的，
         # 还能还原用户改动；pop 若冲突 → 仍然 drop 栈避免泄漏，detail 写告警并保留冲突标记。
@@ -1837,6 +2027,11 @@ class PluginService:
         # 防止「反复强制更新堆 10+ 个 stash entry」的老问题重现。
         err = (pull["stderr"] or pull["stdout"] or "").strip()
         detail = f"pull 失败 (rc={pull['rc']}): {err[:300]}"
+        if self._is_network_error(err):
+            warnings.append(
+                "远端/镜像连接失败（SSL 握手或网络问题），插件本身没坏，"
+                "可稍后重试或在设置里更换 git 代理"
+            )
         if did_stash:
             pop = self._git_run(["stash", "pop"], plugin_dir)
             if pop["rc"] != 0:
@@ -1854,11 +2049,60 @@ class PluginService:
             detail = (detail + "\n" + "\n".join("[警告] " + w for w in warnings))[:400]
         return {"name": name, "ok": False, "skipped": False, "detail": detail[:400]}
 
-    def _do_update(self, nodes: list[str]) -> dict[str, Any]:
+    def _force_update_cnr_one(self, name: str, plugin_dir: Path,
+                              py: dict[str, str]) -> dict[str, Any]:
+        """CNR（非 git）插件的强制更新：install() 重装 registry 最新版。
+
+        install() 内部 Manager API（ComfyUI 在跑，秒级）优先，降级 cm_fast 包装器 /
+        原生 cm-cli（CNR 缓存缺失时 exit 3 → 原生兜底建一次缓存，见 _run_cmcli）。
+        重装后核对包内 pyproject version：动了 → 真更新；没动 → 上游 registry 元数据
+        与包内 pyproject 不一致（或 Manager 判定已最新），重装也无解，记入 _cnr_nomove
+        让 outdated_plugins 停止重复标记，否则「建议强制更新 → 跳过/空转」永久循环。
+        """
+        repo = (py.get("repository") or "").rstrip("/")
+        entry = self._cnr_lookup(repo) if repo else None
+        if not entry or not entry.get("id"):
+            entry = self._cnr_lookup(name)
+        if not entry or not entry.get("id"):
+            return {"name": name, "ok": False, "skipped": True,
+                    "detail": "CNR 插件（非 git）：registry 缓存查不到条目，无法重装；"
+                              "可启动 ComfyUI 后用 Manager 更新"}
+        cnr_id = entry["id"]
+        ver_before = py.get("version") or ""
+        res = self.install(cnr_id)
+        if res.get("error"):
+            return {"name": name, "ok": False, "skipped": False,
+                    "detail": f"CNR 重装失败: {res.get('error')}"[:400]}
+        ver_after = self._pyproject_version(plugin_dir) or ""
+        if ver_after and ver_after != ver_before:
+            detail = f"CNR 重装完成: {ver_before or '?'} → {ver_after}（{cnr_id}）"
+            return {"name": name, "ok": True, "skipped": False, "detail": detail[:400]}
+        latest = self._cnr_registry_map().get(repo) if repo else None
+        self._cnr_nomove[str(plugin_dir)] = (ver_after or ver_before, latest)
+        detail = (f"CNR 重装完成但版本未变化（仍为 {ver_after or ver_before or '?'}，{cnr_id}）："
+                  "上游 registry 元数据与包内 pyproject 可能不一致，"
+                  "本会话内不再重复提示该插件有更新")
+        return {"name": name, "ok": True, "skipped": False, "detail": detail[:400]}
+
+    def _do_update(self, nodes: list[str], on_progress=None) -> dict[str, Any]:
+        """跑 cm-cli update。on_progress(done, total, name) 提供时走流式管道，
+        把 cm-cli 的逐插件进度行（"k/N [ STATUS ]: name => ..."，见
+        _cmcli_update_progress）实时回调给 UI 驱动 k/N 进度条；否则保持原来的
+        整体捕获行为。"""
         if not self.is_available():
             return {"updated": False, "up_to_date": False, "log": "",
                     "error": "ComfyUI-Manager 未安装（在 custom_nodes/ComfyUI-Manager 找不到 cm-cli.py）"}
-        res = self._run_cmcli(["update", *nodes])
+        if on_progress is not None:
+            def _tap(raw):
+                hit = _cmcli_update_progress(raw)
+                if hit:
+                    try:
+                        on_progress(*hit)
+                    except Exception:
+                        pass
+            res = self._run_cmcli_streaming(["update", *nodes], on_output=_tap)
+        else:
+            res = self._run_cmcli(["update", *nodes])
         if res["error"]:
             return {"updated": False, "up_to_date": False, "log": "", "error": res["error"]}
         rc = res["returncode"]

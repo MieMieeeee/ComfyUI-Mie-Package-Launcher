@@ -179,7 +179,11 @@ class LaunchPage(BasePage):
             from PyQt5.QtCore import QTimer
             def _sync_btn_height():
                 try:
-                    right_container.setFixedHeight(form_group.sizeHint().height())
+                    # form_group 是旧版「启动控制」QGroupBox 的名字，重构拆成
+                    # LaunchControlsSection 后这里漏改，NameError 被 except 吞掉，
+                    # 高度同步一直没生效（symtable 扫描发现，2026-10）。
+                    right_container.setFixedHeight(
+                        self.launch_controls_section.sizeHint().height())
                 except Exception:
                     pass
             QTimer.singleShot(0, _sync_btn_height)

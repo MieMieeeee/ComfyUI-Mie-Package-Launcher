@@ -4,6 +4,7 @@
 """
 
 import os
+import shutil
 import subprocess
 import threading
 import locale
@@ -99,7 +100,25 @@ class ProcessManager:
             # 正在操作中，忽略点击
             return
 
-        # 按钮状态是 "idle"，执行启动前的端口检测
+        # 按钮状态是 "idle"，执行启动前的端口检测。
+        # 先立即把大按钮切到「启动中…」：下面的可达性探测 + 端口占用扫描
+        # 都在 UI 线程同步跑（is_http_reachable 最多 ~2s；find_pids_by_port_safe
+        # 的 psutil 兜底路径逐进程查连接，可能好几秒），不先切的话用户点击后
+        # 按钮纹丝不动好几秒，像是没点上。探测发现「其实已在跑」或端口被占
+        # 用而放弃启动的分支，各自恢复 idle 显示。
+        def _show_idle():
+            try:
+                self.app.big_btn.set_state("idle")
+                self.app.big_btn.set_display("🚀 一键启动")
+            except Exception:
+                pass
+
+        try:
+            self.app.big_btn.set_state("starting")
+            self.app.big_btn.set_display("启动中…", "点击停止")
+        except Exception:
+            pass
+
         running = False
         try:
             if self.comfyui_process and self.comfyui_process.poll() is None:
@@ -147,6 +166,7 @@ class ProcessManager:
                 no_text="不打开",
             )
             if proceed_open:
+                _show_idle()
                 try:
                     self.app.open_comfyui_web()
                 except Exception:
@@ -174,6 +194,7 @@ class ProcessManager:
                         self.app.logger.warning("端口占用，用户取消重启: %s", port)
                     except Exception:
                         pass
+                    _show_idle()
                     return
         # 未占用则正常启动
         self.start_comfyui()

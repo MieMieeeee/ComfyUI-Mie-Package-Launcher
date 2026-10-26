@@ -1,0 +1,249 @@
+Now I have all the context I need. Let me write the final report.
+
+---
+
+# Review Report — plugin (custom_nodes) update subsystem
+
+**Mode**: read-only review, no files modified.
+**Scope**: `services/plugin_service.py`, `ui_qt/pages/plugins_page.py`, `ui_qt/qt_app.py` (lines ~4700-5150), `core/plugin_normalize.py`, `services/package_update_service.py` (plugin section).
+
+仓库 `AGENTS.md` 中已声明"近期已修复、不要再报"的项目（CNR 重装、identity、8 并发、preserve outdated、refresh 顺序、select all、uninstall 精确匹配、git proxy 透传、返回值检查）已全部跳过。下面只列未修且有代码证据的问题。
+
+---
+
+## 高危 (High)
+
+### H1. `_do_plugin_check_updates` 每次调用都向同一个 Qt 信号挂新 lambda，从不 disconnect → 内存泄漏 + N 次冗余回调
+**位置**: `ui_qt/qt_app.py:4762-4767`
+
+```python
+_chk_unreachable = {"n": 0}
+try:
+    page_plugins.unreachable_reported.connect(
+        lambda c: _chk_unreachable.__setitem__("n", int(c or 0)))
+except Exception:
+    pass
+```
+
+`_do_plugin_check_updates` 每次用户点"检查更新"都被调用一次。每次执行都创建一个**新的 lambda** 和**新的 dict** `_chk_unreachable`，lambda 通过闭包捕获本调用局部的 dict。Qt 没有 disconnect，连接累积。
+
+- **症状**：每点 N 次，"检查更新"信号挂 N 个 lambda + N 个 dict。`unreachable_reported` 每次发射时 N 个 lambda 全跑一遍（每次都把同一个 c 写到自己的 dict，多数是无用工作）。dict 和 lambda 随 `page_plugins` 生命周期存活，整个 session 线性增长。
+- **验证**：在 `page_plugins.unreachable_reported.connect` 调用前后打印 `len(page_plugins.receivers(page_plugins.unreachable_reported))`，连点 5 次后看是否 = 5。
+- **修法**：把 lambda + dict提升到 `__init__`（每个 page_plugins 实例一次），connect 一次；或 connect 后保存 connection 对象，函数入口先 disconnect 上一次的；最简单是用 `QtCore.Qt.UniqueConnection` flag —— 重复 connect 同一定位会被 Qt 忽略。
+
+### H2. `_plugin_queue_identity` 对 `.disabled/` 子目录下的插件 early-return None → API 快路径对禁用插件完全失效
+**位置**: `services/plugin_service.py:1518-1521`
+
+```python
+plugin_dir = PATHS.plugins_dir(self._comfyui_dir()) / str(name)
+if not plugin_dir.is_dir():
+    return None
+```
+
+`name` 来自 `list_installed()`，可能形如 `Foo@1_2_3`（`.disabled/Foo@1_2_3` 的裸目录名）。`cn_dir / name` 指向不存在的顶层路径，立即 `return None`。
+
+- **后果**：`uninstall`/`disable`/`enable` 对任何 `.disabled/` 下的插件，`_api_try_lifecycle` 都拿 None。`_lifecycle` 的注释写"API 路径未达成终态 → 启动器磁盘执行"，但 `api is None`（前置失败）和 `api is not None`（执行了但 effect 没达成）是不同分支 —— None 路径连"尝试过"的日志都没有，磁盘直连无脑兜底，性能损失（ComfyUI 在跑时本来走 API 几毫秒，现在直接走文件系统）。
+- **不是数据丢失**：磁盘直连会正确处理 `.disabled/` 子目录条目（`force_update_selected` 已验证）。但 API 快路径对禁用插件完全失效是事实，与 AGENTS.md "B5：API 先行保留"的方针冲突。
+- **修法**：在 `_plugin_queue_identity` 开头先调 `_resolve_plugin_dir(name)` 拿真实路径，不存在才返回 None。
+
+### H3. `_do_plugin_force_update` 没传 `cancel_event`，进度弹窗的"取消"按钮只关弹窗，强制更新继续后台跑**位置**: `ui_qt/qt_app.py:4993-5010`
+
+`_do_plugin_force_update` 调 `_plugin_op_with_progress(...)`，但**没传 `cancel_event`**。弹窗的"取消"按钮只关闭对话框（`pd.is_cancelled()` → `pd.close()`），后台线程里的 `run_force_update` 照常跑 git pull + pip install 直到完成。install/uninstall/disable/enable 也都不传 cancel_event（只有 `_do_plugin_install` 传，见 `:5112-5122`）。
+
+- **后果**：用户以为点取消就停了，实际后台仍占用 CPU/网络跑几分钟。再点"强制更新"会被 loader 防重入忽略 → 用户不知道操作还在跑。
+- **修法**：把 `cancel_event` 加到所有 `_plugin_op_with_progress` 调用；service 层的 `force_update_selected` / `uninstall` / `disable` / `enable` 在检测到 `cancel_event.is_set()` 时提前退出（uninstall/disable/enable 串行循环里每次 `getattr(svc, op)(dn)` 前检查；force update 的 git pull 短操作可不需要，但 `_force_update_cnr_one` 调 `install()` 流式路径仍可取消）。
+
+---
+
+## 中危 (Medium)
+
+### M1. `BackgroundLoader` 没有 `on_error` 回调时静默吞异常 → 列表永远为空但无错误提示
+**位置**: `ui_qt/background_loader.py:108-112`；调用方 `ui_qt/pages/plugins_page.py:1720-1724`（`PluginController.__init__` 里建 loader）
+
+```python
+# background_loader.py
+if error is None:
+    self._post_to_ui(lambda r=result: self._on_loaded(r))
+elif self._on_error:
+    self._post_to_ui(lambda exc=error: self._on_error(exc))
+```
+
+`PluginController.__init__` 注入 loader 时**没传 `on_error`**。`self.svc.list_installed()` 抛异常（custom_nodes 权限错、comfyui_root 不存在、plugins_dir 等）→ `_post_to_ui` 不被调用，`_loading` 仍置 False，`_loaded_once=True`（下次 `load_if_not_loaded` 不会再触发），列表永久为空。
+
+- **症状**：插件列表一直是"0 插件 /正在获取…"占位，无任何日志或弹窗。
+- **修法**：在 loader 注入处加 `on_error=lambda e: self.page.populate([])` 至少让 UI 退出占位态，并 `logger.exception` 落 launcher.log。
+
+### M2. `_run_cmcli_streaming` 在 proc 10 秒内未退时返回 `returncode=None`，调用方判为"成功"
+**位置**: `services/plugin_service.py:1240-1255`
+
+```python
+try:
+    proc.wait(timeout=10)
+except Exception:
+    pass
+# reader 内如果已经判断过 cancel，再确认一下外层状态。
+if (cancel_event is not None and cancel_event.is_set()) or user_cancelled:
+    ...
+self._active_streaming_procs.pop(cmd_id, None)
+return {"returncode": proc.returncode, "stdout": "".join(out_parts),
+        "stderr": "", "error": None}
+```
+
+- **场景**：reader thread 因 EOF 退出，但 proc 在 `proc.wait(timeout=10)` 内未结束（极罕见但非不可能：僵尸/未关闭 FD/反病毒扫描）。`proc.returncode` 仍为 `None`，函数返回 `{returncode: None, error: None}`。
+- **后果**：`install_streaming` 看到 `rc = res["returncode"]` 是 None，`if rc == 0` 为 False → 走到 `f"cm-cli install 退出码 {rc}"` → "退出码 None"报错。其实更危险的是用户感知"刚刚显示成功"但进程仍在跑（Python 的 `if rc == 0` 把 None 当 False，返回 False 分支，错误提示是给了的；不构成静默成功，但错误信息"退出码 None"很迷惑）。
+- **修法**：`if proc.returncode is None` 时主动 `_tree_kill_pid(proc.pid)` + `return {"returncode": -1, ..., "error": "cm-cli 子进程未退出"}`。
+
+### M3. `_lifecycle_effect_ok` 在 enable 路径下对 `<id>@<ver>` 形态的 base 既检查 `@` 前段，又不检查"源目录存在"
+**位置**: `services/plugin_service.py:1846-1856`
+
+```python
+if op == "enable":
+    if (cn_dir / base).exists():
+        return True
+    return "@" in base and (cn_dir / base.split("@")[0]).exists()
+```
+
+- **场景 A**（顶层 `.disabled` 后缀）：`base = "Foo"`，`@ not in base` → 第二分支跳过 → 只看 `(cn_dir / "Foo").exists()`。OK。
+- **场景 B**（`.disabled/Foo@1_2_3`）：`base = "Foo@1_2_3"`，`@ in base` → 看 `(cn_dir / "Foo").exists()`。enable 成功后应该是这样 → True。OK。
+- **场景 C**（外部工具把 `Foo@1_2_3` 重命名成 `Foo.bar@2_0_0`）：base 来自 `_lifecycle_base_name` 不剥 `@`。这条线 OK。
+- **场景 D（潜在 bug）**：enable(`Foo.disabled`) 但 `cn_dir / "Foo"` 已经被另一个插件占名（用户手动复制冲突 / 同名 fork）→ `(cn_dir / base).exists()` 为 True → effect_ok 直接 True，但磁盘上 `Foo.disabled` 还在。`_disk_lifecycle` 内部有 `dst.exists()` 早返回 True（"插件已处于启用状态"），但调用方 `uninstall` 后续要走 `_lifecycle_effect_ok("uninstall", "Foo")` 时会判 False（"已删了"），跟实际状态不一致。
+- **结论**：单看 enable 这条逻辑不是 bug，但**缺乏对 source dir 仍存在的检查**（disable 路径才有 `return not (cn_dir / str(target)).exists()`）。建议加 `return not (cn_dir / str(target)).exists() and (cn_dir / base).exists()`。
+
+### M4. `_do_plugin_force_update` 把 `per_plugin` 整个吞掉 → 后续要做"展开每插件详情"必须改接口
+**位置**: `ui_qt/qt_app.py:5006-5010`
+
+```python
+def _adapted_done(ok, summary, per_plugin):
+    try:
+        on_done(bool(ok), str(summary))
+    except Exception:
+        pass
+```
+
+controller 的 `run_force_update` 已经把 failed/warning 拼进 summary（`notable` 段），所以 per_plugin 对人类文案是冗余的。但 user 要求"展示每插件结果"时必须改 qt_app + controller 双向接口。建议**把 per_plugin 通过 on_done 的第三个参数一路透到 `mark_complete` 的第二参数**（保留接口），让 ProgressDialog 以后能挂"查看明细"按钮。
+
+### M5. `_do_plugin_update_all` / `_do_plugin_update_selected` 内联 80+ 行，几乎复制 `_plugin_op_with_progress`
+**位置**: `ui_qt/qt_app.py:4725-4802`（check_updates）、`4805-4872`（update_all）、`4875-4988`（update_selected）
+
+三个方法结构完全相同（弹窗 + registry + on_progress/on_status/on_done + cancel/background 处理）。`_plugin_op_with_progress` 已经在 `5031-5105` 提供抽象，但 update_all/selected/check_updates 没复用。
+
+- **风险**：三处都各自维护 `pd.mark_complete(done_msg + (" ✓（列表已刷新）" if success else ""))`、`registry.complete(task_id, error=not success)`、`DialogHelper.show_error(...)` 等。一旦修一处忘了改另外两处，UX 表现就 drift（check_updates 的失败处理就只是拼进 done_msg 文案，不像 update_all/selected 会弹 `show_error`）。
+- **修法**：把 update_all/selected 也迁到 `_plugin_op_with_progress`，run_fn 里调 `ctrl.run_update_all/on_status, on_done=on_done)`（on_done 已经是 `(ok, message)` 契约）。check_updates 单独保留（它的 on_done 是 `(outdated, remote_dates)` 不是 `(ok, message)`），可以再做一个变体。
+
+### M6. `force_update_selected` 串行执行 N 个插件，与 `outdated_plugins` 的 8 并发不一致
+**位置**: `services/plugin_service.py:1992-1996`
+
+```python
+results = [self._force_update_one(str(n)) for n in names]
+```
+
+`outdated_plugins` 已用 8 并发把 N 个 ls-remote 从 ~50s 压到 ~7s。但 force update 还 N 个串行（每个 ~5-30s，CNR 走 install 流式可能更久）。N 个强制更新需要 N 倍时间。
+
+- **修法**：仿 `outdated_plugins` 拆 git 路径走 ThreadPoolExecutor；CNR 路径仍是 install 流式（已经有 cancel 机制），可单独跑或串行。但要注意 install 流式不能并发（cancel wrapper 共享 `_stream_owner_map` 但 owner key 是 `id(cancel_event)`，并发两个 install 会争同一 cancel_event，需要每个 install 用独立 cancel_event +独立 proc跟踪）。
+
+### M7. `_cnr_nomove` / `_git_info_cache` 用 `str(cn_dir / name)` 作 key，对 `.disabled/` 下插件指向不存在的路径
+**位置**: `services/plugin_service.py:138`、`:332-358`（`_fill_git_info`）、`:541-545`（outdated_plugins）、`:1743`（force update）
+
+- **后果**：dict 写入 `cn_dir / "Foo@1_2_3"`（不存在）作为 key。读写路径一致（都用 `str(d)` where `d = cn_dir / name`），功能 OK。但：
+1. `_cnr_nomove` 是"重装后没动的插件不再标记"，key是不存在路径 → 如果插件从 `.disabled/` 移到顶层同名（enable），key变了 → 重新触发"有更新"标记（虽然应该是这样，但语义略奇怪）。
+  2. `_git_info_cache` 同样的生命周期问题：enable 后又重新扫一遍 git（无害但慢）。
+- **建议**：key 改用 `name`（dir_name）或 `cnr_id` / `repo_url`（如果有），比磁盘路径稳定。
+
+### M8. `_lifecycle_effect_ok` 检查 disable 时不看 `.disabled/<name>@<ver>` 形态
+**位置**: `services/plugin_service.py:1843-1845`
+
+```python
+if op == "disable":
+    return not (cn_dir / str(target)).exists()
+```
+
+disable 的目标是顶层 `Foo`。disable成功后顶层 `Foo` 不存在（要么改名 `Foo.disabled`，要么移到 `.disabled/Foo@<ver>`）。这条只看顶层，看不到 `.disabled/` 子目录。如果磁盘直连只把 `Foo` rename 成 `Foo.disabled`（顶层禁用），效果 OK。如果 Manager API 把它移到 `.disabled/Foo@<ver>`，effect_ok 也 OK（顶层确实没了）。但**极端**：API 调用后 Manager 又把 `Foo@<ver>` 复制回顶层（不该发生但 schema 不保证）→ effect_ok 仍 True → 用户认为 disable 成功，实际还在跑。
+
+- **不是高频**：Manager disable 行为已经标准化（顶层改名或子目录搬，二选一）。但 effect_ok 应该**同时**验证 `.disabled/<base>@*` 或 `cn_dir / f"{base}.disabled"` 至少有一个存在。
+
+---
+
+## 低危 (Low) — style / readability
+
+### L1. `except Exception: pass` 多处静默吞错
+**位置**: `services/plugin_service.py:149-163`（`_evict_git_info_cache` 外层 try/except 完全静默）、`:519-541`（`_tree_kill_pid` 内层 6 处）、`:1248`（reader thread 出错）、`ui_qt/qt_app.py:5099-5104`（`_plugin_op_with_progress` 整体 try/except）等。
+
+教义"never throw"合理，但建议把"关键的"几个（`_evict_git_info_cache`、`_tree_kill_pid`）改成 `logger.debug/warning` 留下痕迹（除错用）。
+
+### L2. `_cnr_registry_map` 把 `latest_version` 当 dict 处理；若 schema 变化为 list/str 则静默失效
+**位置**: `services/plugin_service.py:480-484`
+
+```python
+lv = n.get("latest_version")
+ver = ""
+if isinstance(lv, dict):
+    ver = str(lv.get("version", "") or "")
+```
+
+健壮性 OK，但若 CNR registry schema 升级到 list，CNR 插件的 `_cnr_nomove` 抑制逻辑会失效（latest 当空字符串算）。
+
+### L3. `normalize_plugin_result` 在 `action="update"` 且 `force=False` 但 raw 是 list 时仍走 `_normalize_force`
+**位置**: `core/plugin_normalize.py:78-83`
+
+```python
+if action == "update" and force:
+    return _normalize_force(raw, spec)
+raise ValueError(f"unknown plugin action: {action!r}")
+```
+
+`update` + `force=False` + raw 是 list（不该发生但容错）会落到 `_normalize_force`，按 name找 spec 项 —— 如果 spec 匹配不到就返 ok=False error="force_update_selected 未返回 spec 的结果"，误导排查。可以加一行 `if action == "update" and not force and isinstance(raw, list):` 防御。
+
+### L4. `outdated_plugins` 对 `.disabled/` 下的 git 插件（`name = "Foo@1_2_3"`）漏检
+**位置**: `services/plugin_service.py:898-905`
+
+```python
+for name in names:
+    d = cn_dir / name
+    if (d / ".git").exists():
+        git_names.append(name)
+    else:
+        cnr_names.append(name)
+```
+
+`d` 对 `.disabled/Foo@1_2_3` 指向不存在的顶层路径 → 不存在 `.git` → 进 `cnr_names` →后续 `_read_pyproject(d)` 返回空 → `version=""` → 不当落后。**功能 OK**（已禁用插件本来就不该被自动更新），但与"按 git ls-remote 检查更新"语义不一致（应该是因为 disable 了所以跳过，不是"不需要更新"）。可以加 `if not d.exists(): continue` 显式跳过并打 debug log。
+
+### L5. `_plugin_git_url` 对 `submodule` / `worktree`（`.git` 是文件）返回 None
+**位置**: `services/plugin_service.py:1500-1510`
+
+```python
+cfg = plugin_dir / ".git" / "config"
+if not cfg.is_file():
+    return None  # .git 是文件（worktree/submodule）或无 .git → None（降级）
+```
+
+注释说 `.git` 是文件时降级 —— 但实际上 worktree/submodule 的 `.git` 文件里有 gitdir 指向真实 .git 目录。可以读 `.git` 文件内容拿 gitdir，再读那个路径的 config（worktree 也支持 remote）。现在不重要（罕见 case）。
+
+### L6. `outdated_plugins` 的 `_cnr_nomove` 抑制检查用 `(py["version"], latest)` 作为值，但 py 项目里 pyproject version 可能外部修改（用户手动改了 pyproject 但 install 不重装）→ 抑制生效，UI 永远显示「无更新」
+**位置**: `services/plugin_service.py:531-540`
+
+```python
+if self._cnr_nomove.get(str(d)) != (py["version"], latest):
+    hit = True
+```
+
+`_cnr_nomove[str(plugin_dir)] = (ver_after or ver_before, latest)` 在 `_force_update_cnr_one` 写入。tuple 比较对 `(version, latest)` 都比对得上才抑制 —— 但 version 是磁盘上 pyproject 读出的（用户能改），latest 是 registry 拉的（用户改不到）。若用户改 pyproject version 但版本号仍是 v_old（没新），`_cnr_nomove.get` 仍命中（因为 old==old）→ 永远不当落后。
+
+- **修法**：`_cnr_nomove` 应只对**重装后**记录，磁盘上原本就 outdated 的不应自动抑制。或者用 `time.monotonic()` 作为额外字段，N 小时后自动失效。
+
+---
+
+## 已确认不报
+
+下列项目经代码确认 **没有** 问题，跳过：
+- `_disabled_dir_candidates` 精确匹配（`:1849` 用 `==` 或 `startswith(base + "@")`，不是 glob prefix）。
+- 三套 update 路径的差异（`update_all` / `update_selected` / `force_update_selected` 走不同分支，force update 是 git pull / install 重装，update_all/selected 是 cm-cli `update`，差异合理）。
+- `_lifecycle_effect_ok` 的 disable 分支（已检查）。
+- `cancel_event.set = _cancel_and_kill` 的 wrapper 黑科技（每次 install 用新 event，mutation 不跨调用）。
+
+---
+
+## 待进一步验证（HOW 而非断言）
+
+1. **H1 的内存泄漏速率**：写一个 100 次 click 的脚本打 `len(page_plugins.receivers(...))`，确认是否线性增长。
+2. **H3 的实际行为**：开 force update → 等 ~2s 后点弹窗取消 → 用 `Get-Process python` 看启动器是否有 worker 线程还在跑（应该有）。
+3. **M2 的 returncode=None**：模拟一个慢退 cm-cli（写个卡 15s 的 mock），看 install_streaming 返回值。

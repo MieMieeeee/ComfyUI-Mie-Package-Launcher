@@ -51,6 +51,10 @@ from pathlib import Path
 
 import pytest
 
+# e2e：会真的拉起子进程/打包产物，单次约 16s。
+# 日常回归用 `-m "not e2e"` 跳过。
+pytestmark = pytest.mark.e2e
+
 REPO_ROOT = Path(__file__).resolve().parent.parent.parent
 PYTHON = sys.executable
 

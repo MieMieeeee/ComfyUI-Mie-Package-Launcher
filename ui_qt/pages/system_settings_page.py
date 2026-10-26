@@ -128,7 +128,7 @@ class _ScaleRow(QtWidgets.QFrame):
 
 class _WindowSizeRow(QtWidgets.QFrame):
     """窗口尺寸行：显示当前宽 × 高（像素），支持填写后点「应用」立刻改窗口，
-    以及「恢复默认」一键回 1350×900 base × scale 并居中。
+    以及「恢复默认」一键回 1350×960 base × scale 并居中。
 
     与 _ScaleRow 拆分：这里只改主窗口像素大小，不动 ui_scale。
     """
@@ -163,7 +163,7 @@ class _WindowSizeRow(QtWidgets.QFrame):
 
         self.lbl_desc = QtWidgets.QLabel(
             "当前主窗口宽 × 高（像素，关闭时会记忆）。可手动填写后点「应用」立刻调整；"
-            "「恢复默认」回到 1350×900 基准大小并居中。"
+            "「恢复默认」回到 1350×960 基准大小并居中。"
         )
         self.lbl_desc.setStyleSheet(
             f"color: {self.theme_styles.c.get('label_muted')}; "
@@ -647,7 +647,7 @@ class SystemSettingsPage(BasePage):
                     raise ValueError("early-dirty")
                 win_w, win_h = ww, wh
             except Exception:
-                DEFAULT_BASE_W, DEFAULT_BASE_H = 1350, 900
+                DEFAULT_BASE_W, DEFAULT_BASE_H = 1350, 960
                 win_w = int(round(DEFAULT_BASE_W * eff_for_init))
                 win_h = int(round(DEFAULT_BASE_H * eff_for_init))
         self.row_window_size = _WindowSizeRow(
@@ -896,7 +896,7 @@ class SystemSettingsPage(BasePage):
         """只动窗口几何（不动 ui_scale）：
 
         - window_w/h/x/y/state → None
-        - 立刻 resize 到 1350×900 base × 当前生效 scale + 居中
+        - 立刻 resize 到 1350×960 base × 当前生效 scale + 居中
         - combo scale selector 保持不动（用户仍可能是锁定的 125%）。
         """
         try:
@@ -920,7 +920,7 @@ class SystemSettingsPage(BasePage):
             eff = self._compute_effective_scale(self._read_scale_override())
             if eff <= 0:
                 eff = 1.0
-            DEFAULT_BASE_W, DEFAULT_BASE_H = 1350, 900
+            DEFAULT_BASE_W, DEFAULT_BASE_H = 1350, 960
             # 与 _setup_ui 保持一致：scale<1 不回缩到 base×scale 以下（避免 ui_scale=0.8 等场景
             # 下用户看到 1080×720 把启动页快捷目录裁掉），scale>1 正常放大（HIDPI）。
             pw = max(DEFAULT_BASE_W, int(round(DEFAULT_BASE_W * eff)))

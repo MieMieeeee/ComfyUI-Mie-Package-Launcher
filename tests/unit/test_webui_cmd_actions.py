@@ -236,7 +236,8 @@ def test_do_start_already_running_short_circuits(tmp_path):
     pidfile_path = webui_pidfile.default_path(cwd_resolved)
     webui_pidfile.write(pidfile_path, os.getpid(), 8199, log_path=cwd_resolved / "webui.log", env_id="env_a")
     with patch("core.webui_dependencies.check_webui_dependencies",
-               return_value={"ok": True, "missing": [], "available": ["flask", "requests", "websockets"]}):
+               return_value={"ok": True, "missing": [], "available": ["flask", "requests", "websockets"]}),          patch("core.webui_process_manager._is_webui_pid", return_value=True):
+        # 身份校验 mock 成真：os.getpid 是 pytest 自己，cmdline 无 flask_app
         args = _Args(env=None, with_comfyui=False, no_wait=False, timeout=60)
         res = cmd_webui._do_start(app, args)
     assert res.get("already_running") is True

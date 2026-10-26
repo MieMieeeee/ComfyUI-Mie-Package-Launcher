@@ -30,6 +30,17 @@ from core.cli.runner import (
 
 # ---------- helpers ----------
 
+@pytest.fixture(autouse=True)
+def _no_real_port_scan(monkeypatch):
+    """隔离真实端口：本文件默认端口扫描返回空。
+
+    start_service / service_status 在 pidfile 失联时会做 find_pids_by_port_safe
+    端口收养（2026-10）——不隔离的话，本机 8188 正好有 ComfyUI 在跑时这些用例
+    会被收养分支污染（假阳性/超时）。收养相关用例在 with patch 里自行覆盖。
+    """
+    monkeypatch.setattr("core.probe.find_pids_by_port_safe", lambda port: [])
+
+
 def _make_app(tmp_path, *, port: str = "8188", has_config: bool = True):
     """Create a mock app with just enough surface for runner."""
     app = MagicMock()
@@ -454,3 +465,53 @@ class TestServiceStatus:
         assert result["running"] is False
         assert result["pid"] is None
         assert result["http_reachable"] is False
+
+
+    # ---- 进程收养（2026-10：Manager os.execv 重启链致 pidfile 失联的事故收尾）----
+
+    def test_status_adopts_external_comfyui_when_pidfile_stale(self, tmp_path):
+        """pidfile 失联 + 端口有 ComfyUI 在服务 → 收养（重写 pidfile）并如实上报 running。
+
+        场景：ComfyUI-Manager 网页端 Apply/重启或依赖 reapply 链用 os.execv 换 PID
+        重启——新 PID 不在 pidfile 里，status 误报未运行、start 会重复拉起。
+        发现链与 GUI 一键启动一致：find_pids_by_port_safe + is_comfyui_pid。
+        """
+        from core.cli.pidfile import default_path, read
+        app = _make_app(tmp_path)
+        fake_pid = os.getpid()  # read_pidfile 的 stale 校验要求 PID 活着
+
+        with patch("core.cli.runner._is_http_reachable", return_value=True),              patch("core.probe.find_pids_by_port_safe", return_value=[fake_pid]),              patch("core.probe.is_comfyui_pid", return_value=True):
+            result = service_status(app)
+
+        assert result["running"] is True
+        assert result["pid"] == fake_pid
+        adopted = read(default_path(tmp_path))
+        assert adopted is not None and adopted["pid"] == fake_pid
+        assert adopted["port"] == 8188
+
+    def test_status_no_adoption_when_port_pid_not_comfyui(self, tmp_path):
+        """端口被非 ComfyUI 进程占用 → 不收养（pidfile 驱动 stop，不能误杀无关进程）。"""
+        from core.cli.pidfile import default_path
+        app = _make_app(tmp_path)
+
+        with patch("core.cli.runner._is_http_reachable", return_value=True),              patch("core.probe.find_pids_by_port_safe",
+                   return_value=[os.getpid()]),              patch("core.probe.is_comfyui_pid", return_value=False):
+            result = service_status(app)
+
+        assert result["running"] is False
+        assert default_path(tmp_path).exists() is False
+
+    def test_start_adopts_external_before_spawning(self, tmp_path):
+        """start：pidfile 失联但端口有 ComfyUI → 先收养按「已在跑」返回，不重复拉起。"""
+        from core.cli.pidfile import default_path, read
+        app = _make_app(tmp_path)
+        fake_pid = os.getpid()
+
+        with patch("core.cli.runner._is_http_reachable", return_value=True),              patch("core.probe.find_pids_by_port_safe", return_value=[fake_pid]),              patch("core.probe.is_comfyui_pid", return_value=True),              patch("core.cli.runner._build_launch_params") as blp:
+            result = start_service(app)
+
+        blp.assert_not_called()            # 没有走启动路径
+        assert result["started"] is False  # 「已在跑」分支
+        assert result["pid"] == fake_pid
+        adopted = read(default_path(tmp_path))
+        assert adopted is not None and adopted["pid"] == fake_pid

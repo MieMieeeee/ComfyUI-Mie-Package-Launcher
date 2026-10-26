@@ -22,11 +22,14 @@ import os
 import re
 import sys
 import threading
+import time
 import unittest
 from pathlib import Path
 from unittest.mock import MagicMock, patch
 
 os.environ.setdefault("QT_QPA_PLATFORM", "offscreen")
+
+from ui_qt.background_task_registry import BackgroundTaskRegistry  # noqa: E402
 
 ROOT = os.path.abspath(os.path.join(os.path.dirname(__file__), "..", ".."))
 if ROOT not in sys.path:
@@ -132,6 +135,66 @@ class TestStartUpdateSourceStructure(unittest.TestCase):
             err_idx, deps_idx,
             "core_res.get(\"error\") 的早返回必须出现在 deps sync 之前，"
             "否则内核失败时还会浪费时间跑依赖/前端/模板。",
+        )
+
+
+class TestStartUpdateTimeoutKillsGit(unittest.TestCase):
+    """外层 future 超时后必须调 request_cancel() 杀掉 git 进程。
+
+    背景（docs/core_update_git_proxy.md §6.5）：超时分支原来只调 future.cancel()，
+    而它对**已经在跑**的任务无效 —— worker 会继续跑完内层 git（30+60+120s），
+    ``with ThreadPoolExecutor`` 退出时 shutdown(wait=True) 又让本线程一直等下去，
+    最终成功的结果也拿不到（core_res 早被写成"更新超时"）。
+    单纯把超时秒数放大盖不住这条，必须走 VersionService.request_cancel()
+    去 terminate/kill 它记下的那个 git Popen。
+    """
+
+    def setUp(self):
+        ns = _get_module()
+        self.start_update = ns["PyQtLauncher"].__dict__["start_update"]
+        ns["_offer_force_update"] = MagicMock(return_value=False)
+
+    def test_timeout_calls_request_cancel(self):
+        stub = _make_launcher_stub()
+        stub.update_timeout_var.get.return_value = 1
+
+        def _slow_upgrade(*args, **kwargs):
+            time.sleep(3)
+            return {"component": "core", "updated": True, "tag": "v0.24.0"}
+
+        stub.services.version.upgrade_latest = MagicMock(side_effect=_slow_upgrade)
+
+        self.start_update(stub, stable_only=False)
+        _wait_for_workers()
+
+        self.assertTrue(
+            stub.services.version.request_cancel.called,
+            "外层超时后必须调 services.version.request_cancel()，"
+            "否则正在跑的 git Popen 不会被杀掉，with 退出会一直阻塞在"
+            "shutdown(wait=True)，成功结果也会被丢掉。",
+        )
+
+    def test_source_timeout_branch_calls_request_cancel(self):
+        """源码层防护：TimeoutError 分支里 request_cancel() 必须在 future.cancel() 之前。"""
+        src = (Path(ROOT) / "ui_qt" / "qt_app.py").read_text(encoding="utf-8")
+        # 分支体到同级的 `except Exception as e:`（16 空格缩进）为止
+        m = re.search(
+            r"except concurrent\.futures\.TimeoutError:(.*?)(?=\n {16}except )",
+            src,
+            re.M | re.S,
+        )
+        self.assertIsNotNone(m, "找不到 TimeoutError 分支")
+        body = m.group(0)
+        self.assertIn("request_cancel()", body, "超时分支必须调 request_cancel()")
+        self.assertIn("future.cancel()", body)
+        # 只看代码行：注释里也会提到这两个名字，比原始文本会误判
+        code = "\n".join(
+            ln for ln in body.splitlines() if ln.strip() and not ln.strip().startswith("#")
+        )
+        self.assertLess(
+            code.index("request_cancel()"),
+            code.index("future.cancel()"),
+            "先杀 git 进程再 future.cancel()，否则 cancel 只是摆设。",
         )
 
 
@@ -513,6 +576,57 @@ class TestFinishFallsThroughOnOfferError(unittest.TestCase):
         self.assertTrue(
             stub._update_running,
             "_force_update 接手时 _finish 不应预释放 _update_running，避免按钮提前恢复造成并发点击",)
+
+
+class TestStartUpdateCancelCleansRegistry(unittest.TestCase):
+    """用户取消更新后，后台任务必须从注册表摘掉。
+
+    用户报告：更新时取消任务，再次更新，旧任务还挂在后台任务面板
+    「进行中」里。根因：worker 的取消检查路径（pd.is_cancelled() 命中处）
+    直接 return，走不到 _finish 的 registry.complete/收尾。
+    修复：_on_cancel 里直接 registry.remove(task_id)。
+    """
+
+    def setUp(self):
+        ns = _get_module()
+        self.start_update = ns["PyQtLauncher"].__dict__["start_update"]
+
+    def test_cancel_removes_task_from_registry(self):
+        stub = _make_launcher_stub()
+        stub._bg_task_registry = BackgroundTaskRegistry()
+        on_done = MagicMock()
+
+        with patch("ui_qt.widgets.progress_dialog.ProgressDialog") as pd_cls:
+            pd_inst = pd_cls.return_value
+            # 用户在升级过程中点了取消：弹窗置取消态 → ProgressDialog._on_cancel
+            # 调注册进来的取消回调 → request_cancel + worker 在下一个
+            # is_cancelled 检查处提前 return（跳过 _finish 收尾）。
+            pd_inst.is_cancelled.return_value = True
+            self.start_update(stub, stable_only=True, on_done=on_done)
+            cancel_cb = pd_inst.set_cancel_callback.call_args.args[0]
+            cancel_cb()
+        _wait_for_workers()
+
+        registry = stub._bg_task_registry
+        self.assertEqual(
+            registry.get_all(), [],
+            "取消后注册表必须为空，否则任务面板「进行中」永久残留旧任务。",
+        )
+        self.assertFalse(stub._update_running, "取消后 _update_running 必须复位")
+        on_done.assert_called_once()
+
+    def test_cancel_with_active_task_does_not_break_normal_finish(self):
+        """非取消路径回归：正常完成时任务仍在注册表（_finish 负责标记完成）。"""
+        stub = _make_launcher_stub()
+        stub._bg_task_registry = BackgroundTaskRegistry()
+
+        self.start_update(stub, stable_only=True)
+        _wait_for_workers()
+
+        registry = stub._bg_task_registry
+        tasks = registry.get_all()
+        self.assertEqual(len(tasks), 1, "正常完成路径任务不应被误删")
+        self.assertTrue(tasks[0].done or tasks[0].error, "正常完成路径任务应被 _finish 标记终态")
 
 
 if __name__ == "__main__":

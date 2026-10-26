@@ -13,7 +13,13 @@ import time
 import unittest
 from unittest.mock import MagicMock, patch
 
+import pytest
+
 os.environ.setdefault("QT_QPA_PLATFORM", "offscreen")
+
+# 这些用例靠真实 sleep 等心跳/对话框时序，单文件约 30s。
+# 日常快速回归用 `-m "not slow"` 跳过。
+pytestmark = pytest.mark.slow
 
 ROOT = os.path.abspath(os.path.join(os.path.dirname(__file__), "..", ".."))
 if ROOT not in sys.path:

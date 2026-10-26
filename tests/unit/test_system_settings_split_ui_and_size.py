@@ -4,7 +4,7 @@
 1. _ScaleRow.lbl_title == \"界面缩放\"（不是之前的 \"界面大小\"，也不是旧的 \"界面大小\"）
 2. SystemSettingsPage 里有 row_window_size（_WindowSizeRow），包含：两个 spin box（w/h）+ btn_apply + btn_reset_default
 3. _WindowSizeRow.emit apply_size_requested(1600,1000) 后：窗口立即 resize 1600×1000，且 config 写入 base = round(pixel / scale)
-4. _WindowSizeRow.emit reset_size_defaults_requested 后：ui_settings.window_{w,h,x,y,state} → None，窗口立即回 1350×900 base×scale + 居中；**不动 ui_scale**
+4. _WindowSizeRow.emit reset_size_defaults_requested 后：ui_settings.window_{w,h,x,y,state} → None，窗口立即回 1350×960 base×scale + 居中；**不动 ui_scale**
 """
 import os
 import sys
@@ -132,7 +132,7 @@ def test_window_size_apply_resizes_window_and_persists_base(qapp):
 
 def test_window_size_reset_ignores_scale_resets_geometry_defaults(qapp):
     """RED 4：发射 reset_size_defaults_requested → 只动窗口几何（window_w/h/x/y/state→None
-    + 立刻 resize 到 1350×900 base×eff + 居中），**不动 ui_scale**。"""
+    + 立刻 resize 到 1350×960 base×eff + 居中），**不动 ui_scale**。"""
     from ui_qt.theme_manager import ThemeManager
     from ui_qt.pages.system_settings_page import SystemSettingsPage
 
@@ -172,11 +172,11 @@ def test_window_size_reset_ignores_scale_resets_geometry_defaults(qapp):
     for k in ("window_w", "window_h", "window_x", "window_y", "window_state"):
         assert ui[k] is None, f"{k} 未置 None，实 {ui.get(k)!r}"
 
-    # 断言 3：当下立刻 resize 到默认 1350×900 × effective scale（scale 还是之前的 1.0 or 1.25?
+    # 断言 3：当下立刻 resize 到默认 1350×960 × effective scale（scale 还是之前的 1.0 or 1.25?
     #         注意：reset 尺寸不碰 ui_scale，所以 _scale 可能仍为旧值，但窗口默认基址 × 当前生效的
     #         effective scale（由 tm 的 scale / 或 compute_effective_scale 算）。
     eff = page._compute_effective_scale(ui.get("ui_scale"))
-    DEFAULT_BASE_W, DEFAULT_BASE_H = 1350, 900
+    DEFAULT_BASE_W, DEFAULT_BASE_H = 1350, 960
     exp_w = int(round(DEFAULT_BASE_W * eff))
     exp_h = int(round(DEFAULT_BASE_H * eff))
     assert stub.resize.called, "恢复默认尺寸没调 stub.resize"
@@ -385,7 +385,7 @@ def test_apply_or_reset_shownormal_when_maximized(qapp):
 
 def test_small_window_base_below_legacy_valid_min_is_still_remembered_on_startup(qapp):
     """REVIEW-RED ②：设置页允许 800~1200 之间的中等尺寸（比如 base 1100×760），
-    写入后下次启动 resolve_window_geometry_for_startup 不能把它当脏值回退到默认 1350×900。
+    写入后下次启动 resolve_window_geometry_for_startup 不能把它当脏值回退到默认 1350×960。
     否则应用/恢复默认 与 启动记忆之间矛盾——设置页记得住，但重启就丢。
     """
     from config.migrations import resolve_window_geometry_for_startup

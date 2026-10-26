@@ -137,6 +137,51 @@ def _is_http_reachable(app) -> bool:
         return False
 
 
+def adopt_external_service(app, port: Optional[int] = None) -> Optional[dict]:
+    """pidfile 失联但端口被 ComfyUI 进程占有时，按端口找回 PID 重写 pidfile。
+
+    服务发现链与 GUI 一键启动/停止的端口兜底**完全一致**（core/probe 三件套）：
+    find_pids_by_port_safe → is_comfyui_pid 过滤，不自造探测。刻意**不做** HTTP
+    探活（netstat 级的端口扫描够判「有 ComfyUI 在」，且冷启动时省 ~2s 的超时
+    等待——HTTP 可达性由调用方在原有位置另行探测）。
+
+    为什么需要：ComfyUI-Manager 的网页端「Apply/重启」和 prestartup 的
+    「Restarting to reapply dependency installation」都用 os.execv 换 PID 重启——
+    新 PID 不在 pidfile 里，启动器就此失联（status 误报未运行、start 会重复拉起、
+    stop 找不到目标）。收养后三层恢复：status 如实上报、start 拒绝重复、stop 可停。
+
+    保守性：只收养通过 is_comfyui_pid 特征校验的 PID（pidfile 驱动 stop，不能误杀
+    碰巧占用端口的无关进程）；无特征命中时不收养，返回 None。
+
+    返回：收养成功时返回 pid_data dict（与 read_pidfile 同构），否则 None。
+    """
+    pid_path = default_path(app._cwd)
+    try:
+        if port is None:
+            port = _resolve_port(app)
+        pids = _probe_module.find_pids_by_port_safe(str(port))
+        if not pids:
+            return None
+        comfy_pids = [p for p in pids if _probe_module.is_comfyui_pid(app, p)]
+        if not comfy_pids:
+            return None
+        pid = int(comfy_pids[0])
+        log_path = _resolve_log_path(app, "comfyui")
+        cfg = getattr(app, "config", None)
+        env_id = cfg.get("active_env_id") if isinstance(cfg, dict) else None
+        write_pidfile(pid_path, pid, int(port), log_path, env_id=env_id)
+        data = read_pidfile(pid_path)
+        try:
+            app.logger.info(
+                "进程收养：pidfile 失联但端口 %s 被 ComfyUI 进程占用，已重写 pidfile pid=%s"
+                "（外部重启 / Manager 重启链产生的新实例）", port, pid)
+        except Exception:
+            pass
+        return data
+    except Exception:
+        return None
+
+
 def _sync_comfyui_running_ui(app, running: bool) -> None:
     """把 ComfyUI 运行状态同步到首页大按钮/托盘 (线程安全).
 
@@ -201,8 +246,12 @@ def start_service(app, *, no_wait: bool = False, timeout: int = 60, env_id=None)
         cfg = getattr(app, "config", None)
         effective_env_id = cfg.get("active_env_id") if isinstance(cfg, dict) else None
 
-    # 已在跑？
+    # 已在跑？（pidfile 活着，或失联但端口被 ComfyUI 占用——先收养再按已跑处理，
+    # 避免 CLI start 在外部重启出来的实例上再叠一个进程抢端口。端口扫描无 HTTP
+    # 超时等待，冷启动不增加时延。）
     pid_data = read_pidfile(default_path(app._cwd))
+    if pid_data is None:
+        pid_data = adopt_external_service(app, port=port)
     if pid_data is not None:
         running_env_id = pid_data.get("env_id")
         result = {
@@ -365,11 +414,19 @@ def stop_service(app, *, timeout: int = 10, force: bool = False) -> dict:
 # ---------- service_status ----------
 
 def service_status(app) -> dict:
-    """读 pidfile + HTTP probe，生成 status dict。"""
+    """读 pidfile + HTTP probe，生成 status dict。
+
+    pidfile 失联但端口仍在服务（Manager 网页侧重启 / os.execv 重启链换了 PID）时，
+    先按端口收养（发现链与 GUI 一键启动一致），再如实上报 running。"""
     pid_path = default_path(app._cwd)
     pid_data = read_pidfile(pid_path)
     port = _resolve_port(app)
     http_reachable = _is_http_reachable(app)
+
+    if pid_data is None:
+        # pidfile 失联（外部重启 / Manager 重启链换 PID）→ 按端口收养。
+        # 端口扫描是 netstat 级开销，冷启动（端口空闲）时零等待。
+        pid_data = adopt_external_service(app, port=port)
 
     if pid_data is not None:
         pid = pid_data.get("pid")

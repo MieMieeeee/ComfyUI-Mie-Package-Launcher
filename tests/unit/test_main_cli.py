@@ -70,10 +70,19 @@ class TestMainCLISubprocess(unittest.TestCase):
         self.tmp_dir = tempfile.mkdtemp()
         self.config_dir = Path(self.tmp_dir) / "launcher"
         self.config_dir.mkdir(parents=True)
+        # 密闭性（2026-10-03）：用临时空闲端口代替 8188——status/start 子进程会做
+        # 端口收养/探活，本机 8188 真有 ComfyUI 在跑时固定 8188 会假失败。
+        # 端口全程持有（bind 不 listen）：别的进程抢不走（全量跑时曾出现关掉端口后、
+        # 子进程探测前被别的测试进程短暂占用 → 偶发假失败）；bind-only 的 socket
+        # 不出现在 LISTEN 扫描里，收养/探活都视它为无服务。
+        import socket as _socket
+        self._port_guard = _socket.socket()
+        self._port_guard.bind(("127.0.0.1", 0))
+        free_port = str(self._port_guard.getsockname()[1])
         config_data = {
             "launch_options": {
                 "default_compute_mode": "cpu",
-                "default_port": "8188",
+                "default_port": free_port,
                 "disable_all_custom_nodes": False,
                 "enable_fast_mode": False,
                 "disable_api_nodes": False,
@@ -92,6 +101,12 @@ class TestMainCLISubprocess(unittest.TestCase):
         (self.config_dir / "config.json").write_text(
             json.dumps(config_data), encoding="utf-8"
         )
+
+    def tearDown(self):
+        try:
+            self._port_guard.close()
+        except Exception:
+            pass
 
     def _run(self, *args, timeout=15):
         # 用绝对路径调 __main__.py，cwd 设为临时目录（让 config 能找到）

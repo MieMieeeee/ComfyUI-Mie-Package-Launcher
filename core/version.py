@@ -8,4 +8,4 @@ version——生成物里的版本号曾与源码脱节（root 与 launcher/ 两
 json 各自漂移），改为编译期随代码打进 exe 后不可能再漂。
 """
 
-LAUNCHER_VERSION = "v1.0.17"
+LAUNCHER_VERSION = "v1.0.18"

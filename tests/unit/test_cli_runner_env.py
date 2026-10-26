@@ -61,6 +61,18 @@ def _make_app_with_envs(tmp_path, *, envs=None, active="env_a"):
     return app
 
 
+
+@pytest.fixture(autouse=True)
+def _no_real_port_scan(monkeypatch):
+    """隔离真实端口：本文件默认端口扫描返回空。
+
+    start_service 在 pidfile 失联时会做 find_pids_by_port_safe 端口收养
+    （2026-10）——不隔离的话，本机 8188 正好有 ComfyUI 在跑时 start 相关用例
+    会被收养分支污染（already-running 短路，走不到 build_launch_params）。
+    """
+    monkeypatch.setattr("core.probe.find_pids_by_port_safe", lambda port: [])
+
+
 class TestStartEnvIdValidation:
     """start --env <id> 的环境校验。"""
 

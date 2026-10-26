@@ -4,15 +4,37 @@ import shutil
 import re
 from pathlib import Path
 from utils.common import run_hidden
-from urllib.request import urlopen, Request
+from urllib.request import urlopen, Request, build_opener, ProxyHandler
 
 try:
     import psutil
 except ImportError:
     psutil = None
 
+# is_http_reachable 用的绕代理 opener（懒初始化）
+_NO_PROXY_OPENER = None
+
 def find_pids_by_port_safe(port: str):
-    if psutil:
+    try:
+        port_int = int(port)
+    except (TypeError, ValueError):
+        port_int = None
+    if psutil and port_int is not None:
+        # 快路径：net_connections 一次拿全系统连接表（Windows 上无需管理员即可
+        # 拿到 pid）。旧实现逐进程 p.connections()，上千个进程要好几秒且跑在
+        # UI 线程（toggle_comfyui 启动前检测），表现为点「一键启动」后按钮卡住。
+        try:
+            pids = set()
+            for conn in psutil.net_connections(kind="inet"):
+                if (conn.status == psutil.CONN_LISTEN and conn.laddr
+                        and conn.laddr.port == port_int
+                        and conn.pid and conn.pid > 0):
+                    pids.add(conn.pid)
+            if pids:
+                return list(pids)
+        except Exception:
+            pass
+        # 兜底：逐进程扫描（部分平台 net_connections 不可用/缺权限时）
         try:
             pids = set()
             for p in psutil.process_iter(attrs=["pid"]):
@@ -23,7 +45,7 @@ def find_pids_by_port_safe(port: str):
                             # 只查找 LISTEN 状态的进程，避免误杀连接到该端口的浏览器
                             if (getattr(conn, 'status', None) == 'LISTEN' and
                                 getattr(conn, 'laddr', None) and
-                                getattr(conn.laddr, 'port', None) == int(port)):
+                                getattr(conn.laddr, 'port', None) == port_int):
                                 if p.pid and p.pid > 0:
                                     pids.add(p.pid)
                         except Exception:
@@ -126,13 +148,23 @@ def is_http_reachable(app, _log=False) -> bool:
             except Exception:
                 pass
         return False
+    # 本机探测必须绕过系统/环境代理：urlopen 默认走 ProxyHandler，若用户配了
+    # 系统代理，127.0.0.1 的请求会被发给代理服务器，轻则白等超时（启动前检测
+    # 卡在 UI 线程），重则误判不可达。
+    global _NO_PROXY_OPENER
+    try:
+        if _NO_PROXY_OPENER is None:
+            _NO_PROXY_OPENER = build_opener(ProxyHandler({}))
+        _open = _NO_PROXY_OPENER.open
+    except Exception:
+        _open = urlopen
     try:
         url = f"http://127.0.0.1:{port}/system_stats"
         req = Request(url, headers={"Accept": "application/json", "User-Agent": "ComfyUI-Launcher"})
         last_err = None
         for timeout in (0.4, 1.5):
             try:
-                with urlopen(req, timeout=timeout) as resp:
+                with _open(req, timeout=timeout) as resp:
                     code = getattr(resp, "status", None)
                     if code is None:
                         try:

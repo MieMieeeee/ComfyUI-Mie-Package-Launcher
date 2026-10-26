@@ -9,6 +9,7 @@ from pathlib import Path
 from typing import Dict, Any, Optional, Tuple, List, Callable
 from services.interfaces import IVersionService
 from utils.common import run_hidden
+from utils import net as NETUTILS
 
 
 class VersionService(IVersionService):
@@ -54,17 +55,49 @@ class VersionService(IVersionService):
             return False
         return bool(re.match(r"^\d+\.\d+\.\d+(?:[+][\w.-]+)?$", t))
 
+    def _proxy_cmd_args(self) -> list:
+        """按 config.proxy_settings 生成要插进 git 命令的 ``-c insteadOf`` 参数.
+
+        内核更新的 fetch/pull 没有可改写的 URL 参数, 只能靠 git 的 insteadOf 前缀匹配走代理;
+        这些命令以前硬直连 origin, 导致配了 gh-proxy 的用户「更新内核」必然失败
+        （详见 docs/core_update_git_proxy.md）。未启用代理时返回空列表 = 不注入。
+        """
+        try:
+            cfg = getattr(self.app, "config", None)
+            ps = (cfg.get("proxy_settings") or {}) if isinstance(cfg, dict) else {}
+            return NETUTILS.git_insteadof_args(ps)
+        except Exception:
+            return []
+
+    def _apply_git_path_and_proxy(self, cmd: list) -> list:
+        """把 git 可执行文件路径与代理参数套到 cmd 上, 返回**新列表**。
+
+        必须复制: 调用方（``run_git_network`` 之外的 version_page 等）持有原 list,
+        原地改会污染它, 且同一 list 被二次传入时 ``-c`` 会重复叠加。
+        """
+        try:
+            if not isinstance(cmd, list) or not cmd:
+                return cmd
+            new_cmd = list(cmd)
+            # 先换 git 可执行文件, 再按新列表判子命令 —— version_page 传的 cmd[0]
+            # 已经是绝对路径, 上面的替换是 no-op, 所以子命令只能看 cmd[1:]。
+            if str(new_cmd[0]).lower() == "git":
+                gp = getattr(self.app, "git_path", None)
+                if gp:
+                    new_cmd[0] = gp
+            if NETUTILS.git_cmd_needs_proxy(new_cmd):
+                args = self._proxy_cmd_args()
+                if args:
+                    # 插在可执行文件之后、子命令之前
+                    new_cmd = [new_cmd[0], *args, *new_cmd[1:]]
+            return new_cmd
+        except Exception:
+            return cmd
+
     def _run_git(self, cmd: list, **kwargs):
         # 包装 run_hidden 以处理 git ownership 问题
         cwd = kwargs.get("cwd")
-        try:
-            # 确保 cmd 是列表且首个元素是 'git'，然后替换为实际 git 路径
-            if isinstance(cmd, list) and cmd and str(cmd[0]).lower() == "git":
-                gp = getattr(self.app, "git_path", None)
-                if gp:
-                    cmd[0] = gp
-        except Exception:
-            pass
+        cmd = self._apply_git_path_and_proxy(cmd)
         r = run_hidden(cmd, **kwargs)
         if r.returncode != 0 and "dubious ownership" in (
             getattr(r, "stderr", "") or ""
@@ -147,11 +180,9 @@ class VersionService(IVersionService):
         可通过 request_cancel() 终止正在运行的进程。
         """
         cwd = kwargs.get("cwd", self._repo_root())
-        # 替换 git 路径（与 _run_git 相同逻辑）
-        if isinstance(cmd, list) and cmd and str(cmd[0]).lower() == "git":
-            gp = getattr(self.app, "git_path", None)
-            if gp:
-                cmd[0] = gp
+        # 替换 git 路径 + 注入代理参数（与 _run_git 相同逻辑）
+        # 代理只能走 argv: 这条路径自己 Popen 且不传 env, 环境变量加不上
+        cmd = self._apply_git_path_and_proxy(cmd)
 
         # 构建 Windows 隐藏窗口参数（与 run_hidden 一致）
         popen_kwargs = {}

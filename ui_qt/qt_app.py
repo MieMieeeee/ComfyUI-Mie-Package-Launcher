@@ -841,7 +841,13 @@ class PyQtLauncher(QtWidgets.QMainWindow, process_events.ProcessCallback):
         self.fast_disk = BoolVar(False)
         self.disable_pinned_memory = BoolVar(False)
         self.use_new_manager = BoolVar(False)
+        # ComfyUI 资源系统（Assets）：默认关。启动器一直带 --windows-standalone-build，
+        # 那个开关会让 Assets 默认开启（ComfyUI 核心默认是关的），所以这里显式给
+        # --disable-assets，勾选才改回 --enable-assets。
+        self.enable_assets = BoolVar(False)
         self.extra_launch_args = Var("")
+        # 启动页「环境变量」输入框原始文本（K=V, K2=V2），解析见 get_user_env_vars
+        self.user_env_vars = Var("")
         self.attention_mode = Var("")
         self.browser_open_mode = Var("default")
         self.custom_browser_path = Var("")
@@ -890,6 +896,9 @@ class PyQtLauncher(QtWidgets.QMainWindow, process_events.ProcessCallback):
             self.use_new_manager.set(
                 bool(launch_cfg.get("use_new_manager", self.use_new_manager.get()))
             )
+            self.enable_assets.set(
+                bool(launch_cfg.get("enable_assets", self.enable_assets.get()))
+            )
             self.enable_cors.set(
                 bool(launch_cfg.get("enable_cors", self.enable_cors.get()))
             )
@@ -898,6 +907,9 @@ class PyQtLauncher(QtWidgets.QMainWindow, process_events.ProcessCallback):
             )
             self.extra_launch_args.set(
                 launch_cfg.get("extra_args", self.extra_launch_args.get())
+            )
+            self.user_env_vars.set(
+                launch_cfg.get("env_vars", self.user_env_vars.get())
             )
             self.attention_mode.set(
                 launch_cfg.get("attention_mode", self.attention_mode.get())
@@ -1035,27 +1047,6 @@ class PyQtLauncher(QtWidgets.QMainWindow, process_events.ProcessCallback):
                 )
                 return r.stdout.strip() if r.returncode == 0 else ""
 
-            def compute_proxied_url(self, origin_url: str):
-                mode = self.proxy_mode_var.get()
-                url = self.proxy_url_var.get().strip()
-                if not origin_url:
-                    return None
-                if mode == "gh-proxy":
-                    if "github.com" in origin_url:
-                        return "https://gh-proxy.com/" + origin_url.replace(
-                            "https://", ""
-                        ).replace("http://", "")
-                    return None
-                if mode == "custom" and url:
-                    if not url.endswith("/"):
-                        url2 = url + "/"
-                    else:
-                        url2 = url
-                    return url2 + origin_url.replace("https://", "").replace(
-                        "http://", ""
-                    )
-                return None
-
             def save_proxy_settings(self):
                 try:
                     self.app.services.config.set(
@@ -1079,6 +1070,82 @@ class PyQtLauncher(QtWidgets.QMainWindow, process_events.ProcessCallback):
         except Exception:
             pass
         self._setup_ui()
+
+    def _maybe_prompt_model_path_drift(self):
+        """Ask whether to re-apply extra_model_paths.yaml when it drifted.
+
+        The yaml is the file ComfyUI actually reads, while 「模型」页 edits
+        config. Anything that rewrites the yaml behind our back (整合包更新 /
+        手动编辑) makes ComfyUI load fewer model paths than configured, with
+        no error anywhere — so we surface it and let the user decide. Both
+        answers are fingerprinted, so this stays quiet until the library set
+        changes again.
+        """
+        try:
+            mp = getattr(getattr(self, "services", None), "model_path", None)
+            if not mp or not hasattr(mp, "should_prompt_for_drift"):
+                return
+            if not mp.should_prompt_for_drift():
+                return
+
+            report = mp.detect_drift() or {}
+            lines = []
+            for lib in report.get("missing", []):
+                lines.append(f"· 已配置但未写入：{lib.get('name') or lib.get('id')}\n  {lib.get('base_path')}")
+            for lib, old_path in report.get("mismatch", []):
+                lines.append(
+                    f"· 路径已变化：{lib.get('name') or lib.get('id')}\n"
+                    f"  当前：{old_path}\n  应为：{lib.get('base_path')}"
+                )
+            for key, base_path in report.get("orphan", []):
+                lines.append(f"· 配置中已不存在的库仍留在 yaml：\n  {base_path}")
+
+            content = (
+                "检测到 ComfyUI 的 extra_model_paths.yaml 与启动器中配置的模型库不一致。\n"
+                "这通常是因为整合包更新或手动编辑改动了该文件，"
+                "会导致 ComfyUI 启动时加载不到部分外置模型库（不会报错）。\n\n"
+                + "\n".join(lines)
+                + "\n\n是否立即重新应用配置？应用后需重启 ComfyUI 生效。"
+            )
+            if getattr(self, "logger", None):
+                self.logger.info(
+                    "外置模型库配置漂移: missing=%d mismatch=%d orphan=%d",
+                    len(report.get("missing", [])),
+                    len(report.get("mismatch", [])),
+                    len(report.get("orphan", [])),
+                )
+
+            from ui_qt.widgets.dialog_helper import DialogHelper
+            apply_now = DialogHelper.show_confirmation(
+                self, "外置模型库配置已变更", content,
+                yes_text="立即应用", no_text="暂不",
+            )
+            if apply_now:
+                if mp.apply_libraries():
+                    mp.clear_drift_notice()
+                    if getattr(self, "logger", None):
+                        self.logger.info("已按用户选择重新应用 extra_model_paths.yaml")
+                else:
+                    # 写失败（只读介质 / 文件被占用）——不记指纹，下次启动继续问。
+                    if getattr(self, "logger", None):
+                        self.logger.warning("重新应用 extra_model_paths.yaml 失败")
+                    try:
+                        from ui_qt.widgets.dialog_helper import DialogHelper
+                        DialogHelper.show_error(
+                            self, "应用失败",
+                            "无法写入 extra_model_paths.yaml。\n"
+                            "请检查文件是否被占用或磁盘是否只读，然后到「模型」页点击「刷新/应用更改」重试。",
+                        )
+                    except Exception:
+                        pass
+            else:
+                # Declining is a deliberate choice — remember it so we don't
+                # nag on every launch, until the library set changes.
+                mp.mark_drift_acknowledged(applied=False)
+                if getattr(self, "logger", None):
+                    self.logger.info("用户选择暂不应用外置模型库配置漂移")
+        except Exception:
+            pass
 
     def ui_post(self, fn):
         """将函数投递到 UI 线程执行（线程安全）"""
@@ -1867,18 +1934,10 @@ class PyQtLauncher(QtWidgets.QMainWindow, process_events.ProcessCallback):
                             )
                         )
 
-            # Update input style groups (env_group, form_group) - for kernel version and model management pages
-            if hasattr(self, "_input_style_groups"):
-                # Regenerate common_input_qss based on theme
-                new_common_qss = _get_common_input_qss(dark)
-                for group in self._input_style_groups:
-                    group.setStyleSheet(new_common_qss)
-
-            # Update secondary buttons
-            if hasattr(self, "_secondary_buttons"):
-                new_secondary_style = _get_secondary_btn_style(dark)
-                for btn in self._secondary_buttons:
-                    btn.setStyleSheet(new_secondary_style)
+            # （历史遗留清理）此处原有 _input_style_groups / _secondary_buttons 两个
+            # 分支，调用的 _get_common_input_qss / _get_secondary_btn_style 两个函数
+            # 在仓库里从不存在、两个属性也从未被赋值——纯死代码且是潜伏 NameError，
+            # 2026-10 检查更新卡「检查中」事故复盘时顺带删除。
 
             # Update new refactored pages
             if hasattr(self, "_new_pages"):
@@ -2542,10 +2601,28 @@ class PyQtLauncher(QtWidgets.QMainWindow, process_events.ProcessCallback):
         # 包 try/except：services/_invoker 时序或 threading 异常不应拖垮整个 UI 构建。
         try:
             import threading
+
+            def _bg_logged(fn):
+                """后台线程包装：未捕获异常落 launcher.log（2026-10-04）。
+
+                此前 threading.Thread 直接吞异常（打包 exe 的 stderr 无处可去），
+                插件任务的后台 worker 一炸就无声无息——检查更新弹窗冻在最后一格
+                进度的事故里，正是 work() 异常 raise 出线程后无人知晓。"""
+                def _run():
+                    try:
+                        fn()
+                    except Exception:
+                        try:
+                            self.logger.exception("后台任务未捕获异常: %s", getattr(fn, "__name__", fn))
+                        except Exception:
+                            pass
+                return _run
+
             self._plugin_controller = PluginController(
                 page_plugins,
                 self.services.plugins,
-                run_in_background=lambda fn: threading.Thread(target=fn, daemon=True).start(),
+                run_in_background=lambda fn: threading.Thread(
+                    target=_bg_logged(fn), daemon=True).start(),
                 post_to_ui=lambda fn: self._invoker.emit_invoke(fn),
                 sync_deps=self._sync_plugin_deps,
             )
@@ -2650,7 +2727,7 @@ class PyQtLauncher(QtWidgets.QMainWindow, process_events.ProcessCallback):
                 pass
 
             # 尝试走 MVP A 尺寸记忆：优先走 resolve_window_geometry_for_startup，
-            # 任何阶段失败（import / 纯函数抛错）都 fallback 到原硬编码 1350×900 逻辑。
+            # 任何阶段失败（import / 纯函数抛错）都 fallback 到硬编码 1350×960 逻辑。
             final_w, final_h, final_state, final_pos = None, None, "normal", "center"
             try:
                 from config.migrations import resolve_window_geometry_for_startup
@@ -2675,11 +2752,11 @@ class PyQtLauncher(QtWidgets.QMainWindow, process_events.ProcessCallback):
                         )
                 except Exception:
                     pass
-                # 窗口初始尺寸：跟随 ui_scale 同比缩放（1350×900 为 100% 基准）。
+                # 窗口初始尺寸：跟随 ui_scale 同比缩放（1350×960 为 100% 基准）。
                 # 历史「只放大不缩小」决策已反转：scale<1 时窗口也缩小，让内容和
                 # 容器同步缩，避免小 scale 下右侧大块留白（环境配置区「黑条比文本框长」）。
                 base_w = _sp(1350)
-                base_h = _sp(900)
+                base_h = _sp(960)
                 final_w = min(base_w, s_w - 40)
                 final_h = min(base_h, s_h - 80)
                 final_state = "normal"
@@ -3218,6 +3295,20 @@ class PyQtLauncher(QtWidgets.QMainWindow, process_events.ProcessCallback):
         """
         return resolve_active_paths(self.config)
 
+    def get_user_env_vars(self):
+        """Return validated [(key, value), ...] from ``self.user_env_vars``.
+
+        与 HeadlessAppContext.get_user_env_vars 行为一致（鸭子类型约定，
+        core/launcher_cmd.build_launch_params 两个 app 都调它）。解析走
+        utils.user_env.parse_user_env_string（唯一实现）。
+        """
+        from utils.user_env import parse_user_env_string
+        try:
+            text = self.user_env_vars.get() or ""
+        except Exception:
+            return []
+        return parse_user_env_string(text)
+
     def refresh_after_env_switch(self):
         """切换激活环境后，集中刷新所有依赖环境路径的 UI。
 
@@ -3334,10 +3425,16 @@ class PyQtLauncher(QtWidgets.QMainWindow, process_events.ProcessCallback):
                 disable_all_custom_nodes=self.disable_all_custom_nodes.get(),
                 enable_fast_mode=self.use_fast_mode.get(),
                 disable_api_nodes=self.disable_api_nodes.get(),
+                # 以下三个复选框曾漏传，勾选后重启启动器会丢（加载侧一直有读）
+                disable_dynamic_vram=self.disable_dynamic_vram.get(),
+                fast_disk=self.fast_disk.get(),
+                disable_pinned_memory=self.disable_pinned_memory.get(),
                 enable_cors=self.enable_cors.get(),
                 listen_all=self.listen_all.get(),
                 use_new_manager=self.use_new_manager.get(),
+                enable_assets=self.enable_assets.get(),
                 extra_args=self.extra_launch_args.get() or "",
+                env_vars=self.user_env_vars.get() or "",
                 attention_mode=self.attention_mode.get() or "",
                 browser_open_mode=self.browser_open_mode.get() or "default",
                 custom_browser_path=self.custom_browser_path.get() or "",
@@ -3381,6 +3478,7 @@ class PyQtLauncher(QtWidgets.QMainWindow, process_events.ProcessCallback):
             self.disable_dynamic_vram.set(False)
             self.fast_disk.set(False)
             self.disable_pinned_memory.set(False)
+            self.user_env_vars.set("")
             self.enable_cors.set(True)
             self.listen_all.set(True)
             self.custom_port.set("8188")
@@ -3498,6 +3596,19 @@ class PyQtLauncher(QtWidgets.QMainWindow, process_events.ProcessCallback):
                     self.services.version.request_cancel()
                 except Exception:
                     pass
+                # worker 的取消路径（pd.is_cancelled() 检查处）会提前 return，
+                # 走不到 _finish 的注册表收尾；不在这里摘掉的话，任务面板
+                # 「进行中」会永久残留这个已取消的任务（取消后再次更新，
+                # 旧任务还挂在列表里）。
+                if registry and task_id:
+                    try:
+                        registry.update(task_id, status="已取消")
+                    except Exception:
+                        pass
+                    try:
+                        registry.remove(task_id)
+                    except Exception:
+                        pass
                 # 调用 on_done 回调恢复按钮
                 if on_done:
                     try:
@@ -3604,7 +3715,15 @@ class PyQtLauncher(QtWidgets.QMainWindow, process_events.ProcessCallback):
                                 "component": "core",
                                 "error": f"更新超时（{timeout_seconds}秒）",
                             }
-                            # 尝试取消线程
+                            # future.cancel() 对已经在跑的任务无效，worker 会继续跑完内层 git
+                            # （30+60+120s），而 with 退出时 shutdown(wait=True) 会让本线程
+                            # 一直等下去，最终成功的结果也拿不到。必须走 request_cancel()
+                            # 杀掉它记下的那个 git Popen，让 worker 尽快返回。
+                            try:
+                                self.services.version.request_cancel()
+                            except Exception:
+                                pass
+                            # 兜底：万一 cancel 失败，至少别再排队
                             try:
                                 future.cancel()
                             except Exception:
@@ -4131,13 +4250,8 @@ class PyQtLauncher(QtWidgets.QMainWindow, process_events.ProcessCallback):
         """
         # 1. 先停工作台 (它依赖 ComfyUI, 先停依赖方)
         self._stop_webui_sync()
-        # 同步刷新工作台页状态 (停完后回 READY, 不然下次打开还显示运行中)
-        try:
-            page = getattr(self, "_webui_page", None)
-            if page is not None and hasattr(page, "_refresh_state"):
-                page._refresh_state(force=True)
-        except Exception:
-            pass
+        # （2026-10 优化：不再刷新工作台页状态——两个调用方都是退出路径，
+        # 应用马上就没了，页面刷新是纯浪费且白建一个 WebuiProcessManager。）
         # 2. 再停 ComfyUI
         try:
             pm = getattr(self, "process_manager", None)
@@ -4349,6 +4463,7 @@ class PyQtLauncher(QtWidgets.QMainWindow, process_events.ProcessCallback):
 
         # ---- 场景 1a: 从托盘菜单退出（保留 ComfyUI）----
         if getattr(self, "_tray_quit_requested", False):
+            self._begin_visual_exit()
             # ComfyUI 如果未跑, WebUI 工作台留着是孤儿进程, 自动关掉.
             # 保留 ComfyUI 不等于保留 WebUI, 后者依赖前者后台.
             try:
@@ -4360,6 +4475,7 @@ class PyQtLauncher(QtWidgets.QMainWindow, process_events.ProcessCallback):
 
         # ---- 场景 1b: 从托盘菜单退出并关闭 ComfyUI ----
         if getattr(self, "_tray_quit_and_stop_requested", False):
+            self._begin_visual_exit()
             # 停 ComfyUI + WebUI 工作台 (工作台依赖 ComfyUI, 一起停).
             self._stop_comfyui_and_webui_on_exit()
             self._perform_shutdown(event)
@@ -4405,6 +4521,8 @@ class PyQtLauncher(QtWidgets.QMainWindow, process_events.ProcessCallback):
                     except Exception:
                         pass
                     return
+                # 用户已确认退出：先撤可见面再跑停服链（见 _begin_visual_exit）
+                self._begin_visual_exit()
                 if idx == 2:  # 停止并退出
                     # 停 ComfyUI + WebUI 工作台 (工作台依赖 ComfyUI, 一起停).
                     self._stop_comfyui_and_webui_on_exit()
@@ -4545,40 +4663,29 @@ class PyQtLauncher(QtWidgets.QMainWindow, process_events.ProcessCallback):
         return 0
 
     def _prompt_plugin_force_update(self, names):
-        """正常更新后仍有插件落后 → 二次确认是否强制更新（git stash + pull）。
+        """正常更新后仍有插件落后 → 直接强制更新（git 强拉 / CNR 重装），不弹确认。
 
-        罕见路径：比如本地 MieNodes 从仓库直接同步（dirty 树），cm-cli 正常更新会拒，
-        这里提示用户是否对这些插件强制更新。默认「取消」——二次确认要谨慎。
+        过去弹「是否强制更新？」的确认框，但用户反馈：这些插件本来就是「正常更新没
+        搞定才被提出来」的，再让他点一次确认只是徒增困惑（issue #107）。而且 CNR 插件
+        强制更新会替换整个插件目录，如果用户手动改过，弹窗文案解释不清反而更让人
+        莫名其妙（以为自己的改动还在/丢了）。所以改为：静默执行强制更新，结果在
+        进度弹窗/结果提示里说清楚——CNR 插件目录已用 registry 官方版替换，本地手动
+        改动不再保留。
+
+        两种强制更新语义（都保留在结果文案里，用户看得到）：
+        - git 插件：git stash 本地改动 → git pull --ff-only（改动保留，冲突有告警）
+        - CNR 插件：从 registry 重装最新版（目录被替换，手动改动丢失）
         """
         try:
             if not names:
                 return
-            from ui_qt.widgets.custom_confirm_dialog import CustomConfirmDialog
-
-            listing = "\n".join(str(n) for n in names)
-            dlg = CustomConfirmDialog(
-                self,
-                title="部分插件更新失败",
-                content=(
-                    "以下插件正常更新未成功（可能本地有改动，例如从仓库直接同步的插件）：\n\n"
-                    f"{listing}\n\n"
-                    "是否对它们强制更新？（会先 git stash 本地改动，再 git pull --ff-only）"
-                ),
-                buttons=[
-                    {"text": "取消", "role": "normal"},
-                    {"text": "强制更新", "role": "destructive"},
-                ],
-                default_index=0,
-                theme_manager=getattr(self, "theme_manager", None),
-            )
-            if dlg.exec_() == QtWidgets.QDialog.Accepted and (dlg.get_result() or 0) == 1:
-                # 漏 1 meta-review：不再调 apply_force_update（静默跑完无反馈），调 _do_plugin_force_update
-                # 走共用编排器：有进度弹窗 + 后台任务 + 成功失败提示，失败会弹 show_error。
-                self._do_plugin_force_update(list(names))
+            # 漏 1 meta-review：调 _do_plugin_force_update 走共用编排器（有进度弹窗 +
+            # 后台任务 + 成功失败提示），不再调 apply_force_update（静默无反馈）。
+            self._do_plugin_force_update(list(names))
         except Exception:
             try:
                 if getattr(self, "logger", None):
-                    self.logger.warning("插件强制更新确认弹窗失败", exc_info=True)
+                    self.logger.warning("插件强制更新触发失败", exc_info=True)
             except Exception:
                 pass
 
@@ -4730,15 +4837,38 @@ class PyQtLauncher(QtWidgets.QMainWindow, process_events.ProcessCallback):
                     plabel = f"正在查询第 {cur}/{total} 个插件..." + (f"  {name}" if name else "")
                     pd.set_status(plabel)
 
-            def on_done(outdated, remote_dates):
+            # 「连不上远端」的插件数由 controller 直接写在 page._last_unreachable
+            # （on_done 在 UI 线程读它，happens-before 由事件循环保证）。
+            # 不用信号：每次点检查更新都 connect 一个捕获局部 dict 的 lambda 且从不
+            # disconnect → 连点 N 次累积 N 个回调 + N 个 dict 泄漏（review H1）。
+            # 页面对象一律走 self._plugins_page——page_plugins 是 _create_pages 的
+            # 局部变量，这里引用不到（曾因此 NameError 吞掉 set_checking(False)，
+            # 列表永久卡「检查中」，见 test_no_implicit_global_refs）。
+            try:
+                _page = getattr(self, "_plugins_page", None)
+                if _page is not None:
+                    _page._last_unreachable = 0
+            except Exception:
+                pass
+
+            def on_done(outdated, remote_dates, error=None):
                 try:
                     page = getattr(self, "_plugins_page", None)
-                    if page is not None:
-                        # 结果无论取消/后台都回填列表（用户能看到标记）
+                    if page is not None and not error:
+                        # 结果无论取消/后台都回填列表（用户能看到标记）；
+                        # error 非空时结果集为空，回填会把已有标记清掉，跳过
                         page.mark_outdated(outdated, remote_dates)
-                    n = len(outdated)
-                    done_msg = (f"检查完成：发现 {n} 个插件有可用更新" if n
-                                else "检查完成：所有插件均为最新版本")
+                    if error:
+                        # 2026-10-04：后台线程异常也要落到完成态（此前异常 raise 出线程
+                        # 被静默吞掉，弹窗永久冻在最后一格进度）
+                        done_msg = f"检查失败：{error}（详见启动器日志）"
+                    else:
+                        n = len(outdated)
+                        n_un = int(getattr(page, "_last_unreachable", 0) or 0)
+                        done_msg = (f"检查完成：发现 {n} 个插件有可用更新" if n
+                                    else "检查完成：所有插件均为最新版本")
+                        if n_un:
+                            done_msg += f"（另有 {n_un} 个连不上远端未能检查，可能是网络/代理问题）"
                     # 关键：先把弹窗更新到完成态（progress=满 + 状态文字 + 隐藏取消按钮）。
                     # 后台模式下 on_progress 跳过了弹窗 UI，不更新到这里，restore 找回时会看到
                     # 进度停在中途、与面板「已完成」不一致。mark_complete 还会隐藏取消按钮
@@ -4759,17 +4889,13 @@ class PyQtLauncher(QtWidgets.QMainWindow, process_events.ProcessCallback):
                             pass
                         return
                     if pd.is_backgrounded():
-                        # 后台运行：弹窗已隐藏但已更新到完成态（restore 可见），状态栏提示 + 按钮变绿。
-                        # 不再自动 remove：保留为本次启动的完成历史（问题3），用户可手动清。
-                        self._notify_plugins_result(done_msg)
+                        # 后台运行完成：弹窗已隐藏，用结果弹窗告知（原状态栏方案已弃用
+                        # ——QMainWindow 状态栏惰性创建，首次提示会把窗口底部撑出一条
+                        # 永久空栏，2026-10 设计调整）。注册表保留完成历史，可手动清。
+                        self._notify_plugins_result("检查插件更新", done_msg)
                         return
-                    # 前台：已显示结果，延迟关闭（保留历史）
-                    def _close():
-                        try:
-                            pd.close()
-                        except Exception:
-                            pass
-                    QtCore.QTimer.singleShot(1500, _close)
+                    # 前台：结果已显示在完成态弹窗上（mark_complete），停在完成态等用户自己关
+                    # （原先 1.5 秒自动关，提示来不及看），不再另发通知。
                 except Exception:
                     try:
                         pd.close()
@@ -4777,6 +4903,15 @@ class PyQtLauncher(QtWidgets.QMainWindow, process_events.ProcessCallback):
                         pass
                     if registry and task_id:
                         registry.remove(task_id)
+                finally:
+                    # 兜底：任何提前 return / 异常路径都要收掉「检查中」药丸，
+                    # 否则列表会永远停在「检查中…」（mark_outdated 已清，这里再保一道）
+                    try:
+                        page = getattr(self, "_plugins_page", None)
+                        if page is not None:
+                            page.set_checking(False)
+                    except Exception:
+                        pass
 
             ctrl.run_check_updates(on_progress=on_progress, on_done=on_done)
         except Exception:
@@ -4792,6 +4927,7 @@ class PyQtLauncher(QtWidgets.QMainWindow, process_events.ProcessCallback):
         ctrl = getattr(self, "_plugin_controller", None)
         if ctrl is None:
             return
+        was_running = self._is_comfyui_running()
         try:
             from ui_qt.widgets.progress_dialog import ProgressDialog
             registry = getattr(self, "_bg_task_registry", None)
@@ -4803,7 +4939,7 @@ class PyQtLauncher(QtWidgets.QMainWindow, process_events.ProcessCallback):
                 registry.set_dialog(task_id, pd)
                 registry.update(task_id, status=status_init)
             pd.set_status(status_init)
-            pd.set_progress(0, maximum=0)  # 脉冲
+            pd.set_progress(0, maximum=0)  # 脉冲；拿到 cm-cli 逐插件进度行后切 k/N
             pd.show()
             QtWidgets.QApplication.processEvents()
 
@@ -4817,11 +4953,27 @@ class PyQtLauncher(QtWidgets.QMainWindow, process_events.ProcessCallback):
                 except Exception:
                     pass
 
+            def on_progress(cur, total, name):
+                # cm-cli 逐插件进度行（plugin_service._cmcli_update_progress 流式解析）
+                label = f"正在更新插件 {cur}/{total}" + (f"：{name}" if name else "...")
+                if registry and task_id and total > 0:
+                    registry.update(task_id, status=label, progress=(cur, total))
+                if pd.is_cancelled() or pd.is_backgrounded():
+                    return
+                try:
+                    if total > 0:
+                        pd.set_progress(cur, maximum=total)
+                    pd.set_status(label)
+                except Exception:
+                    pass
+
             def on_done(success, message):
                 # success/message 对齐 _plugin_op_with_progress 契约：
                 # success = True 走完成 ✓ 文案，False 额外弹 show_error（非取消）
                 try:
                     done_msg = message or "插件更新完成"
+                    if was_running and not self._is_comfyui_running():
+                        done_msg += self._PLUGIN_COMFYUI_DIED_HINT
                     # 同步弹窗到完成态（后台模式下 on_progress 跳过了弹窗 UI，这里统一更新；
                     # mark_complete 还会隐藏取消按钮——已完成的任务不该再有取消选项）
                     # B1 CR：success=False 分支原代码 done_msg + done_msg 会重复两次错误文案，
@@ -4845,17 +4997,26 @@ class PyQtLauncher(QtWidgets.QMainWindow, process_events.ProcessCallback):
                         except Exception:
                             pass
                         return
-                    if pd.is_backgrounded():
-                        # 后台：弹窗已更新到完成态，状态栏提示。不自动 remove（保留历史）
-                        self._notify_plugins_result(done_msg)
-                        return
-                    # 前台：已显示结果，延迟关闭（保留历史，不 remove）
-                    def _close():
+                    if getattr(self, "_plugin_force_in_progress", False):
+                        # issue #107：落后的插件已自动开始强制更新（另一个进度弹窗在跑）。
+                        # 本任务不再停留完成态/弹结果框——否则「更新完成（建议强制更新）」
+                        # 和「正在强制更新」两个窗叠着互相矛盾。mark_complete 在上方已把
+                        # 注册表标成完成（含文案），这里直接收掉弹窗，最终结果由强制
+                        # 更新的进度弹窗 + 结果弹窗汇总。普通更新的结论暂存进
+                        # _plugin_force_context_msg——强制更新收尾时合并汇报，否则
+                        # 最终结论只剩「强制更新完成 N 个」，普通更新的成果没有记录。
+                        self._plugin_force_context_msg = done_msg
                         try:
                             pd.close()
                         except Exception:
                             pass
-                    QtCore.QTimer.singleShot(1500, _close)
+                        return
+                    if pd.is_backgrounded():
+                        # 后台运行完成：结果弹窗告知（状态栏方案已弃用，2026-10）。
+                        # 不自动 remove：保留完成历史，用户可手动清。
+                        self._notify_plugins_result("更新全部", done_msg)
+                        return
+                    # 前台：结果已显示在完成态弹窗上，等用户自己关，不再另发通知。
                 except Exception:
                     try:
                         pd.close()
@@ -4864,7 +5025,7 @@ class PyQtLauncher(QtWidgets.QMainWindow, process_events.ProcessCallback):
                     if registry and task_id:
                         registry.remove(task_id)
 
-            ctrl.run_update_all(on_status=on_status, on_done=on_done)
+            ctrl.run_update_all(on_status=on_status, on_done=on_done, on_progress=on_progress)
         except Exception:
             try:
                 if getattr(self, "logger", None):
@@ -4879,6 +5040,7 @@ class PyQtLauncher(QtWidgets.QMainWindow, process_events.ProcessCallback):
         ctrl = getattr(self, "_plugin_controller", None)
         if ctrl is None or not names:
             return
+        was_running = self._is_comfyui_running()
         try:
             from ui_qt.widgets.progress_dialog import ProgressDialog
             registry = getattr(self, "_bg_task_registry", None)
@@ -4905,9 +5067,25 @@ class PyQtLauncher(QtWidgets.QMainWindow, process_events.ProcessCallback):
                 except Exception:
                     pass
 
+            def on_progress(cur, total, name):
+                # cm-cli 逐插件进度行（plugin_service._cmcli_update_progress 流式解析）
+                label = f"正在更新插件 {cur}/{total}" + (f"：{name}" if name else "...")
+                if registry and task_id and total > 0:
+                    registry.update(task_id, status=label, progress=(cur, total))
+                if pd.is_cancelled() or pd.is_backgrounded():
+                    return
+                try:
+                    if total > 0:
+                        pd.set_progress(cur, maximum=total)
+                    pd.set_status(label)
+                except Exception:
+                    pass
+
             def on_done(success, message):
                 try:
                     done_msg = message or f"选中插件更新完成 ({len(names)} 个)"
+                    if was_running and not self._is_comfyui_running():
+                        done_msg += self._PLUGIN_COMFYUI_DIED_HINT
                     # 同步弹窗到完成态 (后台模式下 on_status 跳过弹窗 UI, 这里统一更新;
                     # mark_complete 还会隐藏取消按钮——已完成的任务不该再有取消选项)
                     # B1 CR：success=False 分支原代码 done_msg + done_msg 会重复错误文案，修：只在成功才拼 ✓
@@ -4930,17 +5108,26 @@ class PyQtLauncher(QtWidgets.QMainWindow, process_events.ProcessCallback):
                         except Exception:
                             pass
                         return
-                    if pd.is_backgrounded():
-                        # 后台: 弹窗已更新到完成态, 状态栏提示. 不自动 remove（保留历史）
-                        self._notify_plugins_result(done_msg)
-                        return
-                    # 前台: 已显示结果, 延迟关闭（保留历史, 不 remove）
-                    def _close():
+                    if getattr(self, "_plugin_force_in_progress", False):
+                        # 同 _do_plugin_update_all：强制更新已自动接棒，收掉本弹窗，
+                        # 避免与「正在强制更新」弹窗叠加矛盾（issue #107 收尾）。
+                        # 普通更新结论同样暂存，由强制更新收尾合并汇报。
+                        self._plugin_force_context_msg = done_msg
                         try:
                             pd.close()
                         except Exception:
                             pass
-                    QtCore.QTimer.singleShot(1500, _close)
+                        return
+                    if pd.is_backgrounded():
+                        # 后台运行完成：结果弹窗告知（状态栏方案已弃用，2026-10）。
+                        # 不自动 remove（保留历史）
+                        self._notify_plugins_result("更新选中", done_msg)
+                        return
+                    # 前台: 停在完成态**等用户自己关**。原先 singleShot(1500) 自动
+                    # close，用户反馈「没有完成提示，得去后台任务那里看」——1.5 秒
+                    # 在用户切页面/窗口被盖住时根本来不及看，提示等于没有。
+                    # mark_complete 已隐藏取消按钮，关闭交给弹窗自己的关闭按钮。
+                    # 结果已显示在完成态弹窗上，不再另发通知。
                 except Exception:
                     try:
                         pd.close()
@@ -4949,7 +5136,8 @@ class PyQtLauncher(QtWidgets.QMainWindow, process_events.ProcessCallback):
                     if registry and task_id:
                         registry.remove(task_id)
 
-            ctrl.run_update_selected(list(names), on_status=on_status, on_done=on_done)
+            ctrl.run_update_selected(list(names), on_status=on_status, on_done=on_done,
+                                      on_progress=on_progress)
         except Exception:
             try:
                 if getattr(self, "logger", None):
@@ -4960,30 +5148,49 @@ class PyQtLauncher(QtWidgets.QMainWindow, process_events.ProcessCallback):
     # ---- 漏 1 meta-review：强制更新共用 _plugin_op_with_progress 编排器，
     # 有进度弹窗 + 后台任务 + 成功失败反馈，不再丢弃 detail。
     def _do_plugin_force_update(self, names):
-        """强制更新选中（二次确认后）: 带进度 + 后台运行 + 成功失败反馈。
+        """强制更新选中: 带进度 + 后台运行 + 成功失败反馈。
 
         与 update_selected 不同：这里直接走共用的 _plugin_op_with_progress，
         on_done 带 (ok, summary)，有失败会弹 DialogHelper.show_error，不再
         ctrl.apply_force_update 后台跑完没消息。
+
+        issue #107 后由 _prompt_plugin_force_update 在普通更新完成时自动触发
+        （不再弹确认框）。_plugin_force_in_progress 标志告诉普通更新的 on_done：
+        强制更新已接棒，别再停留完成态/弹结果框，避免「更新完成（建议强制更新）」
+        和「正在强制更新」两个弹窗叠着互相矛盾。
         """
         ctrl = getattr(self, "_plugin_controller", None)
         if ctrl is None or not names:
             return
+        self._plugin_force_in_progress = True
+        was_running = self._is_comfyui_running()
 
         def _run(on_status, on_done, on_progress, cancel_event):
             # run_force_update 的 on_done 是 (ok, summary, per_plugin)，
             # 这里把 per_plugin 吞掉（detail 留给以后展开，弹窗先拿人类 summary）
             def _adapted_done(ok, summary, per_plugin):
                 try:
-                    on_done(bool(ok), str(summary))
+                    s = str(summary)
+                    # 合并接棒前的普通更新结论（update_all/selected 让位时暂存）：
+                    # 最终弹窗/注册表一起呈现「普通更新 N 个 + 强制更新 M 个」，
+                    # 而不是只剩强制更新自己的数字（用户反馈：其余正常更新的记录消失）。
+                    ctx = getattr(self, "_plugin_force_context_msg", None)
+                    if ctx:
+                        s = ctx + "\n\n" + s
+                    self._plugin_force_context_msg = None
+                    if was_running and not self._is_comfyui_running():
+                        s += self._PLUGIN_COMFYUI_DIED_HINT
+                    on_done(bool(ok), s)
                 except Exception:
                     pass
+                finally:
+                    self._plugin_force_in_progress = False
             ctrl.run_force_update(list(names), on_status=on_status, on_done=_adapted_done)
 
         self._plugin_op_with_progress(
             title="强制更新插件",
             task_title=f"强制更新 ({len(names)} 个)",
-            status_init=f"正在强制更新 {len(names)} 个插件（git stash + pull --ff-only）...",
+            status_init=f"正在强制更新 {len(names)} 个插件（git 强拉 / CNR 重装）...",
             run_fn=_run,
         )
 
@@ -5049,16 +5256,11 @@ class PyQtLauncher(QtWidgets.QMainWindow, process_events.ProcessCallback):
                             pass
                         return
                     if pd.is_backgrounded():
-                        # 后台：弹窗已更新到完成态，状态栏提示。不自动 remove（保留历史）
-                        self._notify_plugins_result(message)
+                        # 后台运行完成：结果弹窗告知（状态栏方案已弃用，2026-10）。
+                        # 不自动 remove（保留历史）
+                        self._notify_plugins_result(title, message)
                         return
-                    # 前台：已显示结果，延迟关闭（保留历史，不 remove）
-                    def _close():
-                        try:
-                            pd.close()
-                        except Exception:
-                            pass
-                    QtCore.QTimer.singleShot(1500, _close)
+                    # 前台：结果已显示在完成态弹窗上，等用户自己关，不再另发通知。
                 except Exception:
                     try:
                         pd.close()
@@ -5134,14 +5336,31 @@ class PyQtLauncher(QtWidgets.QMainWindow, process_events.ProcessCallback):
                 list(dir_names), on_status=on_status, on_done=on_done),
         )
 
-    def _notify_plugins_result(self, message):
-        """后台运行完成时的轻量提示（statusBar 短暂显示，不抢焦点）。"""
+    # 插件批量操作收尾时若发现 ComfyUI「开始时在跑、结束时没了」，追加这条提示。
+    # 2026-10-03 事故：Manager 的重启机制（网页端 Apply/重启 + 依赖 reapply 二次
+    # execv 链）把运行中的 ComfyUI 静默搞死，用户几分钟后才发现。检测用
+    # _is_comfyui_running（与一键启动 toggle 同源：进程句柄 → HTTP 探测）。
+    _PLUGIN_COMFYUI_DIED_HINT = (
+        "\n\n⚠ ComfyUI 已停止：可能被 ComfyUI-Manager 的重启机制关闭"
+        "（网页端「Apply/重启」或依赖重装重启链）。插件改动已写入磁盘，"
+        "重新启动 ComfyUI 后生效。"
+    )
+
+    def _notify_plugins_result(self, title, message):
+        """插件后台任务完成时的结果弹窗（仅后台态调用；前台由完成态进度弹窗自展示）。
+
+        原方案是 QMainWindow 状态栏 showMessage(msg, 4000)——但状态栏是惰性创建的，
+        首次提示会把窗口底部永久撑出一条空栏（4 秒后文字消失、栏还在），用户反馈
+        「界面被弄大了」，2026-10 设计调整弃用。失败场景不走这里（各自 on_done 的
+        show_error 已覆盖）。"""
         try:
-            sb = self.statusBar()
-            if sb is not None:
-                sb.showMessage(message, 4000)
+            DialogHelper.show_info(self, title or "插件任务", message)
         except Exception:
-            pass
+            try:
+                if getattr(self, "logger", None):
+                    self.logger.warning("插件结果弹窗失败", exc_info=True)
+            except Exception:
+                pass
 
     def _refresh_bg_tasks_nav(self):
         """注册表变化 → 刷新「后台任务」nav 按钮文字（badge 效果）+ 同步页面。
@@ -5193,13 +5412,36 @@ class PyQtLauncher(QtWidgets.QMainWindow, process_events.ProcessCallback):
         except Exception:
             pass
 
+    def _safe_plugins_page(self):
+        """安全拿到 plugins page（outdated_reported 回推时用），找不到返回 None。
 
-        """安全拿到 plugins page（outdated_reported 回推时用），找不到返回 None。"""
+        （a6199a4 提交时 def 行意外丢失，函数体被并进上一个方法尾部成为
+        死代码——2026-10 检查更新卡「检查中」事故复盘时发现并补回。）
+        """
         try:
             return getattr(self, "_plugins_page", None)
         except Exception:
             return None
 
+
+    def _begin_visual_exit(self):
+        """退出路径的第一拍：立刻撤掉可见面（主窗口 + 托盘图标）。
+
+        停服链（WebUI taskkill + ComfyUI 软杀 1s 等待 + 强杀 + 端口扫描/探测）
+        全程跑在 UI 线程，要 2-3 秒——期间窗口和托盘纹丝不动，用户以为没点上
+        （issue #108 后续反馈「点了一段时间没反应才关」）。先 hide 再干活，
+        感知上「点了就退」；不可见的收尾几秒无感。_perform_shutdown 里的
+        tray.shutdown（hide + deleteLater）与之幂等兼容。
+        """
+        try:
+            self.hide()
+        except Exception:
+            pass
+        try:
+            if getattr(self, "_tray", None):
+                self._tray.hide()
+        except Exception:
+            pass
 
     def _perform_shutdown(self, event):
         """真正退出的后续流程：站伏 workers、关窗口、QApplication.quit。与原 closeEvent 后半段一致。"""
@@ -5306,7 +5548,15 @@ class PyQtLauncher(QtWidgets.QMainWindow, process_events.ProcessCallback):
             pass
 
     def _quit_from_tray(self):
-        """从托盘菜单退出：设置标志位后调用 close()，走真正退出流程。"""
+        """从托盘菜单退出：设置标志位后延迟一拍调用 close()，走真正退出流程。
+
+        Windows 上托盘右键菜单跑在原生模态消息循环（TrackPopupMenu）里，
+        triggered 处理器必须立刻返回——同步 close() 会把整条退出链（停 WebUI
+        timeout=8s + 停 ComfyUI + _tray.shutdown 的 deleteLater，即在菜单自己
+        的处理器里删托盘图标）塞进菜单循环内执行，Windows 上这是已知坏模式：
+        菜单僵住、点击看起来无效（issue #108「托盘右键关闭并退出无效」）。
+        singleShot(0) 把 close 推迟到菜单循环退散后的下一拍事件循环。
+        """
         try:
             if getattr(self, "logger", None):
                 self.logger.info("从系统托盘退出启动器")
@@ -5314,15 +5564,15 @@ class PyQtLauncher(QtWidgets.QMainWindow, process_events.ProcessCallback):
             pass
         self._tray_quit_requested = True
         try:
-            self.close()
+            QtCore.QTimer.singleShot(0, self._close_from_tray_deferred)
         except Exception:
-            try:
-                QtWidgets.QApplication.quit()
-            except Exception:
-                pass
+            self._close_from_tray_deferred()
 
     def _quit_from_tray_and_stop(self):
-        """从托盘菜单退出并关闭 ComfyUI：走 closeEvent 场景 1b，先停服务再退出。"""
+        """从托盘菜单退出并关闭 ComfyUI：走 closeEvent 场景 1b，先停服务再退出。
+
+        同 _quit_from_tray：close() 必须从菜单的模态循环里延迟出来再调。
+        """
         try:
             if getattr(self, "logger", None):
                 self.logger.info("从系统托盘退出并关闭 ComfyUI")
@@ -5330,12 +5580,35 @@ class PyQtLauncher(QtWidgets.QMainWindow, process_events.ProcessCallback):
             pass
         self._tray_quit_and_stop_requested = True
         try:
-            self.close()
+            QtCore.QTimer.singleShot(0, self._close_from_tray_deferred)
         except Exception:
+            self._close_from_tray_deferred()
+
+    def _close_from_tray_deferred(self):
+        """托盘退出路径的实际 close（已从菜单模态循环里延迟出来）。
+
+        close() 返回 False / closeEvent 被忽略 / 异常 → 兜底 QApplication.quit()。
+        若本次没走到 _perform_shutdown（_shutting_down 仍 False），复位两个托盘
+        标志——否则它们永久残留，用户之后正常点 X 关窗会被劫持进托盘退出路径
+        （跳过确认对话框直接停 ComfyUI / 直接退出）。
+        """
+        try:
+            closed = self.close()
+        except Exception:
+            closed = False
             try:
                 QtWidgets.QApplication.quit()
             except Exception:
                 pass
+        if closed is False:
+            try:
+                QtWidgets.QApplication.quit()
+            except Exception:
+                pass
+        if not getattr(self, "_shutting_down", False):
+            # close 没有走到关闭流程（被忽略/失败）——清标志，别污染后续关闭路径
+            self._tray_quit_requested = False
+            self._tray_quit_and_stop_requested = False
 
     def run(self):
         # 首先检查是否有待处理的启动器更新
@@ -5408,6 +5681,12 @@ class PyQtLauncher(QtWidgets.QMainWindow, process_events.ProcessCallback):
         except Exception:
             pass
         self.show()
+
+        # 外置模型库漂移提示：extra_model_paths.yaml 被整合包更新/手动编辑改过，
+        # 与「模型」页里配置的库不一致时 ComfyUI 会静默少加载路径。问用户要不要
+        # 重新应用；两种回答都记进 config 的指纹，改库集合后自动重新询问。
+        # 延迟到窗口显示之后再弹，避免和构造期/首帧抢 UI 线程。
+        QtCore.QTimer.singleShot(600, self._maybe_prompt_model_path_drift)
 
         # 渲染模式升级提示：仅本次为兼容/安全时用 escalated_detail() 非 None 则
         # 提示用户（compat=视觉无感 / safe=明确说明可改回。

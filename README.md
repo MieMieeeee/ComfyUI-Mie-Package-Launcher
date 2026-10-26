@@ -160,6 +160,13 @@ python __main__.py status --json # JSON 输出，便于脚本解析
 - 端口与额外参数：自定义端口与额外启动参数
 - 注意力优化：支持 Split/Quad/PyTorch2.0/Sage/FlashAttention 等选项
 - 启动后自动打开：默认浏览器 / 不自动打开 / 自定义浏览器
+- 资源系统（Assets）：默认**关闭**。ComfyUI 0.40+ 的资源系统会在本地建
+  SQLite 索引并扫描 `models` / `input` / `output`（外置库在 NAS / 网络盘上
+  可能扫好几分钟、硬盘狂响，且同一 ComfyUI 目录再起第二个实例会因共用数据库
+  直接退出）。勾选「启用资源系统」即传入 `--enable-assets`；不勾选则显式传
+  `--disable-assets`（启动器一直带 `--windows-standalone-build`，那个开关会
+  顺手把资源系统打开，所以必须显式关）。ComfyUI 低于 0.40 不支持该参数，
+  启动器会自动跳过。
 
 ### 调试模式与日志
 - 默认情况下，命令输出日志被严格收敛：每次命令的 `stdout`/`stderr` 最多记录少量行（默认 10 行），`netstat -ano` 仅记录行数摘要，避免日志膨胀。

@@ -4,39 +4,15 @@ Provides the same attribute interface as the PyQt app object.
 """
 
 import json
-import re
 import sys
 from pathlib import Path
-from typing import Any, List, Optional, Tuple
+from typing import Any
 
 from config.manager import atomic_write_json
 from config.migrations import migrate_environments, resolve_active_paths
-
-
-_ENV_VAR_KEY_RE = re.compile(r"^[A-Za-z_][A-Za-z0-9_]*$")
-
-
-def _parse_user_env_string(raw: str) -> List[Tuple[str, str]]:
-    """Parse a 'K=V, K2=V2' style string into validated (key, value) tuples.
-
-    Whitespace around each segment is tolerated. Segments without '=' or
-    with an invalid key (must match ``[A-Za-z_][A-Za-z0-9_]*``) are
-    silently dropped. Values may contain '=' and other characters; only
-    the first '=' splits key from value.
-    """
-    out: List[Tuple[str, str]] = []
-    if not raw:
-        return out
-    for segment in raw.split(","):
-        part = segment.strip()
-        if not part or "=" not in part:
-            continue
-        key, _, value = part.partition("=")
-        key = key.strip()
-        if not _ENV_VAR_KEY_RE.match(key):
-            continue
-        out.append((key, value.strip()))
-    return out
+# 注意：不要在模块级 import utils.*——tests/conftest 导入本文件时 tests/utils
+# 会短暂遮蔽项目根的 utils 包（pytest_configure 尚未修正 sys.path）。
+# 解析器唯一实现在 utils.user_env，get_user_env_vars 内懒加载。
 
 
 class StringVar:
@@ -193,6 +169,9 @@ class HeadlessAppContext:
         self.fast_disk = BoolVar(launch_opts.get("fast_disk", False))
         self.disable_pinned_memory = BoolVar(launch_opts.get("disable_pinned_memory", False))
         self.use_new_manager = BoolVar(False)
+        # ComfyUI 资源系统（Assets）：默认关（ComfyUI 核心默认也是关的；
+        # 启动器的 --windows-standalone-build 会顺手打开它，所以要显式关）。
+        self.enable_assets = BoolVar(launch_opts.get("enable_assets", False))
         self.extra_launch_args = StringVar(launch_opts.get("extra_args", ""))
         self.user_env_vars = StringVar(launch_opts.get("env_vars", ""))
         self.attention_mode = StringVar(launch_opts.get("attention_mode", ""))
@@ -266,6 +245,7 @@ class HeadlessAppContext:
             text = raw.get() or ''
         except Exception:
             return []
+        from utils.user_env import parse_user_env_string as _parse_user_env_string
         return _parse_user_env_string(text)
 
     def get_active_paths(self):

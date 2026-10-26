@@ -1,7 +1,10 @@
 """WebUI 安装: git clone + pip install.
 
 复用 launcher 现有基础设施:
-- git clone URL 走 utils.net.apply_git_proxy_to_url (跟 ComfyUI 升级同源)
+- git clone URL 走 utils.net.apply_git_proxy_to_url —— 改的是**传给 git 的 URL 字符串**;
+  内核升级 (services/version_service.py) 复用同一个 helper 生成
+  utils.net.git_insteadof_args 的 ``-c url.<前缀>.insteadOf=`` 参数, 因为 fetch/pull
+  没有可改写的 URL 参数, 只能靠 git 的前缀匹配, 且不改仓库 origin
 - python 强制走激活 env 的 python_embeded (跟 ComfyUI 共享)
 - pip install 走 utils.pip.install_requirements_file (跟 ComfyUI 升级同源)
 

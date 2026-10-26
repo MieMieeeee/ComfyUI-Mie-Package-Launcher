@@ -41,6 +41,51 @@ def _webui_log_path(app: Any) -> Path:
     return cwd / "launcher" / "webui.log"
 
 
+def _is_webui_pid(pid: int | None) -> bool:
+    """校验 PID 是不是 WebUI 工作台进程（cmdline 含 ``flask_app``）。
+
+    为什么不能只看「PID 活着」：webui 进程死掉没走 stop 时 pidfile 会残留，
+    Windows 复用 PID 很积极——2026-10-03 实测，8 月的 webui.pid（pid=13596）
+    被毫不相干的 Grok Bot.exe 复用，`is_running` 连续一个多月误报「已启动」，
+    `stop` 甚至会 taskkill /F 误杀那个进程。cmdline 特征 ``flask_app`` 覆盖
+    两种启动形态（``python -m app.flask_app`` 与 ``python -c "...from
+    app.flask_app import main..."``，见 webui_launcher_cmd）。与 ComfyUI 侧的
+    ``core.probe.is_comfyui_pid`` 同一套思路。
+    """
+    if pid is None or int(pid) <= 0:
+        return False
+    pid = int(pid)
+    if _HAS_PSUTIL:
+        try:
+            if pid == os.getpid():
+                return False
+            p = psutil.Process(pid)
+            try:
+                cmdline = " ".join(p.cmdline()).lower()
+            except Exception:
+                cmdline = ""
+            if "flask_app" in cmdline:
+                return True
+        except Exception:
+            pass
+    if os.name == "nt":
+        # psutil 缺失时的 wmic 兜底（同 is_comfyui_pid 的降级路径）
+        try:
+            import shutil as _shutil
+            if not _shutil.which("wmic"):
+                return False
+            r = run_hidden(
+                ["wmic", "process", "where", f"ProcessId={pid}",
+                 "get", "CommandLine", "/format:list"],
+                capture_output=True, text=True, errors="ignore", timeout=5,
+            )
+            if r.returncode == 0 and r.stdout and "flask_app" in r.stdout.lower():
+                return True
+        except Exception:
+            pass
+    return False
+
+
 # 历史说明: 此处曾装过 3 道全局 hook (unraisablehook / sys.excepthook / sys.stderr
 # 猴补丁) 想吞掉 subprocess._readerthread 在 Python 3.13 上读 cp1252 字节时的
 # UnicodeDecodeError (CPython issue 118526 / 121633). 但子线程未捕获异常走的是
@@ -76,19 +121,43 @@ class WebuiProcessManager:
         from core.cli.webui_pidfile import read
         return read(self._pidfile_path())
 
+    def _live_webui_pidfile_data(self) -> Optional[dict]:
+        """读取 pidfile 并做**身份校验**：PID 活着但 cmdline 不是 flask_app → 视为失联。
+
+        Windows 复用 PID 很积极（2026-10-03 实测：8 月的 webui.pid 被无关进程
+        复用，页面误报「已启动」一个多月、stop 会误杀）。命中幽灵时顺手清掉
+        pidfile（自愈），调用方按未运行处理。
+        """
+        pd = self._pidfile_data()
+        if pd is None:
+            return None
+        pid = pd.get("pid")
+        if not _is_webui_pid(pid):
+            try:
+                from core.cli.webui_pidfile import clear
+                clear(self._pidfile_path())
+                try:
+                    getattr(self.app, "logger", None) and self.app.logger.warning(
+                        "webui.pid 幽灵清理：PID %s 已被非 WebUI 进程复用，按未运行处理", pid)
+                except Exception:
+                    pass
+            except Exception:
+                pass
+            return None
+        return pd
+
     # ---------------- probe ----------------
     def is_running(self, *, timeout: float = 1.5) -> bool:
-        """综合判定: Popen 句柄在 + webui 进程 PID 活 + 端口可达 (任一即可, 优先级 Popen > PID > HTTP)."""
+        """综合判定: Popen 句柄在 + webui 进程 PID 活(身份校验过) (任一即可, 优先级 Popen > PID).
+
+        PID 活不算数——必须 cmdline 是 flask_app（防 PID 复用误报/误杀）。
+        HTTP 不参与（Flask 启动慢，进程在就算 running）。"""
         try:
             if self.webui_process and self.webui_process.poll() is None:
                 return True
         except Exception:
             pass
-        pd = self._pidfile_data()
-        if pd is None:
-            return False
-        # PID 活但 HTTP 没就绪也算 running (Flask 启动慢)
-        return True
+        return self._live_webui_pidfile_data() is not None
 
     def is_http_reachable(self, port: int | None = None, timeout: float = 1.5) -> bool:
         """对 webui 端口做最小 HTTP 探活 (GET / 返 200)."""
@@ -123,8 +192,8 @@ class WebuiProcessManager:
         from core.cli.webui_pidfile import write as write_pidfile
 
         start_t = time.time()
-        # 1. 已在跑 — 直接返回
-        existing = self._pidfile_data()
+        # 1. 已在跑 — 直接返回（身份校验过：幽灵 pidfile 不拦截 start）
+        existing = self._live_webui_pidfile_data()
         if existing is not None:
             port = int(existing.get("port") or 0)
             return {
@@ -327,9 +396,11 @@ class WebuiProcessManager:
         返: {"ok": bool, "pid": int|None, "elapsed_sec": float, "error": str|None}
         """
         start_t = time.time()
-        from core.cli.webui_pidfile import clear as clear_pidfile, read as read_pidfile
+        from core.cli.webui_pidfile import clear as clear_pidfile
 
-        pd = read_pidfile(self._pidfile_path())
+        # 身份校验过的读取：幽灵 pidfile（PID 被无关进程复用）不参与 taskkill，
+        # 防止 stop 误杀（2026-10-03 实测 pidfile PID 是 Grok Bot.exe）。
+        pd = self._live_webui_pidfile_data()
         pid = None
         if pd:
             pid = pd.get("pid")
@@ -443,15 +514,13 @@ class WebuiProcessManager:
         """查询 WebUI 状态 (进程层 + HTTP 探活, 分开表达).
 
         语义分层 (跟 is_running / http_reachable 对齐):
-        - running: 进程是否存在 (pidfile 活 / Popen 句柄活), 含 Flask 启动中.
+        - running: 进程是否存在 (pidfile 活[身份校验] / Popen 句柄活), 含 Flask 启动中.
         - http_reachable: 配置端口是否有服务在监听 (无条件探测, 可能是别的进程占用).
         四状态矩阵: 进程在+端口通=就绪; 进程在+端口不通=启动中;
                     进程不在+端口通=端口被占(非本进程); 进程不在+端口不通=未跑.
         """
-        from core.cli.webui_pidfile import read as read_pidfile
-
         start_t = time.time()
-        pd = read_pidfile(self._pidfile_path())
+        pd = self._live_webui_pidfile_data()
         try:
             cfg = getattr(self.app, "config", {}) or {}
             webui_options = cfg.get("webui_options", {}) if isinstance(cfg, dict) else {}

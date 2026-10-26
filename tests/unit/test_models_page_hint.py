@@ -452,3 +452,85 @@ class TestAddLibraryDialogMentionsFolderRefresh:
             "_on_add_library must mention 应用更改 so users know the cadence"
         assert ("新建" in src) or ("子文件夹" in src), \
             "_on_add_library must mention the folder-change trigger"
+
+
+class TestEnableToggleWritesYaml:
+    """取消勾选「启用此库」必须立刻改写 extra_model_paths.yaml。
+
+    曾经的 bug：_on_enable_changed 只改了内存里的 config，既没调
+    apply_libraries() 也没存盘。结果 config 说该库已禁用、yaml 里
+    对应的 mie_launcher_<id> 块却原封不动，ComfyUI 照读不误继续加载
+    该库的路径 —— 全程无任何报错。service 层的 apply_libraries() 一直是对的，
+    漏掉的是 GUI 这条调用路径，所以测试必须从页面这一层驱动。
+    """
+
+    def _blocks(self, page):
+        """Read back the mie_launcher_* top-level keys from the real yaml."""
+        import yaml as _yaml
+        yp = page._model_path._get_yaml_path()
+        data = _yaml.safe_load(yp.read_text(encoding="utf-8")) or {}
+        return {k for k in data if k.startswith("mie_launcher_")}
+
+    def _setup_two_libs(self, page, tmp_path):
+        """Add two real on-disk libraries and apply them to the yaml."""
+        import yaml as _yaml
+        for name in ("Alpha", "Beta"):
+            (tmp_path / name / "models").mkdir(parents=True, exist_ok=True)
+            page._model_path.add_library(str(tmp_path / name))
+        page._model_path.apply_libraries()
+        page.refresh_from_config()
+        return self._blocks(page)
+
+    def test_unchecking_removes_block_from_yaml(self, qapp, tmp_path):
+        page = _make_page(qapp, tmp_path)
+        blocks = self._setup_two_libs(page, tmp_path)
+        assert len(blocks) == 2, f"both libraries must be written first, got {blocks}"
+
+        # Select the default library and uncheck its 启用此库 box.
+        lib_id = page.selected_library_id()
+        assert lib_id, "a library must be selected after setup"
+        page.editor_panel["enable_check"].setChecked(False)
+        qapp.processEvents()
+
+        after = self._blocks(page)
+        assert f"mie_launcher_{lib_id}" not in after, \
+            "unchecking 启用此库 must drop the block from extra_model_paths.yaml, " \
+            f"but {f'mie_launcher_{lib_id}'} is still in {after}"
+        assert len(after) == 1, f"exactly one library must remain, got {after}"
+
+    def test_unchecking_persists_config(self, qapp, tmp_path):
+        """The toggle must survive a restart, i.e. reach config.json."""
+        page = _make_page(qapp, tmp_path)
+        self._setup_two_libs(page, tmp_path)
+        lib_id = page.selected_library_id()
+
+        page.editor_panel["enable_check"].setChecked(False)
+        qapp.processEvents()
+
+        lib = page._find_lib_by_id(lib_id)
+        assert lib is not None and lib.get("enabled") is False, \
+            "the disabled flag must be recorded in config"
+        # _save_config must have been reached (services.config.save is a mock).
+        page.app.services.config.save.assert_called()
+
+    def test_rechecking_restores_block(self, qapp, tmp_path):
+        """Re-enabling must write the block back — the toggle is not one-way."""
+        page = _make_page(qapp, tmp_path)
+        blocks = self._setup_two_libs(page, tmp_path)
+
+        check = page.editor_panel["enable_check"]
+        check.setChecked(False)
+        qapp.processEvents()
+        assert len(self._blocks(page)) == 1
+
+        # Re-select the disabled library (refresh_from_config may have moved
+        # the selection to the remaining enabled one) and re-check it.
+        disabled_id = next(
+            l["id"] for l in page._model_path.get_libraries() if not l.get("enabled")
+        )
+        assert page.select_library(disabled_id)
+        page.editor_panel["enable_check"].setChecked(True)
+        qapp.processEvents()
+
+        assert self._blocks(page) == blocks, \
+            "re-enabling must restore every block that was there before"

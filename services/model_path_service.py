@@ -1,7 +1,14 @@
+import os
+import threading
+import time
 import yaml
 import hashlib
+from datetime import datetime
 from pathlib import Path
 from typing import Dict, Any, List
+
+from utils import path_probe
+from utils.thread_util import wait_thread
 
 class ModelPathService:
     # SD WebUI-style folder name aliases (from ComfyUI official a1111 example)
@@ -19,6 +26,9 @@ class ModelPathService:
 
     def __init__(self, app):
         self.app = app
+        # 上一次 apply_libraries() 的结果：写成功了没有、哪些库因为对端不可达
+        # 而沿用了旧配置。GUI 用它提示用户「这次没有真正刷新该库」。
+        self.last_apply_report = {"ok": None, "skipped": []}
         # Standard folder mapping relative to the external base path (ordered)
         self.standard_map = [
             ("checkpoints", "models/checkpoints/"),
@@ -43,6 +53,117 @@ class ModelPathService:
         base = Path(paths.get("comfyui_root") or ".").resolve()
         comfy_root = (base / "ComfyUI").resolve()
         return comfy_root / "extra_model_paths.yaml"
+
+    # --- 有界磁盘访问 -------------------------------------------------
+    #
+    # 外置库可能指向局域网共享（\\NAS\models 或映射盘）。对端没开机时，
+    # Windows 上每一次 exists()/iterdir() 都要等 SMB 重试超时（几十秒），
+    # 而这些调用原先直接发生在 GUI 线程里 —— 表现为「切到模型库管理页
+    # 整窗无响应」。下面三个助手把所有磁盘访问都变成有界的：对端不可达时
+    # 立刻返回空/False，绝不把阻塞传导到 UI 线程。
+
+    def _path_is_dir(self, path, force: bool = False) -> bool:
+        """目录是否存在（有界）。"""
+        try:
+            return path_probe.isdir_bounded(str(path), force=force)
+        except Exception:
+            return False
+
+    def _child_dirs(self, path, force: bool = False) -> List[str]:
+        """子目录名列表（有界）。"""
+        try:
+            return path_probe.child_dirs_bounded(str(path), force=force)
+        except Exception:
+            return []
+
+    def is_remote_path(self, base_path) -> bool:
+        """该库是否落在网络路径上。"""
+        try:
+            return path_probe.is_remote_path(str(base_path or ""))
+        except Exception:
+            return False
+
+    def is_reachable(self, base_path, force: bool = False) -> bool:
+        """该库当前是否可访问。
+
+        本地路径恒为 True；网络路径看对端主机是否在线（短 TCP 探测 + 缓存），
+        以及这个共享刚才是否被判定为「连得上但用不了」（SMB 超时）。
+
+        ``force=True`` 会绕过所有缓存重新探一次 —— 用户点了「刷新」或者刚把
+        NAS 开机时用得上，否则得等缓存过期（30s）才知道它回来了。
+        """
+        if not base_path:
+            return False
+        try:
+            if not self.is_remote_path(base_path):
+                return True
+            if force:
+                path_probe.clear_unusable(str(base_path))
+            if path_probe.is_unusable(str(base_path)):
+                return False
+            return path_probe.path_reachable(str(base_path), force=force)
+        except Exception:
+            return True
+
+    def is_offline(self, base_path, force: bool = False) -> bool:
+        """该库是否「网络路径且当前不可达」（对端没开机 / 共享掉了）。"""
+        if not base_path:
+            return False
+        try:
+            if not self.is_remote_path(base_path):
+                return False
+            return not self.is_reachable(base_path, force=force)
+        except Exception:
+            return False
+
+    def _safe_resolve(self, path) -> str:
+        """绝对化路径，网络路径不走 ``Path.resolve()``。
+
+        Windows 上 ``Path.resolve()`` 会调 ``_getfinalpathname``，对 UNC 路径
+        是真的去问网络 —— 对端关机时这一步就会卡住。``os.path.abspath`` 是纯
+        字符串运算，不碰文件系统。
+        """
+        try:
+            if self.is_remote_path(str(path)):
+                return os.path.abspath(str(path))
+            return str(Path(path).resolve())
+        except Exception:
+            return str(path)
+
+    # 远端扫描的整体时限（秒）。超时按「扫不出来」处理。
+    REMOTE_SCAN_TIMEOUT = 8.0
+    # 一次 apply_libraries() 里所有远端库的总扫描预算（秒）。
+    REMOTE_APPLY_BUDGET = 12.0
+
+    def _bounded_scan(self, fn, timeout: float = None):
+        """在守护线程里跑一次扫描，最多等 REMOTE_SCAN_TIMEOUT 秒。
+
+        返回 fn 的结果；超时或抛异常时返回 None（调用方按「拿不到」处理）。
+        """
+        if timeout is None:
+            timeout = self.REMOTE_SCAN_TIMEOUT
+        box = {}
+
+        def worker():
+            try:
+                box["value"] = fn()
+            except Exception:
+                box["value"] = None
+
+        t = threading.Thread(target=worker, daemon=True)
+        t.start()
+        # 不用 t.join()：join() 内部会调 threading.current_thread()，在 Qt
+        # 线程池这类「非 threading 创建」的线程里调用会永久注册一个
+        # _DummyThread，之后别人 enumerate()+join() 会炸（见 utils/thread_util.py）。
+        wait_thread(t, timeout)
+        return box.get("value", None)
+
+    def _skeleton_block(self, lib: dict) -> dict:
+        """扫描失败时能安全写下的最小块（只有 base_path）。"""
+        block = {"base_path": lib.get("base_path", "")}
+        if lib.get("is_default"):
+            block["is_default"] = True
+        return block
 
     def load_current_config(self) -> Dict[str, Any]:
         """
@@ -101,25 +222,21 @@ class ModelPathService:
         adjusted_map = []
 
         def check_exists(path_obj):
-            try:
-                return path_obj.exists() and path_obj.is_dir()
-            except Exception:
-                return False
+            return self._path_is_dir(path_obj)
 
-        # Cache actual directory names for case-sensitive alias matching
+        # Cache actual directory names for case-sensitive alias matching.
+        # 有界扫描：网络库对端没开机时这里直接返回空集，不会卡住调用方。
+        base_exists = bool(base_dir) and self._path_is_dir(base_dir)
         actual_dir_names = None
-        if base_dir and base_dir.exists():
-            try:
-                actual_dir_names = {d.name for d in base_dir.iterdir() if d.is_dir()}
-            except Exception:
-                actual_dir_names = set()
+        if base_exists:
+            actual_dir_names = set(self._child_dirs(base_dir))
 
         for key, value in self.standard_map:
             new_lines = []
             for vline in value.split("\n"):
                 clean_vline = vline.strip().rstrip("/")
 
-                if base_dir and base_dir.exists():
+                if base_exists:
                     # 1. Full standard path
                     p_full = base_dir / clean_vline
                     if check_exists(p_full):
@@ -233,27 +350,23 @@ class ModelPathService:
             base_dir = Path(base_path)
             base_is_models = base_dir.name.lower() == "models"
 
-            if base_dir.exists() and base_dir.is_dir():
+            if self._path_is_dir(base_dir):
                 extra_dirs = []
-                for p in sorted(base_dir.iterdir()):
-                    if not p.is_dir():
-                        continue
+                for name in self._child_dirs(base_dir):
                     # If a child folder is named "models", map its subfolders instead
-                    if p.name.lower() == "models":
-                        for sub in sorted(p.iterdir()):
-                            if not sub.is_dir():
-                                continue
-                            rel_name = sub.name.replace("\\", "/")
+                    if name.lower() == "models":
+                        for sub_name in self._child_dirs(base_dir / name):
+                            rel_name = sub_name.replace("\\", "/")
                             mapped_value = f"models/{rel_name}/"
                             if mapped_value.rstrip("/") not in mapped_paths:
                                 extra_dirs.append((rel_name, mapped_value))
                     else:
-                        rel_path = p.name.replace("\\", "/")
+                        rel_path = name.replace("\\", "/")
                         if base_is_models:
                             mapped_value = f"{rel_path}/"
                         else:
                             mapped_value = f"models/{rel_path}/"
-                        
+
                         if mapped_value.rstrip("/") not in mapped_paths:
                             extra_dirs.append((rel_path, mapped_value))
                 if extra_dirs:
@@ -276,41 +389,38 @@ class ModelPathService:
     def _collect_extra_mappings(self, base_path: str, mapped_paths: set) -> list[tuple]:
         extra_dirs = []
         standard_keys = {k for k, _ in self.standard_map}
-        
+
         try:
             base_dir = Path(base_path)
-            if base_dir.exists() and base_dir.is_dir():
-                for p in sorted(base_dir.iterdir()):
-                    if not p.is_dir():
-                        continue
-                        
-                    # Skip if this folder name is already a standard key
-                    # (e.g. don't add 'checkpoints' again if it was handled by standard map)
-                    if p.name in standard_keys:
-                        continue
-                        
-                    if p.name.lower() == "models":
-                        for sub in sorted(p.iterdir()):
-                            if not sub.is_dir():
-                                continue
-                            if sub.name in standard_keys:
-                                continue
-                                
-                            rel_name = sub.name.replace("\\", "/")
-                            mapped_value = f"models/{rel_name}/"
-                            if mapped_value.rstrip("/") not in mapped_paths:
-                                extra_dirs.append((rel_name, mapped_value))
-                    else:
-                        rel_path = p.name.replace("\\", "/")
-                        # Direct subfolder -> map directly
-                        mapped_value = f"{rel_path}/"
+            if not self._path_is_dir(base_dir):
+                return extra_dirs
+            for name in self._child_dirs(base_dir):
+                # Skip if this folder name is already a standard key
+                # (e.g. don't add 'checkpoints' again if it was handled by standard map)
+                if name in standard_keys:
+                    continue
 
+                if name.lower() == "models":
+                    models_dir = base_dir / name
+                    for sub_name in self._child_dirs(models_dir):
+                        if sub_name in standard_keys:
+                            continue
+                        rel_name = sub_name.replace("\\", "/")
+                        mapped_value = f"models/{rel_name}/"
                         if mapped_value.rstrip("/") not in mapped_paths:
-                            extra_dirs.append((rel_path, mapped_value))
+                            extra_dirs.append((rel_name, mapped_value))
+                else:
+                    rel_path = name.replace("\\", "/")
+                    # Direct subfolder -> map directly
+                    mapped_value = f"{rel_path}/"
+
+                    if mapped_value.rstrip("/") not in mapped_paths:
+                        extra_dirs.append((rel_path, mapped_value))
         except Exception as e:
             if hasattr(self.app, 'logger'):
                 self.app.logger.warning(f"Failed to scan external model dirs: {e}")
         return extra_dirs
+
 
     def _resolve_base_path(self, base_path: str) -> str:
         """
@@ -329,55 +439,62 @@ class ModelPathService:
             
         try:
             p = Path(base_path)
-            if not p.exists() or not p.is_dir():
+            if not self._path_is_dir(p):
                 return base_path
-                
+
             # 1. Check direct
-            if (p / "models").exists() and (p / "models").is_dir():
+            if self._path_is_dir(p / "models"):
                 return base_path
-            if (p / "checkpoints").exists() and (p / "checkpoints").is_dir():
+            if self._path_is_dir(p / "checkpoints"):
                 return base_path
 
             # 1b. Check SD WebUI-style aliases
             all_aliases = set()
             for aliases in self.SD_STYLE_ALIASES.values():
                 all_aliases.update(aliases)
-            for child in p.iterdir():
-                try:
-                    if child.is_dir() and child.name in all_aliases:
-                        return base_path
-                except Exception:
-                    continue
-                
+            child_names = self._child_dirs(p)
+            for name in child_names:
+                if name in all_aliases:
+                    return base_path
+
             # 2. Check children (depth 1)
             # Prioritize 'models' folder if found directly
-            for child in p.iterdir():
-                try:
-                    if not child.is_dir():
-                        continue
-                        
-                    # If child is 'models', then base_path is actually correct (it contains 'models')
-                    # Wait, if p/models exists, we already caught it in step 1.
-                    # So here we are looking for A/B/models.
-                    
-                    if (child / "models").exists() and (child / "models").is_dir():
-                        return str(child.resolve())
-                        
-                    if (child / "checkpoints").exists() and (child / "checkpoints").is_dir():
-                        # The child itself is likely the 'models' folder
-                        return str(child.resolve())
-                except Exception:
-                    continue
-                    
+            for name in child_names:
+                child = p / name
+                # If child is 'models', then base_path is actually correct (it contains 'models')
+                # Wait, if p/models exists, we already caught it in step 1.
+                # So here we are looking for A/B/models.
+
+                if self._path_is_dir(child / "models"):
+                    return self._safe_resolve(child)
+
+                if self._path_is_dir(child / "checkpoints"):
+                    # The child itself is likely the 'models' folder
+                    return self._safe_resolve(child)
+
         except Exception:
             pass
-            
+
         return base_path
 
     def get_mappings_for_base(self, base_path: str) -> List[tuple]:
+        """某个库会映射出哪些目录。
+
+        网络路径的整轮扫描有总时限：单次目录检查已经各自有界，但一个库要查
+        几十个子目录，累加起来仍可能几十秒 —— 对端半死不活时尤其明显。
+        超时就退回标准映射框架，绝不把调用方（GUI 线程）一起拖死。
+        """
+        if self.is_remote_path(base_path):
+            result = self._bounded_scan(lambda: self._mappings_for_base(base_path))
+            if result is None:
+                return list(self.standard_map)
+            return result
+        return self._mappings_for_base(base_path)
+
+    def _mappings_for_base(self, base_path: str) -> List[tuple]:
         # Resolve the path first to show what we would actually use
         resolved_path = self._resolve_base_path(base_path)
-        
+
         mapped_paths = set()
         standard_mappings = self._get_standard_mappings(resolved_path)
         for _, value in standard_mappings:
@@ -427,13 +544,26 @@ class ModelPathService:
             pass
         return block
 
-    def apply_libraries(self) -> bool:
+    def apply_libraries(self, only_ids=None, force: bool = False) -> bool:
+        """重写 extra_model_paths.yaml。
+
+        ``only_ids`` 给定时，只重新生成这些库的块，其余库沿用 yaml 里已有的
+        块（它们的配置没变，重扫一遍纯属浪费 —— 尤其网络库扫一次要好几秒）。
+        ``force`` 会绕过可达性缓存重新探测（用户刚把 NAS 开机时点「刷新」用）。
+        """
         if self.is_disabled():
             # Honor the legacy 'disable everything' opt-in: drop mie blocks,
             # but keep any non-managed entries the user had by hand.
             return self._write_yaml({})
 
         data = self.load_yaml_data()
+        # Remember the blocks we are about to drop: a library whose NAS is
+        # offline cannot be re-scanned, and regenerating its block from an
+        # unreadable directory would silently drop its mappings (ComfyUI then
+        # loads fewer models than the user configured — the exact failure mode
+        # drift detection exists to prevent).
+        previous_blocks = self._managed_blocks(data)
+
         # Strip any block the launcher previously wrote, legacy or not.
         to_drop = [k for k in list(data.keys()) if k.startswith(self.TOP_KEY_PREFIX)]
         to_drop += [k for k in list(data.keys()) if k in self.LEGACY_TOP_KEYS]
@@ -444,11 +574,212 @@ class ModelPathService:
         # Default block first; the rest preserve insertion order.
         libs.sort(key=lambda l: 0 if l.get("is_default") else 1)
 
+        skipped = []
+        deadline = time.monotonic() + self.REMOTE_APPLY_BUDGET
         for lib in libs:
             block_key = f"{self.TOP_KEY_PREFIX}{lib['id']}"
+            base_path = lib.get("base_path", "")
+            prev = previous_blocks.get(block_key)
+
+            if only_ids is not None and lib.get("id") not in only_ids \
+                    and isinstance(prev, dict):
+                # 本次没动这个库，沿用 yaml 里已有的块（不用重扫共享）。
+                data[block_key] = dict(prev)
+                continue
+
+            if self.is_offline(base_path, force=force):
+                # 对端没开机：沿用上次写好的块，别把它降级成「只有 base_path」。
+                skipped.append(lib)
+                if isinstance(prev, dict):
+                    data[block_key] = dict(prev)
+                    continue
+                data[block_key] = self._make_library_block(lib)
+                continue
+
+            if self.is_remote_path(base_path):
+                # 在线但很慢的共享：整块扫描有总时限，超时就沿用旧块。
+                remaining = deadline - time.monotonic()
+                if remaining <= 0:
+                    skipped.append(lib)
+                    if isinstance(prev, dict):
+                        data[block_key] = dict(prev)
+                    else:
+                        data[block_key] = self._skeleton_block(lib)
+                    continue
+                block = self._bounded_scan(
+                    lambda: self._make_library_block(lib),
+                    timeout=min(self.REMOTE_SCAN_TIMEOUT, remaining),
+                )
+                if block is None:
+                    skipped.append(lib)
+                    if isinstance(prev, dict):
+                        data[block_key] = dict(prev)
+                    else:
+                        data[block_key] = self._skeleton_block(lib)
+                    continue
+                data[block_key] = block
+                continue
+
             data[block_key] = self._make_library_block(lib)
 
-        return self._write_yaml(data)
+        ok = self._write_yaml(data)
+        self.last_apply_report = {"ok": ok, "skipped": skipped}
+        if skipped:
+            try:
+                if hasattr(self.app, "logger"):
+                    self.app.logger.warning(
+                        "apply_libraries: %d 个外置库当前不可达（对端未开机？），"
+                        "已保留原有 yaml 配置", len(skipped))
+            except Exception:
+                pass
+        return ok
+
+    # --- drift detection (yaml vs config) -------------------------------
+    #
+    # apply_libraries() is a full rewrite: it drops every mie_launcher_ block
+    # and regenerates from external_libraries. So anything that edits the yaml
+    # behind the launcher's back (整合包更新 / 手动编辑 / 别的工具) leaves the
+    # file and config describing different model libraries, and ComfyUI then
+    # silently loads fewer paths than the user configured. The GUI asks the
+    # user whether to re-apply; the fingerprint below is what keeps us from
+    # asking again for a drift the user already dismissed.
+
+    # Keys under models. in config. Note these are *our* keys, not ComfyUI's.
+    _DRIFT_KEY = "extra_paths_drift_notice"
+
+    def _managed_blocks(self, data: dict) -> dict:
+        """The subset of a loaded yaml that the launcher owns."""
+        return {
+            k: v for k, v in (data or {}).items()
+            if k.startswith(self.TOP_KEY_PREFIX) and isinstance(v, dict)
+        }
+
+    def detect_drift(self) -> dict | None:
+        """Return a drift report, or None when yaml agrees with config.
+
+        Three ways they can disagree, all of which make ComfyUI load a
+        different set of models than the user configured:
+
+          missing  — an enabled library has no block in the yaml
+          mismatch — the block exists but its base_path drifted
+          orphan   — a block survives for a library that is gone or disabled
+
+        A yaml with no managed blocks at all is *not* drift: that is the
+        cold-start state (user never applied yet, or a fresh install), and
+        `update_mapping` owns creating it. Remind-then-write on a fresh
+        install would be noise, and a library that is simply unreachable
+        (NAS offline) produces the same empty read, so we must not
+        auto-create from a directory listing we could not read.
+        """
+        try:
+            libs = [l for l in self.get_libraries() if l.get("enabled")]
+            if not libs:
+                return None
+            blocks = self._managed_blocks(self.load_yaml_data())
+            if not blocks:
+                return None  # cold start / all libs unreachable — not drift
+
+            missing, mismatch, orphan = [], [], []
+            for lib in libs:
+                key = f"{self.TOP_KEY_PREFIX}{lib['id']}"
+                block = blocks.get(key)
+                if block is None:
+                    missing.append(lib)
+                elif (block.get("base_path") or "") != (lib.get("base_path") or ""):
+                    mismatch.append((lib, block.get("base_path")))
+            known = {l.get("id") for l in libs}
+            for key, block in blocks.items():
+                if key[len(self.TOP_KEY_PREFIX):] not in known:
+                    orphan.append((key, block.get("base_path")))
+
+            if not (missing or mismatch or orphan):
+                return None
+            return {"missing": missing, "mismatch": mismatch, "orphan": orphan}
+        except Exception:
+            return None
+
+    def _drift_fingerprint(self) -> str:
+        """Digest of *what the user configured*, not of the drifted yaml.
+
+        Deliberately excludes the yaml side: a drift the user declined still
+        has the same config, so the fingerprint is stable across restarts and
+        the prompt stays dismissed until the library set itself changes
+        (added / removed / re-pointed / toggled) — at which point the digest
+        moves and we ask again.
+        """
+        try:
+            parts = []
+            for lib in self.get_libraries():
+                parts.append("|".join(str(x) for x in (
+                    lib.get("id", ""),
+                    lib.get("base_path", ""),
+                    "on" if lib.get("enabled") else "off",
+                    "def" if lib.get("is_default") else "-",
+                )))
+            parts.sort()
+            return hashlib.sha1("\n".join(parts).encode("utf-8")).hexdigest()
+        except Exception:
+            return ""
+
+    def get_drift_notice_state(self) -> dict | None:
+        """The dismissed-drift record, or None when nothing is on record."""
+        try:
+            rec = self.app.config.get("models", {}).get(self._DRIFT_KEY)
+            if isinstance(rec, dict) and rec.get("fingerprint"):
+                return rec
+            return None
+        except Exception:
+            return None
+
+    def should_prompt_for_drift(self) -> bool:
+        """True when drift exists and we have not already asked about *this* one."""
+        try:
+            if self.is_disabled():
+                return False
+            if not self.detect_drift():
+                return False
+            rec = self.get_drift_notice_state()
+            if rec and rec.get("fingerprint") == self._drift_fingerprint():
+                return False
+            return True
+        except Exception:
+            return False
+
+    def mark_drift_acknowledged(self, applied: bool) -> None:
+        """Record that the user answered the prompt for the current library set.
+
+        Both answers are recorded: applying fixes it, and declining is a
+        deliberate choice (e.g. they want ComfyUI to keep running on the
+        built-in library only) that must not re-prompt on every launch. The
+        record is keyed by fingerprint, so changing the library set re-arms it.
+        """
+        try:
+            models = self._ensure_models_section()
+            models[self._DRIFT_KEY] = {
+                "fingerprint": self._drift_fingerprint(),
+                "applied": bool(applied),
+                "at": int(datetime.now().timestamp()),
+            }
+            svcs = getattr(self.app, "services", None)
+            cfg_svc = getattr(svcs, "config", None) if svcs else None
+            if cfg_svc and hasattr(cfg_svc, "save"):
+                cfg_svc.save(self.app.config)
+        except Exception:
+            pass
+
+    def clear_drift_notice(self) -> None:
+        """Drop the record once the yaml and config agree again."""
+        try:
+            models = self.app.config.get("models", {})
+            if self._DRIFT_KEY not in models:
+                return
+            models.pop(self._DRIFT_KEY, None)
+            svcs = getattr(self.app, "services", None)
+            cfg_svc = getattr(svcs, "config", None) if svcs else None
+            if cfg_svc and hasattr(cfg_svc, "save"):
+                cfg_svc.save(self.app.config)
+        except Exception:
+            pass
 
     def _write_yaml(self, data: dict) -> bool:
         import shutil
@@ -493,7 +824,11 @@ class ModelPathService:
     def _library_id_for(base_path: str) -> str:
         """Stable 8-char id derived from the absolute resolved path."""
         try:
-            resolved = str(Path(base_path).resolve())
+            if path_probe.is_remote_path(str(base_path)):
+                # 网络路径不做 Path.resolve()（会真的去问网络，对端关机即卡死）
+                resolved = os.path.abspath(str(base_path))
+            else:
+                resolved = str(Path(base_path).resolve())
         except Exception:
             resolved = base_path
         digest = hashlib.sha1(resolved.encode("utf-8")).hexdigest()
@@ -504,6 +839,24 @@ class ModelPathService:
         if isinstance(libs, list):
             return libs
         return []
+
+    def get_apply_report(self) -> dict:
+        """上一次 apply_libraries() 的报告（ok / skipped 库列表）。"""
+        return getattr(self, "last_apply_report", {"ok": None, "skipped": []}) or {
+            "ok": None, "skipped": []
+        }
+
+    def library_status(self, base_path, force: bool = False) -> dict:
+        """一个库的可达性状态，供 GUI 显示「离线」标记。"""
+        base_path = base_path or ""
+        remote = self.is_remote_path(base_path)
+        reachable = self.is_reachable(base_path, force=force) if base_path else False
+        return {
+            "base_path": base_path,
+            "remote": remote,
+            "reachable": reachable,
+            "offline": bool(remote and not reachable),
+        }
 
     def _ensure_models_section(self) -> dict:
         return self.app.config.setdefault("models", {})

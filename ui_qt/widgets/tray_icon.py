@@ -83,10 +83,12 @@ class LauncherTray(QtCore.QObject):
         self._quit_action = self._menu.addAction("\u9000\u51fa\u542f\u52a8\u5668")
         self._quit_action.setToolTip("\u9000\u51fa\u542f\u52a8\u5668\uff0cComfyUI \u5982\u5728\u8fd0\u884c\u4f1a\u7ee7\u7eed\u540e\u53f0\u8fd0\u884c")
         self._quit_action.triggered.connect(self.quit_requested)
-        # 第二项：退出并关闭 ComfyUI。ComfyUI 未运行时禁用，避免无效操作。
-        self._quit_and_stop_action = self._menu.addAction("\u9000\u51fa\u5e76\u5173\u95ed ComfyUI")
-        self._quit_and_stop_action.setToolTip("\u5148\u505c\u6b62 ComfyUI \u670d\u52a1\u518d\u9000\u51fa\u542f\u52a8\u5668")
-        self._quit_and_stop_action.setEnabled(False)
+        # 第二项：退出并关闭 ComfyUI。**永远可点**（issue #108：ComfyUI 未跑时
+        # 禁用会让用户以为菜单坏了——点了没反应；未跑时「关闭并退出」的语义
+        # 就是直接退出，qt_app 侧场景 1b 对未跑状态是快速幂等 no-op）。
+        self._quit_and_stop_action = self._menu.addAction("退出并关闭 ComfyUI")
+        self._quit_and_stop_action.setToolTip(
+            "先停止 ComfyUI 服务再退出启动器（ComfyUI 未运行时直接退出）")
         self._quit_and_stop_action.triggered.connect(self.quit_and_stop_requested)
 
         self._apply_menu_style()
@@ -142,25 +144,25 @@ class LauncherTray(QtCore.QObject):
             pass
 
     def update_comfyui_status(self, running):
-        """\u66f4\u65b0\u83dc\u5355\u4e2d ComfyUI \u72b6\u6001\u7684\u6587\u6848\uff0c\u5e76\u540c\u6b65\u9000\u51fa\u5e76\u5173\u95ed\u9879\u7684\u53ef\u7528\u6027\u3002"""
+        """更新菜单中 ComfyUI 状态的文案。
+
+        2026-10（issue #108 收尾）：不再联动「退出并关闭 ComfyUI」的可用性——
+        该项永远可点，未运行时点击=直接退出（qt_app 场景 1b 幂等）。原先
+        未跑禁用的设计让用户以为菜单坏了（点了没反应），是 #108 的直接诱因。
+        """
         if self._status_action:
             try:
                 self._status_action.setText(
-                    "ComfyUI \u72b6\u6001: \u8fd0\u884c\u4e2d" if running else "ComfyUI \u72b6\u6001: \u672a\u542f\u52a8"
+                    "ComfyUI 状态: 运行中" if running else "ComfyUI 状态: 未启动"
                 )
-            except Exception:
-                pass
-        if self._quit_and_stop_action:
-            try:
-                self._quit_and_stop_action.setEnabled(bool(running))
             except Exception:
                 pass
 
     def _on_about_to_show(self):
-        """菜单弹出前复核'退出并关闭 ComfyUI'可用性，避免异步推送错过/过时。
+        """菜单弹出前刷新状态文案（is_running_fast 非阻塞，不发 HTTP）。
 
-        aboutToShow 是 UI 线程信号，故 setEnabled 必在 UI 线程执行；用
-        ProcessManager.is_running_fast()（非阻塞，不发 HTTP）拿当下运行态。
+        2026-10 起不再管「退出并关闭」的可用性——该项永远可点（见
+        update_comfyui_status 注释，issue #108）。
         """
         running = False
         pm = getattr(self._app, "process_manager", None)

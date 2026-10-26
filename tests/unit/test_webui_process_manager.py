@@ -44,14 +44,16 @@ def test_status_no_pidfile(tmp_path):
 
 
 def test_status_with_alive_pid_but_no_http(tmp_path):
-    """有 pidfile 指向活 PID, 端口没监听 -> running=True (进程在), http_reachable=False (HTTP 没就绪)."""
+    """有 pidfile 指向活 PID(身份校验过), 端口没监听 -> running=True (进程在), http_reachable=False (HTTP 没就绪)."""
     from core.cli.webui_pidfile import write
     from core.webui_process_manager import WebuiProcessManager
     app = _App(cwd=tmp_path)
     p = tmp_path / "launcher" / "webui.pid"
     write(p, os.getpid(), 8199, log_path=tmp_path / "webui.log", env_id="env_a")
     pm = WebuiProcessManager(app)
-    s = pm.status()
+    # 身份校验 mock 成真（os.getpid 是 pytest 自己，cmdline 无 flask_app）
+    with patch("core.webui_process_manager._is_webui_pid", return_value=True):
+        s = pm.status()
     assert s["pid"] == os.getpid()
     assert s["port"] == 8199
     # 新语义 (#9): running 表进程存在 (含启动中), http_reachable 独立表达 HTTP 就绪度.
@@ -181,27 +183,75 @@ def test_is_running_no_popen_no_pidfile(tmp_path):
 
 
 def test_is_running_via_pidfile(tmp_path):
-    """pidfile 活 PID + Popen 句柄无 -> 仍 True (PID 活就算 running)."""
+    """pidfile 活 PID(身份校验过) + Popen 句柄无 -> 仍 True (进程在就算 running)."""
     from core.cli.webui_pidfile import write
     from core.webui_process_manager import WebuiProcessManager
     app = _App(cwd=tmp_path)
     p = tmp_path / "launcher" / "webui.pid"
     write(p, os.getpid(), 8199, log_path=tmp_path / "webui.log", env_id="env_a")
     pm = WebuiProcessManager(app)
-    assert pm.is_running() is True
+    with patch("core.webui_process_manager._is_webui_pid", return_value=True):
+        assert pm.is_running() is True
+
+
+def test_is_running_false_when_pid_reused_by_unrelated_process(tmp_path):
+    """回归（2026-10-03 实测）：webui.pid 残留数月，PID 被无关进程复用
+    （当时是 Grok Bot.exe）→ 不得误报已启动，且应顺手清掉幽灵 pidfile。
+    os.getpid() 是 pytest 进程，cmdline 无 flask_app，天然模拟「活但非 webui」。
+    """
+    from core.cli.webui_pidfile import write
+    from core.webui_process_manager import WebuiProcessManager
+    app = _App(cwd=tmp_path)
+    p = tmp_path / "launcher" / "webui.pid"
+    write(p, os.getpid(), 8199, log_path=tmp_path / "webui.log", env_id="env_a")
+    pm = WebuiProcessManager(app)
+    assert pm.is_running() is False          # 不误报
+    assert p.exists() is False               # 幽灵 pidfile 已自愈清理
+
+
+def test_stop_does_not_kill_reused_pid(tmp_path):
+    """回归：幽灵 pidfile（PID 被无关进程复用）→ stop 不得 taskkill 那个 PID。"""
+    from core.cli.webui_pidfile import write
+    from core.webui_process_manager import WebuiProcessManager
+    app = _App(cwd=tmp_path)
+    p = tmp_path / "launcher" / "webui.pid"
+    write(p, os.getpid(), 8199, log_path=tmp_path / "webui.log", env_id="env_a")
+    pm = WebuiProcessManager(app)
+    with patch("core.webui_process_manager.run_hidden") as rh:
+        rh.return_value = MagicMock(returncode=0)
+        res = pm.stop_webui()
+    assert res["ok"] is True                 # 幂等语义保留
+    rh.assert_not_called()                   # 但绝没对复用 PID 下 taskkill
 
 
 def test_start_already_running_returns_existing(tmp_path):
-    """已有 pidfile 指向活 PID -> start 返 already_running."""
+    """已有 pidfile 指向活 PID(身份校验过) -> start 返 already_running."""
     from core.cli.webui_pidfile import write
     from core.webui_process_manager import WebuiProcessManager
     app = _App(cwd=tmp_path)
     p = tmp_path / "launcher" / "webui.pid"
     write(p, os.getpid(), 8199, log_path=tmp_path / "webui.log", env_id="env_a")
     pm = WebuiProcessManager(app)
-    res = pm.start_webui(timeout=0.5)
+    with patch("core.webui_process_manager._is_webui_pid", return_value=True):
+        res = pm.start_webui(timeout=0.5)
     assert res["already_running"] is True
     assert res["pid"] == os.getpid()
+
+
+def test_start_ignores_ghost_pidfile(tmp_path):
+    """回归：幽灵 pidfile（PID 复用）不得拦截 start——应继续走启动路径。"""
+    from core.cli.webui_pidfile import write
+    from core.webui_process_manager import WebuiProcessManager
+    app = _App(cwd=tmp_path)
+    p = tmp_path / "launcher" / "webui.pid"
+    write(p, os.getpid(), 8199, log_path=tmp_path / "webui.log", env_id="env_a")
+    pm = WebuiProcessManager(app)
+    with patch("core.webui_launcher_cmd.build_webui_launch_params",
+               side_effect=RuntimeError("spawn-path-reached")):
+        res = pm.start_webui(timeout=0.5)
+    # 没有按 already_running 短路，而是进入了 spawn 路径（被我们 mock 成报错）
+    assert res.get("already_running") is not True
+    assert "spawn-path-reached" in (res.get("error") or "")
 
 
 def test_start_port_in_use(tmp_path):

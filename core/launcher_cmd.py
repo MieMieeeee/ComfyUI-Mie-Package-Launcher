@@ -3,6 +3,71 @@ import shlex
 from pathlib import Path
 from utils import paths as PATHS
 
+
+# --- ComfyUI 资源系统（Assets）开关 ---------------------------------------
+#
+# ComfyUI 0.40 起内置「资源系统」：在本地建一个 SQLite 索引
+# （<user>/comfyui.db），扫描 models / input / output，前端多一个
+# 「Assets」侧边栏面板（Generated / Imported）。
+#
+# ComfyUI 自己的默认是**关闭**（要 --enable-assets 才开），但
+# ``--windows-standalone-build`` 会顺手把它打开 —— 启动器为了便携版行为
+# 一直带着这个开关（自动打开页面等），等于给所有用户默认开了这个 beta
+# 功能。ComfyUI 官方在 0.40.0 之后又把它改回默认关闭（PR #16884 → #16929），
+# 原因就是实测代价太大：
+#
+#   * NAS / 网络盘模型库首次扫描要几分钟，硬盘狂响（reddit 上有人 11 万文件
+#     的 NAS 扫了 5~10 分钟还没完）；
+#   * 同一安装目录起第二个 ComfyUI 实例会因为共用数据库直接退出
+#     （ASSETS_STARTUP_FAILED: in_use，ComfyUI issue #17103）；
+#   * 「未经同意扫我的盘」的隐私争议（官方回应：只扫本地，不外传）。
+#
+# 所以这里给一个显式开关：默认关（与 ComfyUI 核心默认一致），想用再勾。
+# 勾上 → --enable-assets；不勾 → --disable-assets（必须显式关：光「不加参数」
+# 是不够的，--windows-standalone-build 已经把它开着了）。
+
+
+def _comfyui_supports_assets_flag(comfy_root) -> bool:
+    """装的 ComfyUI 是否认识 --enable-assets / --disable-assets。
+
+    老版本 ComfyUI（< 0.40）没有这两个参数，硬塞会让 argparse 报
+    "unrecognized arguments" 直接启动失败，所以先确认参数存在。
+    """
+    try:
+        cli_args = Path(comfy_root) / "comfy" / "cli_args.py"
+        if not cli_args.is_file():
+            return False
+        text = cli_args.read_text(encoding="utf-8", errors="ignore")
+    except Exception:
+        return False
+    return "--disable-assets" in text and "--enable-assets" in text
+
+
+def _assets_flag_for(app, comfy_root, extra_tokens=None):
+    """决定要不要给 ComfyUI 传 assets 开关。返回 None = 不传。
+
+    规则：
+      * 用户自己在「额外启动参数」里写了 --enable-assets/--disable-assets
+        → 听用户的，不插手（--disable-assets 优先级最高，我们再补会盖掉他）；
+      * 装的 ComfyUI 不认识这两个参数 → 不传（否则启动直接失败）；
+      * 启动选项「启用资源系统」勾了 → --enable-assets；没勾 → --disable-assets。
+    """
+    try:
+        tokens = set(extra_tokens or [])
+    except Exception:
+        tokens = set()
+    if "--enable-assets" in tokens or "--disable-assets" in tokens:
+        return None
+    if not _comfyui_supports_assets_flag(comfy_root):
+        return None
+    try:
+        var = getattr(app, "enable_assets", None)
+        enabled = bool(var.get()) if var is not None else False
+    except Exception:
+        enabled = False
+    return "--enable-assets" if enabled else "--disable-assets"
+
+
 def build_launch_params(app, env_id=None):
     # 多环境支持：优先用 app.get_active_paths() 解析当前激活环境的路径。
     # 若传了 env_id（CLI --env），则用指定环境覆盖（本次启动用，不改 config）。
@@ -90,6 +155,14 @@ def build_launch_params(app, env_id=None):
             except Exception:
                 extra_tokens = extra.split()
             cmd.extend(extra_tokens)
+        # ComfyUI 资源系统（Assets）显式开关，见 _assets_flag_for 的说明。
+        try:
+            _extra_tokens = extra_tokens if 'extra_tokens' in locals() else []
+            _assets_flag = _assets_flag_for(app, comfy_root, _extra_tokens)
+            if _assets_flag:
+                cmd.append(_assets_flag)
+        except Exception:
+            pass
         try:
             attn_var = getattr(app, 'attention_mode', None)
             attn = (attn_var.get() if attn_var else "").strip()

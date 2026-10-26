@@ -121,7 +121,7 @@ def test_geometry_memory_startup_resolves_from_base_with_scale():
 def test_geometry_memory_startup_rejects_legacy_tiny_base_falls_back_to_default():
     """老 default window_width=800/window_height=600（老 schema 脏值，2 年没人维护）
     迁移到 window_w=800,window_h=600 后，base 太小不足以容纳当前 launch page（三 section），
-    必须被视为脏值 → 回退到默认 1350×900，而不是 max(960,800)=960×max(640,600)=640。"""
+    必须被视为脏值 → 回退到默认 1350×960，而不是 max(960,800)=960×max(640,600)=640。"""
     from config.migrations import resolve_window_geometry_for_startup
     cfg = {
         "ui_settings": {
@@ -133,9 +133,9 @@ def test_geometry_memory_startup_rejects_legacy_tiny_base_falls_back_to_default(
     result = resolve_window_geometry_for_startup(
         cfg, scale=1.0, screen_available=(0, 0, 1920, 1040)
     )
-    # 默认基准 1350×900；如果不是默认就是 960×640（会让用户看到底部被切）
+    # 默认基准 1350×960；如果不是默认就是 960×640（会让用户看到底部被切）
     assert result["w"] == 1350, f"fallback 默认 w=1350，实 {result['w']}"
-    assert result["h"] == 900, f"fallback 默认 h=900，实 {result['h']}"
+    assert result["h"] == 960, f"fallback 默认 h=960，实 {result['h']}"
 
 
 def test_geometry_memory_save_formula_divides_by_scale():
@@ -171,3 +171,51 @@ def test_geometry_memory_save_maximized_uses_normal_geometry():
     # base 尺寸必须来自 normal 几何，不是最大化几何
     assert ui["window_w"] == 1500, f"最大化时 base w 仍应为 1500，实 {ui['window_w']}"
     assert ui["window_h"] == 950,  f"最大化时 base h 仍应为 950，实 {ui['window_h']}"
+
+
+def test_legacy_default_height_bumped_for_existing_installs():
+    """存量安装：config 里存的正是上一版默认 1350×900（用户没手动调过大小时），
+    应被一次性抬到新默认高度，否则「内容长了一行但窗口还是老高度」，
+    底部「快捷目录」会被切掉半截。"""
+    from config.migrations import migrate_window_geometry_fields, DEFAULT_BASE_H
+
+    cfg = {"ui_settings": {"window_w": 1350, "window_h": 900,
+                           "window_x": None, "window_y": None, "window_state": None}}
+    assert migrate_window_geometry_fields(cfg) is True, "命中老默认应返回 changed=True"
+    assert cfg["ui_settings"]["window_h"] == DEFAULT_BASE_H == 960
+
+
+def test_user_custom_size_is_never_bumped():
+    """用户自己调过窗口大小的，一律不动（宽度非默认，或高度非 900）。"""
+    from config.migrations import migrate_window_geometry_fields
+
+    # 宽度不是默认宽度 -> 用户调过
+    cfg_a = {"ui_settings": {"window_w": 1500, "window_h": 900}}
+    migrate_window_geometry_fields(cfg_a)
+    assert cfg_a["ui_settings"]["window_h"] == 900, "用户自定义高度不该被抬"
+
+    # 宽度是默认但高度不是 900 -> 用户自己调过高度
+    cfg_b = {"ui_settings": {"window_w": 1350, "window_h": 1000}}
+    migrate_window_geometry_fields(cfg_b)
+    assert cfg_b["ui_settings"]["window_h"] == 1000
+
+
+def test_legacy_default_bump_is_idempotent():
+    """迁移幂等：第二次调用不该再报 changed，也不能再抬第二次。"""
+    from config.migrations import migrate_window_geometry_fields
+
+    cfg = {"ui_settings": {"window_w": 1350, "window_h": 900}}
+    assert migrate_window_geometry_fields(cfg) is True
+    assert cfg["ui_settings"]["window_h"] == 960
+    assert migrate_window_geometry_fields(cfg) is False, "第二次应无改动"
+    assert cfg["ui_settings"]["window_h"] == 960
+
+
+def test_new_default_fits_common_screen():
+    """1080p 可用区约 1040px，新默认 960 不应被 clip 掉（clip 上限是 sh-80）。"""
+    from config.migrations import migrate_window_geometry_fields, resolve_window_geometry_for_startup
+
+    cfg = {"ui_settings": {}}
+    migrate_window_geometry_fields(cfg)
+    geo = resolve_window_geometry_for_startup(cfg, scale=1.0, screen_available=(0, 0, 1920, 1040))
+    assert geo["h"] == 960, f"1080p 下新默认应完整显示，实 {geo['h']}"

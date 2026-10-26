@@ -207,7 +207,7 @@ class TestProgressDialogDraggable:
         assert dlg._drag_pos is None
 
     def test_right_button_press_does_not_initiate_drag(self, qtbot):
-        """Right-click should not start a drag (left button only)."""
+        """Right button should not start a drag (left button only)."""
         dlg = ProgressDialog(title="t", show_cancel=True)
         qtbot.addWidget(dlg)
         dlg.show()
@@ -221,4 +221,69 @@ class TestProgressDialogDraggable:
         dlg.mousePressEvent(right_event)
         assert dlg._drag_pos is None, (
             "Right click should not start drag"
+        )
+
+
+class TestProgressDialogCompletionIsSticky:
+    """完成态必须压住「回退的重入进度」。
+
+    事故（2026-10-04，用户截图）：点「检查更新」后弹窗永远停在
+    「正在查询第 63/72 个插件… 10s-comfy-nodes」+ 满进度条 + 「关闭」按钮。
+    实际检查 15 秒就完成了——set_status / set_progress 里的
+    QApplication.processEvents() 会把事件队列**嵌套**排干，on_done 在最内层
+    跑完 mark_complete，返回后外层帧继续跑自己的 set_status(旧进度文案)，
+    把完成文案盖掉，看上去像卡死在最后一格。
+
+    修法：mark_complete 置 _completed，此后 set_status / set_progress 一律忽略。
+    """
+
+    def test_status_ignored_after_mark_complete(self, qtbot):
+        dlg = ProgressDialog(title="t", show_cancel=True, show_background=True)
+        qtbot.addWidget(dlg)
+        dlg.mark_complete("检查完成：发现 1 个插件有可用更新 ✓")
+        dlg.set_status("正在查询第 63/72 个插件...  10s-comfy-nodes")
+        assert dlg.lbl_status.text() == "检查完成：发现 1 个插件有可用更新 ✓", (
+            f"完成后的进度文案不应覆盖完成文案，实际 {dlg.lbl_status.text()!r}"
+        )
+
+    def test_progress_ignored_after_mark_complete(self, qtbot):
+        dlg = ProgressDialog(title="t", show_cancel=True, show_background=True)
+        qtbot.addWidget(dlg)
+        dlg.mark_complete("完成 ✓")
+        dlg.set_progress(63, maximum=72)
+        assert (dlg.pbar.value(), dlg.pbar.maximum()) == (1, 1), (
+            f"完成后的进度不应回退，实际 {dlg.pbar.value()}/{dlg.pbar.maximum()}"
+        )
+
+    def test_burst_progress_cannot_clobber_completion(self, qtbot):
+        """真实事故路径的时序：mark_complete 在某个进度帧**内部**先跑完，
+        外层帧随后照常写自己的旧进度文案 —— 那句旧文案必须被挡下。
+
+        线上时序：UI 线程被占住 → 一批 tick + on_done 堆进事件队列 → 恢复后
+        set_progress 里的 processEvents() 把队列嵌套排干，on_done 在最内层执行
+        mark_complete；返回后外层 tick 才继续跑它的 set_status。这里用 hook 精确
+        复刻这个「内层先完成、外层后写」的顺序（不用真实定时器，避免和全量跑时
+        的事件循环状态互相干扰）。
+        """
+        dlg = ProgressDialog(title="t", show_cancel=True, show_background=True)
+        qtbot.addWidget(dlg)
+
+        real_set_progress = dlg.set_progress
+        fired = []
+
+        def hooked_set_progress(value, maximum=100):
+            if not fired:
+                fired.append(1)
+                dlg.mark_complete("检查完成：全部最新 ✓")   # 内层：完成态先落地
+            return real_set_progress(value, maximum)
+
+        dlg.set_progress = hooked_set_progress
+        dlg.set_progress(63, maximum=72)                      # 外层帧：进度回调
+        dlg.set_status("正在查询第 63/72 个插件...  10s-comfy-nodes")
+
+        assert dlg.lbl_status.text() == "检查完成：全部最新 ✓", (
+            f"重入的旧进度文案不应盖掉完成文案，实际 {dlg.lbl_status.text()!r}"
+        )
+        assert (dlg.pbar.value(), dlg.pbar.maximum()) == (1, 1), (
+            f"完成态的进度条不应被外层帧改回，实际 {dlg.pbar.value()}/{dlg.pbar.maximum()}"
         )
