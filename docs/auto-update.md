@@ -1,5 +1,23 @@
 # ComfyUI 启动器自动更新系统
 
+> ## ⚠ 当前状态：自动更新通道**未启用**，发版走 GitHub Releases
+>
+> **原因：Gitee 单文件上限 50MB，装不下 120MB 的启动器 exe。**
+>
+> 下面描述的双通道（Gitee `launcher/updates/index.json` + `launcher/releases/*.exe`）
+> 设计本身是完整的，但**目前没有真正投入使用**：
+>
+> - `F:\comfyui-mie-resources`（Gitee 工作副本）里只有 2026-04 的 test 通道
+>   （v1.0.10）；stable 的 `launcher/updates/index.json` 根本不存在。
+> - 线上用户点「检查更新」→ 拿不到版本信息 → 不会提示更新（不是 bug，是这条
+>   通道压根没数据）。
+> - `upgrade_exe.py`（传 exe + 改索引 + push Gitee）在 exe 体积降到 50MB 以下
+>   （例如改成小的下载器 / 差分补丁）之前不要用。
+>
+> **目前的发版方式**：GitHub Releases（`python release.py --file ... --latest`），
+> 用户手动到 <https://github.com/MieMieeeee/ComfyUI-Mie-Package-Launcher/releases> 下载。
+> 本文档保留是为了说明历史设计，以及将来若换小体积更新包时的接入点。
+
 ## 概述
 
 ComfyUI 启动器采用双通道自动更新机制，支持稳定版（stable）和测试版（test）两个独立更新通道。该系统允许开发者和用户在不同阶段测试新功能，同时确保大多数用户获取到经过验证的稳定版本。
