@@ -21,7 +21,9 @@
 from __future__ import annotations
 
 import os
+import re
 import subprocess
+import time
 from pathlib import Path
 from typing import Any, Callable, Iterable, Optional, Sequence, Tuple
 
@@ -29,6 +31,34 @@ from typing import Any, Callable, Iterable, Optional, Sequence, Tuple
 # 官方 PyPI 源 (镜像滞后时的回退目标). 显式写死, 不能用 None ——
 # None 的含义是「用 pip 自己的配置」, 而嵌入 python 的 pip.ini 里钉着镜像.
 OFFICIAL_PYPI_INDEX = "https://pypi.org/simple"
+
+# 镜像回源等待秒数. 国内 PyPI 镜像 (阿里云/华为云/清华) 有**按需回源**机制:
+# 请求一个尚未收录的包会触发它们去 PyPI 拉取, 实测约 1 分钟内收录 (2026-11-18
+# 实测: 请求后 61 秒华为云就从 0.1.x 变成 0.2.0). 但回源是**异步**的 —— 触发它
+# 的那次请求拿到的仍是旧列表, 所以 pip 会报 "No matching distribution found".
+# 于是: 触发 → 等一会 → 再请求, 这次就能拿到了.
+MIRROR_RESYNC_WAIT_SEC = 20
+
+
+def _trigger_mirror_resync(index_url: str, specs: Iterable[str]) -> int:
+    """对镜像的 simple index 各发一次请求, 触发它回源收录. 返回触发的包数."""
+    import urllib.request
+    hit = 0
+    for spec in specs or ():
+        name = re.split(r"[<>=!~\[; ]", str(spec), 1)[0].strip()
+        if not name:
+            continue
+        url = "%s/%s/" % (index_url.rstrip("/"), name)
+        try:
+            req = urllib.request.Request(
+                url, headers={"User-Agent": "pip/24.0",
+                              "Accept": "text/html, application/vnd.pypi.simple.v1+json"})
+            with urllib.request.urlopen(req, timeout=15) as resp:
+                resp.read(2048)
+            hit += 1
+        except Exception:
+            pass
+    return hit
 
 
 def _resolve_git_executable(app: Any) -> Optional[str]:
@@ -512,6 +542,7 @@ def install_requirements(
     *,
     on_progress=None,
     logger: Optional[Any] = None,
+    resync_wait: int = MIRROR_RESYNC_WAIT_SEC,
 ) -> dict:
     """把 requirements.txt 装进指定解释器 (逐包容错, 不用 pip install -r).
 
@@ -558,13 +589,41 @@ def install_requirements(
     missing = list(res.get("missing") or [])
     failed = list(res.get("failed") or [])
 
-    # 镜像滞后兜底: 国内镜像同步有延迟, **新发布的版本**镜像上常常还没有
-    # (实测: 华为云/阿里云镜像只有 comfyui-mie-craft 0.1.x, 而 PyPI 已有 0.2.0),
-    # 于是 "No matching distribution found". 这些包改用官方 PyPI 再试一次.
-    #
-    # 注意: 回退必须**显式**给官方源地址, 不能传 None —— None 的含义是「用 pip
-    # 自己的配置」, 而嵌入 python 的 pip.ini 里钉着 index-url(阿里云), 照样是
-    # 那个没同步的镜像.
+    # 镜像上没有的新版本: 先**触发镜像回源**, 等它收录, 再重试一次镜像 ——
+    # 这比直接回落官方 PyPI 快 (国内到官方源往往不稳), 而且不用用户干预.
+    # 实测: 华为云镜像请求后 ~61 秒收录 0.2.0 (2026-11-18).
+    if missing and index_url:
+        try:
+            _trigger_mirror_resync(index_url, missing)
+            if resync_wait > 0:
+                if logger:
+                    try:
+                        logger.info("镜像未收录 %s, 已触发回源, %d 秒后重试镜像…",
+                                    ", ".join(missing), resync_wait)
+                    except Exception:
+                        pass
+                time.sleep(resync_wait)
+            retry = PIPUTILS.install_requirements_file(
+                requirements_file, python_exec,
+                index_url=index_url, upgrade=False,
+                logger=logger, on_progress=on_progress,
+            )
+            still_missing = list(retry.get("missing") or [])
+            for name in retry.get("installed") or []:
+                if name not in installed:
+                    installed.append(name)
+            for name in retry.get("satisfied") or []:
+                if name not in satisfied:
+                    satisfied.append(name)
+            for f in retry.get("failed") or []:
+                if f not in failed:
+                    failed.append(f)
+            missing = still_missing
+        except Exception:
+            pass
+
+    # 还是没有 → 官方 PyPI 显式地址重装 (必须显式, 不能传 None: 那是「用 pip 自己
+    # 的配置」, 而嵌入 python 的 pip.ini 里钉着那个没同步的镜像)
     if missing and index_url:
         retry_ok: list = []
         retry_failed: list = []
