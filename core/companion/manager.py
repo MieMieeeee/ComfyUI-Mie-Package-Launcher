@@ -646,7 +646,7 @@ class CompanionServiceManager:
             self._kill_spawned(join_only=True)
         if residual and not error:
             error = f"端口 {port} 在停止后仍被占用。"
-        return {"ok": not error,
+        return {"ok": not error, "exit_code": 1 if error else 0,
                 "killed": killed, "residual_ports": residual,
                 "elapsed_sec": time.time() - start_t, "error": error,
                 "service_id": self.spec.id}

@@ -21,6 +21,8 @@ import time
 import shutil
 import subprocess
 import argparse
+import xml.etree.ElementTree as ET
+from pathlib import Path
 
 # 版本号从代码读（build.py 位于项目根，core 包可直接 import）
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
@@ -423,30 +425,58 @@ def step_nuitka_compile(is_test):
         sys.exit(1)
 
     return dist_dir
+def _write_evb_project(template_path, dist_dir, project_path):
+    """Keep Enigma options from the template and embed this build's files."""
+    dist_dir = Path(dist_dir).resolve()
+    project = Path(template_path).read_text(encoding="utf-8-sig")
+    declaration, xml = project.split("\n", 1)
+    root = ET.fromstring(xml.replace("<>", "<Project>", 1)
+                         .replace("</>", "</Project>", 1))
+    entry_name = INTERNAL_EXE_NAME + ".exe"
+    root.find("InputFile").text = str(dist_dir / entry_name)
+    root.find("OutputFile").text = str(dist_dir / BOXED_EXE_NAME)
+    files = root.find("Files/Files/File/Files")
+    files.clear()
+    excluded = {entry_name, BOXED_EXE_NAME, CLI_WRAPPER_NAME, "launcher"}
+
+    def add_entries(parent, directory):
+        for child in sorted(directory.iterdir(), key=lambda path: path.name.casefold()):
+            if directory == dist_dir and child.name in excluded:
+                continue
+            is_dir = child.is_dir()
+            entry = ET.SubElement(parent, "File")
+            ET.SubElement(entry, "Type").text = "3" if is_dir else "2"
+            ET.SubElement(entry, "Name").text = child.name
+            if not is_dir:
+                ET.SubElement(entry, "File").text = str(child)
+                ET.SubElement(entry, "ActiveX").text = "False"
+                ET.SubElement(entry, "ActiveXInstall").text = "False"
+                ET.SubElement(entry, "PassCommandLine").text = "False"
+            ET.SubElement(entry, "Action").text = "0"
+            ET.SubElement(entry, "OverwriteDateTime").text = "False"
+            ET.SubElement(entry, "OverwriteAttributes").text = "False"
+            ET.SubElement(entry, "HideFromDialogs").text = "0"
+            if is_dir:
+                add_entries(ET.SubElement(entry, "Files"), child)
+
+    add_entries(files, dist_dir)
+    ET.indent(root, space="  ")
+    text = ET.tostring(root, encoding="unicode", short_empty_elements=True)
+    Path(project_path).write_text(
+        declaration + "\n" + text.replace("<Project>", "<>", 1).replace("</Project>", "</>", 1),
+        encoding="utf-8-sig",
+    )
+
+
 def step_enigma_package(dist_dir, is_test, enigma_exe):
     """Step 2: Enigma Virtual Box 打包"""
     project_dir = get_project_dir()
-    evb_path = os.path.join(project_dir, 'EnigmaVirtualBox', 'launcher.evb')
-
-    if not os.path.exists(evb_path):
-        print(f"[错误] 未找到 EVB 项目文件: {evb_path}")
+    template = Path(project_dir) / "EnigmaVirtualBox" / "launcher.evb"
+    if not template.is_file():
+        print(f"[错误] 未找到 EVB 项目文件: {template}")
         sys.exit(1)
-
-    # 测试通道需要替换 EVB 中的路径
-    actual_evb = evb_path
-    if is_test:
-        # 动态生成测试版 EVB：替换 dist 目录路径
-        stable_dist = r'ComfyUI启动器.dist'
-        test_dist = r'ComfyUI启动器_test.dist'
-
-        evb_content = open(evb_path, 'r', encoding='utf-8', errors='ignore').read()
-        test_evb_content = evb_content.replace(stable_dist, test_dist)
-
-        test_evb_path = os.path.join(project_dir, 'EnigmaVirtualBox', 'launcher_test.evb')
-        with open(test_evb_path, 'w', encoding='utf-8', errors='ignore') as f:
-            f.write(test_evb_content)
-        actual_evb = test_evb_path
-        print(f"[封包] 使用测试版 EVB: launcher_test.evb")
+    actual_evb = Path(dist_dir).parent / f"{Path(dist_dir).stem}.evb"
+    _write_evb_project(template, dist_dir, actual_evb)
 
     print(f"\n[2/3] Enigma 打包...")
     print(f"[封包] {enigma_exe}")

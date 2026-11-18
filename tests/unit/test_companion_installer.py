@@ -343,3 +343,27 @@ def test_partial_backup_is_restored(tmp_path, git_repo, monkeypatch):
     assert _git(target, "rev-parse", "HEAD") == before
     assert (library / "user.txt").read_text(encoding="utf-8") == "my asset"
     assert keys.read_text(encoding="utf-8") == "my settings"
+
+
+def test_restore_failure_reports_recovery_copy(tmp_path, git_repo, monkeypatch):
+    from core.companion import installer
+
+    target = tmp_path / "target"
+    _git(tmp_path, "clone", "-q", str(git_repo), str(target))
+    keys = target / "mie_llm_keys.json"
+    keys.write_text("my original settings", encoding="utf-8")
+    (git_repo / keys.name).write_text("default", encoding="utf-8")
+    _git(git_repo, "add", "-f", keys.name)
+    _git(git_repo, "commit", "-qm", "track template")
+    original_replace = type(keys).replace
+
+    def replace(source, dst):
+        if dst == keys:
+            raise OSError("simulated failed restore")
+        return original_replace(source, dst)
+
+    monkeypatch.setattr(type(keys), "replace", replace)
+    result = installer.pull_service(_App(tmp_path), target, protected_paths=(keys.name,))
+    copy, = tmp_path.glob(f"{target.name}.userdata.bak-*/{keys.name}")
+    assert not result["ok"] and str(copy) in result["error"]
+    assert copy.read_text(encoding="utf-8") == "my original settings"

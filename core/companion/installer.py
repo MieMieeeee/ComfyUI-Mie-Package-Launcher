@@ -293,7 +293,10 @@ def protect_user_data(
             src.replace(dst)
             stash[rel] = dst
             if logger:
-                logger.warning("已暂存用户数据 %s，备份位置 %s", rel, dst)
+                try:
+                    logger.warning("已暂存用户数据 %s，备份位置 %s", rel, dst)
+                except Exception:
+                    pass
     except (OSError, RuntimeError, subprocess.SubprocessError) as exc:
         if backup is not None and not stash:
             try:
@@ -312,6 +315,8 @@ def restore_user_data(repo_dir: Path, stash: dict) -> list[str]:
         backup = Path(backup)
         dst = repo_dir / rel
         try:
+            if not os.path.lexists(backup):
+                raise FileNotFoundError(f"备份文件不存在: {backup}")
             dst.parent.mkdir(parents=True, exist_ok=True)
             if dst.is_dir() and not dst.is_symlink():
                 shutil.rmtree(dst)
