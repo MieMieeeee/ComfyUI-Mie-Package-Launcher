@@ -158,7 +158,20 @@ python __main__.py <command> [--json] [-v]
 
 - **「更新不能毁掉用户资产」靠两层保护（2026-11-18）**：更新走 `git fetch` + `git reset --hard origin/HEAD`，而 **reset --hard 会把**被 git 跟踪**的文件还原回仓库版本**（实测：把数据 `git add -f` 提交过一次，更新后文件内容真的被还原了 —— 光「从索引摘除」不够，因为 reset 会把索引重置成 origin/HEAD 的树）。两层保护：**(a) 引擎仓库 `.gitignore` 排除 `asset_library/` 与 `mie_llm_keys.json`**（未跟踪 + 被忽略的文件不受 reset 影响，已实测；MieNodes 仓库当年就是这么干的）；**(b) `installer.protect_user_data` 在更新前体检**（`git ls-files`），发现数据曾被跟踪就**先挪到仓库外暂存**、更新完再搬回（`installer.restore_user_data`）。测试锁住这条：`tests/unit/test_companion_installer.py::test_pull_service_keeps_user_data_after_reset`。
 
-- **镜像滞后会挡住新版本依赖（2026-11-18 实测）**：国内 PyPI 镜像同步有延迟，**新发布的版本镜像上常常还没有** —— 华为云/阿里云镜像只有 `comfyui-mie-craft` 0.1.x，而 PyPI 已有 0.2.0，requirements 写 `>=0.2.0` → `No matching distribution found`。**但镜像有「按需回源」机制**：请求一个尚未收录的包会触发它去 PyPI 拉取，**实测约 1 分钟内收录**（2026-11-18 实测：15:34:47 请求三个包的 simple index，15:36:12 华为云上三个包全变成 0.2.0，而请求前只有 0.1.x）。所以 **不需要任何 API 或工单去催收录** —— pip 每次装包都会发那个请求，代价只是「触发它的那次请求拿到的仍是旧列表」。`installer.install_requirements` 因此的顺序是：镜像装 → 缺失的包**触发回源**（`installer._trigger_mirror_resync`）+ 等 20s → **重试镜像** → 仍缺才用**官方 PyPI 显式地址**兜底。⚠️ 兜底**必须显式给 `https://pypi.org/simple`**，不能传 `None` —— `None` 的含义是「用 pip 自己的配置」，而嵌入 python 的 `python_embeded/pip.ini` 里钉着 `index-url`（还是那个没同步的镜像）。
+- **镜像滞后会挡住新版本依赖（2026-11-18 实测）**：国内 PyPI 镜像同步有延迟，**新发布的版本镜像上常常还没有** —— 华为云/阿里云镜像只有 `comfyui-mie-craft` 0.1.x，而 PyPI 已有 0.2.0，requirements 写 `>=0.2.0` → `No matching distribution found`。**但镜像有「按需回源」机制**：请求一个尚未收录的包会触发它去 PyPI 拉取，**实测约 1 分钟内收录**（2026-11-18 受控实验：15:34:47 请求三个包的 simple index，15:36:12 华为云上三个包全变成 0.2.0，而请求前只有 0.1.x）。⚠️ **催镜像是「发布侧」的事，不是「安装侧」的事**（用户 2026-11-18 明确）：发布新版本后由发布方去请求一下镜像（各包仓库 `tools/notify_mirrors.py`，三份一模一样），**启动器与引擎都不该去请求镜像**。启动器只负责：按首页配置的镜像装 → 镜像上没有就用**官方 PyPI 显式地址**兜底。⚠️ 兜底**必须显式给 `https://pypi.org/simple`**，不能传 `None` —— `None` 的含义是「用 pip 自己的配置」，而嵌入 python 的 `python_embeded/pip.ini` 里钉着 `index-url`（还是那个没同步的镜像）。
+
+- **镜像/代理配置只有一个来源：首页的环境区（2026-11-18 定）**：用户在「启动与更新 → 环境区」配的 git 代理 / pypi 镜像 / HF 镜像，**所有出网方都必须走同一份**。公共入口在 `utils/net.py`：
+  | 函数 | 作用 |
+  |---|---|
+  | `mirror_settings(app)` | 合并视图（落盘 `config.proxy_settings` + GUI 实时值，**实时优先**） |
+  | `resolve_git_endpoint(app, url)` | git 地址改写（只对 github.com 加代理；gitee 直连、内网 gitlab 不碰） |
+  | `resolve_pypi_index_url(app)` | pypi index URL（aliyun/tsinghua/huaweicloud/custom） |
+  | `resolve_hf_endpoint(app)` | HF 镜像端点（不用镜像 → None） |
+
+  **别再各自读 `app.config["proxy_settings"]` 或硬编码镜像** —— 那样会出现「首页配了镜像，装着却直连」的漂移，而且极难查。伴生服务的安装链（`core/companion/installer.py`）、WebUI 工作台的 HF 端点（`ui_qt/pages/webui_page.py::_resolve_hf_endpoint`）、ComfyUI 子进程的 HF_ENDPOINT（`core/launcher_cmd.py`）都走上面这四个。给伴生服务注入 HF 镜像的方式：`h3_runtime.resolve_paths` 把 `hf_endpoint` 放进 paths，`build_steps` 据此设子进程的 `HF_ENDPOINT`。
+  ⚠️ 注意区分**镜像**（`git_proxy_*` / `pypi_proxy_*` / `hf_mirror_*`，换落地地址）与**本地正向代理**（`local_proxy_*`，换传输路径）—— 两回事，别混。
+
+- **包只声明依赖，不管用哪个镜像（2026-11-18 定）**：`requirements.txt` / `pyproject.toml` 里**只写包名与版本约束，不写 `-i` / `--index-url` / `extra-index-url`**。镜像源是**部署环境**的选择（启动器按用户配置来），包管不了也不该管 —— 写死了会导致换环境装不上、用户没法用官方源、镜像滞后时把包锁死在旧版本。Mie-Craft / Mie-LLM / Mie-Prompt / H3 Engine 四个仓库都遵守这条（各自 README 里写明了）。
 
 - **junction 会让 `resolve()` 丢掉 custom_nodes 布局（2026-11-18 实测）**：整合包里 `custom_nodes/ComfyUI-Mie-H3-Engine` 是指向源码目录的 **Junction**（实测 `C:\PP\V9\...\custom_nodes\ComfyUI-Mie-H3-Engine → F:\ComfyUI-Mie-H3-Engine`）。`pathlib.Path(__file__).resolve()` 会把它解析成**目标** → ① 从插件位置反推 ComfyUI 目录失效（parent.parent 变成盘根 `F:\`）；② 同一个 custom_nodes 下的兄弟包（老布局里的 MieNodes 资产包）扫不到。**凡是「靠目录位置判断布局」的地方一律用 `os.path.abspath`**（只规范化、不解析 reparse point）。引擎侧 `webapp/config.py::_plugin_root_asis()` 就是干这个的。注意 **Git Bash 的 `cd` 自己会解析 junction** —— 想验证 junction 下的行为，得用 Python 的 `os.chdir(junction 路径)`（Windows 的 chdir 不解析），别信 `cd` 之后的 cwd。
 

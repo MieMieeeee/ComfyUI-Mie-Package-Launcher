@@ -102,32 +102,97 @@ def get_pypi_index_url_for_mode(mode: str) -> str | None:
     return None
 
 
-def resolve_pypi_index_url(app) -> str | None:
-    """从 app 的 pypi proxy 配置解析 pypi index URL.
+def mirror_settings(app) -> dict:
+    """首页（启动与更新页 → 环境区）那套镜像/代理配置 —— **所有出网方的单一来源**.
 
-    统一 webui install / setup / GUI 三处的解析逻辑:
-    - aliyun / tsinghua / huaweicloud -> 对应内置 URL
-    - custom -> 读 app.pypi_proxy_url.get() (去首尾空格, 空则回退内置)
-    - none / 未知 / 缺属性 / .get() 抛异常 -> None
+    落盘值在 ``app.config["proxy_settings"]``；GUI 里还有一份实时值（改了会立刻
+    存盘，但拿实时值更保险）。这里是合并视图：**实时值优先**。
 
-    app.pypi_proxy_mode / pypi_proxy_url 是 tk Variable (有 .get()), 本函数对
-    属性缺失和 .get() 抛异常都做防御, 安全回退到 None.
+    谁该用它:
+      - 伴生服务的安装链 (git clone / pip install / 将来下 HF 模型)
+      - 内核更新 / 插件管理的 git 与 pip
+      - 任何"从网上拿东西"的代码
+
+    不要再各自去读 ``app.config`` 或硬编码镜像 —— 否则会出现「首页配了镜像，
+    装着却直连」这种漂移, 而且极难查（AGENTS.md 已记: 镜像/代理配置只有一个来源）.
+
+    注意区分两类配置（AGENTS.md 有专门一条）:
+      - ``git_proxy_*`` / ``pypi_proxy_*`` / ``hf_mirror_*`` = **镜像**（换落地地址）
+      - ``local_proxy_*`` = **本地正向代理**（换传输路径），别混。
     """
-    try:
-        v = getattr(app, 'pypi_proxy_mode', None)
-        mode = (v.get() or 'none').strip() if v else 'none'
-    except Exception:
-        mode = 'none'
+    out: dict = {}
+    cfg = getattr(app, "config", None)
+    ps = cfg.get("proxy_settings") if isinstance(cfg, dict) else None
+    if isinstance(ps, dict):
+        out.update(ps)
+
+    def _live(attr: str, key: str) -> None:
+        var = getattr(app, attr, None)
+        if var is None:
+            return
+        try:
+            val = var.get()
+        except Exception:
+            return
+        if val is None:
+            return
+        text = str(val).strip()
+        if text:
+            out[key] = text
+
+    _live("proxy_mode_var", "git_proxy_mode")
+    _live("proxy_url_var", "git_proxy_url")
+    _live("pypi_proxy_mode", "pypi_proxy_mode")
+    _live("pypi_proxy_url", "pypi_proxy_url")
+    _live("selected_hf_mirror", "hf_mirror_mode")
+    _live("hf_mirror_url", "hf_mirror_url")
+    return out
+
+
+def resolve_git_endpoint(app, url: str) -> str:
+    """git 地址按首页的 git 代理配置改写.
+
+    只对 **github.com** 的地址加代理: gitee 直连秒级, 加代理反而把地址弄脏;
+    内网 gitlab 被代理前缀锈坏更糟.
+    """
+    raw = (url or "").strip()
+    if not raw or "github.com" not in raw.lower():
+        return raw
+    return apply_git_proxy_to_url(raw, mirror_settings(app))
+
+
+def resolve_hf_endpoint(app) -> str | None:
+    """HF 镜像端点 —— 按首页的 hf 镜像配置解析.
+
+    "不使用镜像" / 空 / 未配 → None（不设 HF_ENDPOINT, 走官方）。
+    与 core/launcher_cmd.py:build_launch_env 给 ComfyUI 子进程设 HF_ENDPOINT
+    同口径 —— 伴生服务将来要下 HF 模型时也走这里, 不要自己读 config。
+    """
+    settings = mirror_settings(app)
+    mode = (settings.get("hf_mirror_mode") or "").strip()
+    if not mode or mode == "不使用镜像":
+        return None
+    url = (settings.get("hf_mirror_url") or "").strip()
+    return url or None
+
+
+def resolve_pypi_index_url(app) -> str | None:
+    """从首页的 pypi 镜像配置解析 pypi index URL.
+
+    统一 webui install / setup / 伴生服务安装链 / GUI 三处的解析逻辑:
+    - aliyun / tsinghua / huaweicloud -> 对应内置 URL
+    - custom -> 读 pypi_proxy_url (去首尾空格, 空则回退内置)
+    - none / 未知 / 缺配置 -> None（调用方决定用不用镜像）
+
+    数据来源统一走 mirror_settings()（落盘 config + GUI 实时值, 实时优先）。
+    """
+    settings = mirror_settings(app)
+    mode = (settings.get("pypi_proxy_mode") or "none").strip()
     idx_url = get_pypi_index_url_for_mode(mode)
     if mode == PYPI_MODE_CUSTOM:
-        try:
-            uv = getattr(app, 'pypi_proxy_url', None)
-            if uv:
-                u = (uv.get() or '').strip()
-                if u:
-                    idx_url = u
-        except Exception:
-            pass
+        custom = (settings.get("pypi_proxy_url") or "").strip()
+        if custom:
+            idx_url = custom
     return idx_url
 
 

@@ -156,23 +156,16 @@ class WebuiPage(BasePage):
         return self._state in _BUSY_STATES
 
     def _resolve_hf_endpoint(self) -> Optional[str]:
-        """从 app.config["proxy_settings"] 解析 HF 镜像 URL.
+        """HF 镜像端点 —— 走公共解析器 (utils.net.resolve_hf_endpoint).
 
-        与 core/launcher_cmd.py:build_launch_env 同体制 (该函数同时也设 HF_ENDPOINT 环境变量供 ComfyUI 子进程).
-        hf_mirror_mode 为"不使用镜像" / 空 / 未设 → 返回 None (不设 HF_ENDPOINT).
+        与 core/launcher_cmd.py:build_launch_env 给 ComfyUI 子进程设 HF_ENDPOINT
+        同口径, 数据来源统一是首页（启动与更新页的环境区）那套配置
+        (utils.net.mirror_settings)。伴生服务将来要下 HF 模型时也走它, 不要各自
+        读 config —— 否则会漂移成「首页配了镜像, 装着却直连」。
         """
         try:
-            cfg = getattr(self.app, "config", None)
-            if not isinstance(cfg, dict):
-                return None
-            ps = cfg.get("proxy_settings", {})
-            if not isinstance(ps, dict):
-                return None
-            mode = (ps.get("hf_mirror_mode") or "").strip()
-            if not mode or mode == "不使用镜像":
-                return None
-            url = (ps.get("hf_mirror_url") or "").strip()
-            return url or None
+            from utils.net import resolve_hf_endpoint
+            return resolve_hf_endpoint(self.app)
         except Exception:
             return None
 

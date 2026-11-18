@@ -154,6 +154,16 @@ def resolve_paths(app: Any, env_id: Optional[str] = None) -> Dict[str, Any]:
     comfyui_dir = Path(pkg_root) / "ComfyUI"
     settings_file = Path(pkg_root).joinpath(*SETTINGS_DIR_REL) / SETTINGS_FILE_NAME
     asset_owner = _find_asset_owner(root)
+    # HF 镜像: 按首页（启动与更新页的环境区）的配置解析, 与 ComfyUI 子进程
+    # (core/launcher_cmd.py:build_launch_env) 同口径 —— 伴生服务将来要下 HF
+    # 模型时不用自己读 config.
+    hf_endpoint = None
+    try:
+        from utils.net import resolve_hf_endpoint
+        hf_endpoint = resolve_hf_endpoint(app)
+    except Exception:
+        hf_endpoint = None
+
     return {
         "pkg_root": Path(pkg_root),
         "root": root,
@@ -165,6 +175,7 @@ def resolve_paths(app: Any, env_id: Optional[str] = None) -> Dict[str, Any]:
         "keys_file": asset_owner / LLM_KEYS_NAME,
         "settings_file": settings_file,
         "comfyui_root": comfyui_dir,
+        "hf_endpoint": hf_endpoint,
         "env_id": _effective_env_id(app, env_id, cfg),
     }
 
@@ -296,6 +307,12 @@ def build_steps(paths: Dict[str, Any], ports: Dict[str, int],
     env["MIE_ASSET_LIBRARY"] = str(paths.get("asset_library") or (owner / ASSET_LIBRARY_NAME))
     env["MIE_LLM_KEYS_FILE"] = str(paths.get("keys_file") or (owner / LLM_KEYS_NAME))
     env["MIE_WEB_SETTINGS"] = str(paths["settings_file"])
+    # HF 镜像: 按首页（启动与更新页的环境区）的配置注入, 与 ComfyUI 子进程
+    # (core/launcher_cmd.py:build_launch_env) 同口径 —— 伴生服务将来要下 HF
+    # 模型时不用自己读 config.
+    hf_endpoint = paths.get("hf_endpoint")
+    if hf_endpoint:
+        env["HF_ENDPOINT"] = str(hf_endpoint)
     cmd = [str(paths["py"]), "-u", str(entry)]
     return [{"role": "app", "kind": "long", "cmd": cmd, "env": env,
              "cwd": str(root)}]

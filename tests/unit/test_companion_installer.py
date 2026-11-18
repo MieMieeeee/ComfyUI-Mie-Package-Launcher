@@ -184,7 +184,11 @@ def test_pull_service_keeps_user_data_after_reset(tmp_path, git_repo):
 # ---------------- 依赖安装 (镜像滞后回退) ----------------
 
 def test_install_requirements_retries_missing_from_official_pypi(tmp_path, monkeypatch):
-    """镜像上没有的新版本 → 用官方 PyPI 再试一次 (不能传 None: 那会用 pip.ini 的镜像)."""
+    """镜像上没有的新版本 → 用官方 PyPI 再试一次 (不能传 None: 那会用 pip.ini 的镜像).
+
+    注意: **催镜像收录是发布侧的事** (各包仓库 tools/notify_mirrors.py), 启动器
+    不去请求镜像 —— 安装侧只负责「按首页配置的镜像装 → 没有就用官方源兜底」。
+    """
     from core.companion import installer
     import utils.pip as PIPUTILS
 
@@ -209,90 +213,42 @@ def test_install_requirements_retries_missing_from_official_pypi(tmp_path, monke
     monkeypatch.setattr(PIPUTILS, "install_or_update_package", _fake_install_one)
     monkeypatch.setattr("utils.net.resolve_pypi_index_url",
                         lambda app: "https://mirror.example/simple/")
-    monkeypatch.setattr(installer, "_trigger_mirror_resync", lambda index_url, specs: 1)
 
-    res = installer.install_requirements(_App(tmp_path), py, req, resync_wait=0)
+    res = installer.install_requirements(_App(tmp_path), py, req)
     assert res["ok"] is True
     assert res["missing"] == []
-    # 回退必须**显式**用官方源
+    # 先按镜像装, 再用官方源兜底
+    assert ("bulk", "https://mirror.example/simple/") in calls
     assert ("one", installer.OFFICIAL_PYPI_INDEX) in calls
     assert installer.OFFICIAL_PYPI_INDEX.startswith("https://pypi.org")
 
 
-def test_install_requirements_triggers_mirror_resync_first(tmp_path, monkeypatch):
-    """镜像上没有 → 先触发镜像回源并重试镜像, 成功了就不必碰官方源.
-
-    依据 (2026-11-18 实测): 国内 PyPI 镜像按需回源 —— 请求未收录的包会触发
-    它去 PyPI 拉取, 约 1 分钟内收录; 但触发它的那次请求拿到的仍是旧列表.
-    """
+def test_install_requirements_uses_homepage_mirror_config(tmp_path, monkeypatch):
+    """镜像地址必须来自**首页（启动与更新页的环境区）那份配置**."""
     from core.companion import installer
     import utils.pip as PIPUTILS
 
     req = tmp_path / "requirements.txt"
-    req.write_text("comfyui-mie-craft>=0.2.0\n", encoding="utf-8")
+    req.write_text("flask\n", encoding="utf-8")
     py = tmp_path / "python.exe"
     py.write_text("# fake", encoding="utf-8")
 
-    bulk_calls = []
-    triggered = {}
+    seen = {}
 
     def _fake_requirements_file(requirements_file, python_exec, **kw):
-        bulk_calls.append(kw.get("index_url"))
-        if len(bulk_calls) == 1:
-            return {"success": False, "installed": [], "satisfied": [],
-                    "missing": ["comfyui-mie-craft>=0.2.0"], "failed": [],
-                    "error": None}
-        # 第二次 (回源之后) → 镜像上有了
-        return {"success": True, "installed": ["comfyui-mie-craft-0.2.0"],
-                "satisfied": [], "missing": [], "failed": [], "error": None}
-
-    def _fake_trigger(index_url, specs):
-        triggered["index_url"] = index_url
-        triggered["specs"] = list(specs)
-        return 1
-
-    def _should_not_call(*a, **kw):
-        raise AssertionError("镜像重试成功后不该再走官方源")
+        seen["index_url"] = kw.get("index_url")
+        return {"success": True, "installed": ["flask"], "satisfied": [],
+                "missing": [], "failed": [], "error": None}
 
     monkeypatch.setattr(PIPUTILS, "install_requirements_file", _fake_requirements_file)
-    monkeypatch.setattr(PIPUTILS, "install_or_update_package", _should_not_call)
-    monkeypatch.setattr(installer, "_trigger_mirror_resync", _fake_trigger)
-    monkeypatch.setattr("utils.net.resolve_pypi_index_url",
-                        lambda app: "https://mirror.example/simple/")
-
-    res = installer.install_requirements(_App(tmp_path), py, req, resync_wait=0)
+    # app 只有 config (没有 GUI 的实时变量) → 也必须解析出首页那份镜像
+    app = _App(tmp_path, {"proxy_settings": {
+        "pypi_proxy_mode": "huaweicloud",
+        "pypi_proxy_url": "",
+    }})
+    res = installer.install_requirements(app, py, req)
     assert res["ok"] is True
-    assert res["missing"] == []
-    # 触发了回源, 并且重试时仍然用镜像
-    assert triggered["specs"] == ["comfyui-mie-craft>=0.2.0"]
-    assert bulk_calls[0] == bulk_calls[1] == "https://mirror.example/simple/"
-
-
-def test_trigger_mirror_resync_requests_simple_index(monkeypatch):
-    """触发回源 = 对该包的 simple index 发一次请求 (pip 平时也会发)."""
-    from core.companion import installer
-
-    seen = []
-
-    class _Resp:
-        def read(self, _n=0):
-            return b""
-
-        def __enter__(self):
-            return self
-
-        def __exit__(self, *a):
-            return False
-
-    def _fake_urlopen(req, timeout=None):
-        seen.append(req.full_url)
-        return _Resp()
-
-    monkeypatch.setattr("urllib.request.urlopen", _fake_urlopen)
-    hit = installer._trigger_mirror_resync(
-        "https://mirror.example/simple/", ["comfyui-mie-craft>=0.2.0"])
-    assert hit == 1
-    assert seen == ["https://mirror.example/simple/comfyui-mie-craft/"]
+    assert "huaweicloud" in seen["index_url"]
 
 
 def test_install_requirements_reports_failure(tmp_path, monkeypatch):
