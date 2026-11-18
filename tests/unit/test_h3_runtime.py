@@ -23,9 +23,14 @@ class _App:
                                      "warning": lambda *a, **kw: None})()
 
 
-def _mk_env(tmp_path: Path, *, mie_nodes_name="comfyui_mienodes",
-            with_engine=True, with_python=True) -> Path:
-    """造一个假整合包: <pkg>/ComfyUI/custom_nodes/ComfyUI-Mie-H3-Engine/..."""
+def _mk_env(tmp_path: Path, *, asset_owner="engine", with_engine=True,
+            with_python=True) -> Path:
+    """造一个假整合包: <pkg>/ComfyUI/custom_nodes/ComfyUI-Mie-H3-Engine/...
+
+    asset_owner:
+      "engine"  —— 资产库在引擎目录里 (新布局, 2026-11-18 起的归属)
+      "sibling" —— 资产库在同级的 MieNodes 资产包里 (老布局, 兼容)
+    """
     pkg = tmp_path / "pkg"
     custom_nodes = pkg / "ComfyUI" / "custom_nodes"
     custom_nodes.mkdir(parents=True)
@@ -33,8 +38,12 @@ def _mk_env(tmp_path: Path, *, mie_nodes_name="comfyui_mienodes",
         engine = custom_nodes / "ComfyUI-Mie-H3-Engine"
         (engine / "webapp").mkdir(parents=True)
         (engine / "webapp" / "__main__.py").write_text("# entry", encoding="utf-8")
-    if mie_nodes_name:
-        nodes = custom_nodes / mie_nodes_name
+    if asset_owner == "engine":
+        nodes = custom_nodes / "ComfyUI-Mie-H3-Engine"
+        (nodes / "asset_library").mkdir(parents=True, exist_ok=True)
+        (nodes / "mie_llm_keys.json").write_text("{}", encoding="utf-8")
+    elif asset_owner == "sibling":
+        nodes = custom_nodes / "comfyui_mienodes"
         (nodes / "asset_library").mkdir(parents=True)
         (nodes / "mie_llm_keys.json").write_text("{}", encoding="utf-8")
     if with_python:
@@ -68,16 +77,25 @@ def test_resolve_paths_points_at_engine_entry(tmp_path):
     assert paths["comfyui_root"] == pkg / "ComfyUI"
 
 
-def test_resolve_paths_accepts_all_mie_nodes_dir_names(tmp_path):
-    """三种历史命名都认 (comfyui_mienodes / ComfyUI_MieNodes / ComfyUI-MieNodes)."""
+def test_asset_library_belongs_to_the_engine(tmp_path):
+    """资产库归 H3 引擎自己 (2026-11-18): 引擎目录里有 asset_library 就归它."""
     from core.companion import h3_runtime
-    for i, name in enumerate(("comfyui_mienodes", "ComfyUI_MieNodes", "ComfyUI-MieNodes")):
-        # 注意: Windows 上目录名大小写不敏感, 三种命名只有大小写不同 →
-        # 每个用例必须用不同的父目录, 否则第二次 mkdir 就撞 FileExistsError.
-        pkg = _mk_env(tmp_path / f"env{i}", mie_nodes_name=name)
-        paths = h3_runtime.resolve_paths(_App(tmp_path, _cfg(pkg)))
-        assert paths["mie_nodes"] is not None, name
-        assert paths["mie_nodes"].name.lower() == name.lower()
+    pkg = _mk_env(tmp_path, asset_owner="engine")
+    paths = h3_runtime.resolve_paths(_App(tmp_path, _cfg(pkg)))
+    engine = pkg / "ComfyUI" / "custom_nodes" / "ComfyUI-Mie-H3-Engine"
+    assert paths["asset_owner"] == engine
+    assert paths["asset_library"] == engine / "asset_library"
+    assert paths["keys_file"] == engine / "mie_llm_keys.json"
+
+
+def test_asset_library_falls_back_to_legacy_sibling(tmp_path):
+    """老布局: 资产还在同级 MieNodes 资产包里 → 继续用它, 不遮住用户的数据."""
+    from core.companion import h3_runtime
+    pkg = _mk_env(tmp_path, asset_owner="sibling")
+    paths = h3_runtime.resolve_paths(_App(tmp_path, _cfg(pkg)))
+    sibling = pkg / "ComfyUI" / "custom_nodes" / "comfyui_mienodes"
+    assert paths["asset_owner"] == sibling
+    assert paths["asset_library"] == sibling / "asset_library"
 
 
 def test_relative_python_path_resolves_against_selected_env(tmp_path):
@@ -117,16 +135,6 @@ def test_absolute_python_path_wins(tmp_path):
 
 # ---------------- 依赖闸门 ----------------
 
-def test_check_deps_missing_mie_nodes_is_hard_failure(tmp_path):
-    """找不到 MieNodes 资产库必须判失败 —— 引擎侧会兜底到别的包的硬编码路径."""
-    from core.companion import h3_runtime
-    pkg = _mk_env(tmp_path, mie_nodes_name=None)
-    paths = h3_runtime.resolve_paths(_App(tmp_path, _cfg(pkg)))
-    res = h3_runtime.check_deps(paths)
-    assert res["ok"] is False
-    assert any("MieNodes" in m for m in res["missing"])
-
-
 def test_check_deps_missing_imports_is_hard_failure(tmp_path, monkeypatch):
     from core.companion import h3_runtime
     pkg = _mk_env(tmp_path)
@@ -136,6 +144,33 @@ def test_check_deps_missing_imports_is_hard_failure(tmp_path, monkeypatch):
     res = h3_runtime.check_deps(paths)
     assert res["ok"] is False
     assert any("mie_llm" in m for m in res["missing"])
+
+
+def test_check_deps_missing_keys_is_warning_not_failure(tmp_path, monkeypatch):
+    """LLM 密钥没填只是提醒 —— 工作台的资产/剧本页照样能用."""
+    from core.companion import h3_runtime
+    pkg = _mk_env(tmp_path)
+    (pkg / "ComfyUI" / "custom_nodes" / "ComfyUI-Mie-H3-Engine"
+     / "mie_llm_keys.json").unlink()
+    paths = h3_runtime.resolve_paths(_App(tmp_path, _cfg(pkg)))
+    monkeypatch.setattr(h3_runtime, "_probe_imports",
+                        lambda py, timeout=20: (True, []))
+    res = h3_runtime.check_deps(paths)
+    assert res["ok"] is True
+    assert any("密钥" in w for w in res.get("warnings") or [])
+
+
+def test_check_deps_creates_asset_library_for_fresh_install(tmp_path, monkeypatch):
+    """全新环境: 资产库目录还没有 → 闸门建一个空的 (归引擎)."""
+    from core.companion import h3_runtime
+    pkg = _mk_env(tmp_path, asset_owner=None)
+    paths = h3_runtime.resolve_paths(_App(tmp_path, _cfg(pkg)))
+    assert not paths["asset_library"].exists()
+    monkeypatch.setattr(h3_runtime, "_probe_imports",
+                        lambda py, timeout=20: (True, []))
+    res = h3_runtime.check_deps(paths)
+    assert res["ok"] is True
+    assert paths["asset_library"].is_dir()
 
 
 def test_check_deps_ok_when_everything_present(tmp_path, monkeypatch):
@@ -171,7 +206,10 @@ def test_build_steps_injects_all_mie_env_vars(tmp_path):
     assert env["MIE_WEB_HOST"] == "127.0.0.1"
     assert env["MIE_COMFYUI_ROOT"] == str(pkg / "ComfyUI")
     assert env["MIE_COMFYUI_URL"] == "http://127.0.0.1:8188"
-    assert env["MIE_PLUGIN_ROOT"] == str(paths["mie_nodes"])
+    # 资产归属: MIE_PLUGIN_ROOT 指向拥有资产库的那个目录 (引擎自己),
+    # MIE_ASSET_LIBRARY 显式给同一个库 (免得网页侧与节点侧解析到两个库)
+    assert env["MIE_PLUGIN_ROOT"] == str(paths["asset_owner"])
+    assert env["MIE_ASSET_LIBRARY"] == str(paths["asset_library"])
     assert env["MIE_LLM_KEYS_FILE"].endswith("mie_llm_keys.json")
     assert env["MIE_WEB_SETTINGS"] == str(paths["settings_file"])
 
@@ -207,14 +245,14 @@ def test_ready_probe_requires_status_and_app(monkeypatch):
 
 
 def test_health_info_flags_foreign_plugin_root(tmp_path, monkeypatch):
-    """plugin_root 不是当前环境的资产库 → plugin_root_ok=False."""
+    """plugin_root 不是当前环境的资产归属 → plugin_root_ok=False."""
     from core.companion import h3_runtime
     pkg = _mk_env(tmp_path)
     paths = h3_runtime.resolve_paths(_App(tmp_path, _cfg(pkg)))
     monkeypatch.setattr(
         h3_runtime, "_health_payload",
         lambda port, timeout=2.0: {"status": "ok", "app": "comfyui-mie-web",
-                                   "plugin_root": str(paths["mie_nodes"])})
+                                   "plugin_root": str(paths["asset_owner"])})
     info = h3_runtime.health_info(paths, {"app": 8200})
     assert info["plugin_root_ok"] is True
     monkeypatch.setattr(
@@ -235,9 +273,21 @@ def test_same_dir_is_text_compare_not_samefile():
 
 # ---------------- 更新链 ----------------
 
-def test_update_is_refused_with_pointer_to_plugin_manager():
-    """H3 引擎本体走插件管理, 本命令只管工作台启停."""
+def test_update_delegates_to_installer_with_protected_paths(tmp_path, monkeypatch):
+    """更新走 installer.pull_service, 且带上「用户数据不能被跟踪」的路径."""
     from core.companion import h3_runtime
-    res = h3_runtime.update(None, {})
-    assert res["ok"] is False
-    assert "插件管理" in res["error"]
+    captured = {}
+
+    def _fake_pull(app, repo_dir, *, protected_paths=(), **kw):
+        captured["protected"] = list(protected_paths)
+        captured["repo_dir"] = repo_dir
+        return {"ok": True, "updated": True, "log": "", "error": None}
+
+    from core.companion import installer
+    monkeypatch.setattr(installer, "pull_service", _fake_pull)
+    pkg = _mk_env(tmp_path)
+    paths = h3_runtime.resolve_paths(_App(tmp_path, _cfg(pkg)))
+    res = h3_runtime.update(_App(tmp_path, _cfg(pkg)), paths)
+    assert res["ok"] is True
+    assert "asset_library" in captured["protected"]
+    assert "mie_llm_keys.json" in captured["protected"]

@@ -563,6 +563,53 @@ class CompanionServiceManager:
             "service_id": self.spec.id,
         }
 
+    def install(self, *, on_progress=None, repo_url=None) -> dict:
+        """下载安装服务本体 (runtime 提供 install 钩子时).
+
+        幂等: 目标目录已有内容 → 跳过下载 (不删用户数据), 返回 already_exists.
+        """
+        rt = self._runtime()
+        fn = getattr(rt, "install", None)
+        if not callable(fn):
+            return {"ok": False, "error": "服务 %s 不提供下载安装" % self.spec.name,
+                    "exit_code": 1, "service_id": self.spec.id}
+        try:
+            paths = self._paths()
+        except Exception as e:
+            return {"ok": False, "error": "路径解析失败: %s" % e, "exit_code": 7,
+                    "service_id": self.spec.id}
+        try:
+            res = fn(self.app, paths, on_progress=on_progress, repo_url=repo_url)
+        except TypeError:
+            res = fn(self.app, paths, on_progress=on_progress)
+        except Exception as e:
+            return {"ok": False, "error": "下载失败: %s" % e, "exit_code": 1,
+                    "service_id": self.spec.id}
+        res.setdefault("exit_code", 0 if res.get("ok") else 1)
+        res["service_id"] = self.spec.id
+        return res
+
+    def setup(self, *, on_progress=None) -> dict:
+        """装服务的运行依赖 (runtime 提供 setup 钩子时)."""
+        rt = self._runtime()
+        fn = getattr(rt, "setup", None)
+        if not callable(fn):
+            return {"ok": False, "error": "服务 %s 不需要安装依赖" % self.spec.name,
+                    "exit_code": 1, "service_id": self.spec.id}
+        try:
+            paths = self._paths()
+        except Exception as e:
+            return {"ok": False, "error": "路径解析失败: %s" % e, "exit_code": 7,
+                    "service_id": self.spec.id}
+        try:
+            res = fn(self.app, paths, on_progress=on_progress)
+        except Exception as e:
+            return {"ok": False, "error": "依赖安装失败: %s" % e, "exit_code": 1,
+                    "service_id": self.spec.id}
+        res.setdefault("exit_code", 0 if res.get("ok") else 1)
+        res["service_id"] = self.spec.id
+        return res
+
     def update(self, *, on_progress=None) -> dict:
         """更新链 (委托 runtime). 前置: 服务已安装且未在跑."""
         if self.is_running():

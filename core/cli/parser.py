@@ -56,7 +56,8 @@ WEBUI_ACTIONS: Final[List[str]] = [
 
 # service 子命令的稳定 action 清单 (与 cmd_service.SERVICE_ACTIONS 一致).
 SERVICE_ACTIONS: Final[List[str]] = [
-    "list", "start", "stop", "status", "info", "restart", "update",
+    "list", "start", "stop", "status", "info", "restart",
+    "install", "setup", "update",
 ]
 
 # package 子命令的稳定 action 清单（与 cmd_package.py 一致）.
@@ -302,8 +303,11 @@ Actions:
   status    查询状态 (running=进程层[身份校验过], ready=加端口层)
   info      当前生效配置 (路径 / 端口 / 依赖 / 安装状态)
   restart   stop + start
+  install   下载服务本体 (git clone 到包内; 目录已有内容则跳过, 不删用户数据)
+  setup     装服务运行依赖 (pip 装进该环境的 embedded python)
   update    更新链 (openjutsu: git fetch+reset → npm ci → build → pip --target → patch;
-            h3-engine 引擎本体走「插件管理」，本命令只管工作台服务启停)
+            h3-engine: git fetch + reset --hard, 更新前先确保用户的资产库/密钥
+            没被 git 跟踪 —— 被跟踪的文件会被 reset 还原掉)
 
 --env <ENV_ID> 覆盖本次调用的环境 (start/stop/status/info/update 都支持)。
   注意 stop 也认 --env: 不带就是「当前激活环境」。
@@ -734,8 +738,9 @@ def build_parser() -> argparse.ArgumentParser:
         _service_ids_hint = "webui, openjutsu"
     sp = _make_subparser(
         sub, "service",
-        help="管理伴生服务 (openjutsu 等, 与 ComfyUI 平级)",
-        description="伴生服务统一入口: list / start / stop / status / info / restart / update."
+        help="管理伴生服务 (openjutsu / h3-engine 等, 与 ComfyUI 平级)",
+        description="伴生服务统一入口: list / start / stop / status / info / restart /"
+                    " install / setup / update."
                     " 服务是生命周期单元, 内部几条命令是实现细节;"
                     " webui 是名义条目, 转发老 webui 子命令实现。",
         epilog=_SERVICE_EPILOG,
@@ -745,7 +750,7 @@ def build_parser() -> argparse.ArgumentParser:
         "service_action",
         choices=SERVICE_ACTIONS,
         metavar="ACTION",
-        help="list / start / stop / status / info / restart / update。",
+        help="list / start / stop / status / info / restart / install / setup / update。",
     )
     sp.add_argument(
         "service_id",
@@ -760,6 +765,13 @@ def build_parser() -> argparse.ArgumentParser:
         default=None,
         metavar="ENV_ID",
         help="使用指定的环境（覆盖 config 的 active_env_id）; 不传则用激活环境。",
+    )
+    sp.add_argument(
+        "--url",
+        type=str,
+        default=None,
+        metavar="URL",
+        help="install 时用这个 git URL 覆盖默认仓库地址。",
     )
     sp.add_argument(
         "--no-wait",

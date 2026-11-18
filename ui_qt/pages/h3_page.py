@@ -37,8 +37,14 @@ STATE_RUNNING = "running"
 STATE_STARTING = "starting"
 STATE_STOPPING = "stopping"
 STATE_CHECKING = "checking"
+STATE_DOWNLOADING = "downloading"        # 下载 H3 引擎中
+STATE_INSTALLING_DEPS = "installing_deps"  # 安装 pip 依赖中
+STATE_UPDATING = "updating"              # git 更新中
 
-_BUSY_STATES = frozenset({STATE_CHECKING, STATE_STARTING, STATE_STOPPING})
+_BUSY_STATES = frozenset({
+    STATE_CHECKING, STATE_STARTING, STATE_STOPPING,
+    STATE_DOWNLOADING, STATE_INSTALLING_DEPS, STATE_UPDATING,
+})
 
 _BROWSER_OPEN_OPTS = [
     ("不自动打开", "disable"),
@@ -303,6 +309,13 @@ class H3Page(BasePage):
         self._btn_open.setCursor(QtCore.Qt.PointingHandCursor)
         self._btn_open.clicked.connect(self._on_open_browser)
         btn_col.addWidget(self._btn_open)
+
+        self._btn_update = QtWidgets.QPushButton("🔄 更新引擎")
+        self._btn_update.setCursor(QtCore.Qt.PointingHandCursor)
+        self._btn_update.clicked.connect(self._on_update_clicked)
+        self._btn_update.setToolTip(
+            "git 拉取 H3 引擎最新代码（用户资产与密钥不会被覆盖）")
+        btn_col.addWidget(self._btn_update)
         launch_layout.addLayout(btn_col)
 
         # === 段2: 环境信息 ===
@@ -320,10 +333,12 @@ class H3Page(BasePage):
         self._state_item = self._create_info_item("状态", "…", "🔎")
         self._version_item = self._create_info_item("引擎版本", "…", "🏷")
         self._asset_item = self._create_info_item("资产库", "…", "📦")
+        self._keys_item = self._create_info_item("LLM 密钥", "…", "🔑")
         self._settings_item = self._create_info_item("设置文件", "…", "⚙")
         card_layout.addWidget(self._state_item)
         card_layout.addWidget(self._version_item)
         card_layout.addWidget(self._asset_item)
+        card_layout.addWidget(self._keys_item)
         card_layout.addWidget(self._settings_item)
         info_layout.addWidget(self._info_card, 1)
 
@@ -419,7 +434,7 @@ class H3Page(BasePage):
         return STATE_READY
 
     def _deps_cached(self) -> dict:
-        """依赖闸门 (带缓存): 入口 / 该环境 python / MieNodes 资产库 / mie_* 依赖."""
+        """依赖闸门 (带缓存): 入口 / 该环境 python / 资产库目录 / mie_* 依赖."""
         avail = self._availability()
         root = avail.get("root")
         if not root:
@@ -480,33 +495,48 @@ class H3Page(BasePage):
             STATE_CHECKING: "检测中…",
             STATE_STARTING: "启动中…",
             STATE_STOPPING: "停止中…",
+            STATE_DOWNLOADING: "下载中…",
+            STATE_INSTALLING_DEPS: "安装依赖中…",
+            STATE_UPDATING: "更新中…",
         }
         self._set_info_item_value(self._state_item,
                                  _STATUS_TXT.get(self._state, self._state),
                                  is_error=self._state in (STATE_NOT_INSTALLED, STATE_NO_DEPS))
         self._set_info_item_value(self._version_item, ver_txt)
 
-        mie_nodes = paths.get("mie_nodes")
+        library = paths.get("asset_library")
         self._set_info_item_value(
             self._asset_item,
-            str(mie_nodes) if mie_nodes else "未找到 (当前环境无 MieNodes 资产库)",
-            is_error=not bool(mie_nodes))
+            str(library) if library else "未解析",
+            is_error=not bool(library))
+        keys = paths.get("keys_file")
+        keys_ok = bool(keys) and os.path.exists(str(keys))
+        self._set_info_item_value(
+            self._keys_item,
+            (str(keys) if keys else "未解析") + ("" if keys_ok else " (未填写)"),
+            is_error=not keys_ok)
         settings = paths.get("settings_file")
         self._set_info_item_value(self._settings_item,
                                  str(settings) if settings else "未解析")
 
         _BTN_TEXT = {
-            STATE_NOT_INSTALLED: "⊘ 当前环境无此服务",
-            STATE_NO_DEPS: "⚠ 依赖缺失 (整合包不完整)",
+            STATE_NOT_INSTALLED: "⬇ 下载 H3 引擎",
+            STATE_NO_DEPS: "⚙ 安装依赖",
             STATE_READY: "🚀 一键启动",
             STATE_RUNNING: "⏹ 停止",
             STATE_CHECKING: "⏳ 检测中…",
             STATE_STARTING: "⏳ 启动中…",
             STATE_STOPPING: "⏳ 停止中…",
+            STATE_DOWNLOADING: "⬇ 下载中…",
+            STATE_INSTALLING_DEPS: "⚙ 安装依赖中…",
+            STATE_UPDATING: "⏳ 更新中…",
         }
         self._btn_primary.setText(_BTN_TEXT.get(self._state, "…"))
         self._btn_primary.setEnabled(not self._is_busy())
         self._btn_open.setEnabled(self._state == STATE_RUNNING)
+        # 更新只在「已安装且没在跑」时可用 (跑着更新会换掉正在用的代码)
+        self._btn_update.setEnabled(self._state in (STATE_READY, STATE_NO_DEPS)
+                                    and not self._is_busy())
         # 端口编辑: 运行中禁改 (改了也不生效, 徒增困惑)
         self._port_edit.setEnabled(self._state != STATE_RUNNING)
 
@@ -515,10 +545,187 @@ class H3Page(BasePage):
     def _on_primary_clicked(self):
         if self._is_busy():
             return
-        if self._state == STATE_READY:
+        if self._state == STATE_NOT_INSTALLED:
+            self._download_h3()
+        elif self._state == STATE_NO_DEPS:
+            self._setup_deps()
+        elif self._state == STATE_READY:
             self._start_service()
         elif self._state == STATE_RUNNING:
             self._stop_service()
+
+    # ---------------- 下载 / 依赖 / 更新 ----------------
+
+    def _download_h3(self):
+        """下载 H3 引擎本体 (git clone 到 custom_nodes 下)."""
+        self._set_state(STATE_DOWNLOADING)
+
+        def runner(on_progress):
+            res = self._mgr().install(on_progress=on_progress)
+            return {"ok": bool(res.get("ok")),
+                    "error": res.get("error") or "",
+                    "already_exists": bool(res.get("already_exists"))}
+
+        def on_done(result):
+            self._after_install("下载失败: " + (result.get("error") or "未知")
+                                if not result.get("ok") else "下载完成")
+
+        self._run_with_progress("下载 H3 引擎", runner, on_done)
+
+    def _setup_deps(self):
+        """装 pip 依赖 (进该环境的 embedded python)."""
+        self._set_state(STATE_INSTALLING_DEPS)
+
+        def runner(on_progress):
+            res = self._mgr().setup(on_progress=on_progress)
+            missing = res.get("deps_missing") or []
+            failed = res.get("deps_failed") or []
+            return {"ok": bool(res.get("ok")),
+                    "error": res.get("deps_error") or res.get("error") or "",
+                    "missing": missing, "failed": failed}
+
+        def on_done(result):
+            if result.get("ok"):
+                self._after_install("依赖安装完成")
+                return
+            detail = []
+            if result.get("missing"):
+                detail.append("装不上: " + ", ".join(result["missing"]))
+            if result.get("failed"):
+                detail.append("失败: " + ", ".join(
+                    str(f.get("spec") or f) for f in result["failed"]))
+            msg = "依赖安装失败"
+            if detail:
+                msg += "\n\n" + "\n".join(detail)
+            self._after_install(msg)
+
+    def _on_update_clicked(self):
+        """更新引擎本体 (git fetch + reset --hard)."""
+        if self._is_busy():
+            return
+        avail = self._availability()
+        if not avail["available"]:
+            DialogHelper.show_warning(self, "无法更新", "当前环境没有 H3 引擎，请先下载。")
+            return
+        root = avail.get("root")
+        if root and not (Path(root) / ".git").exists():
+            DialogHelper.show_warning(self, "无法更新",
+                                      "H3 引擎目录不是 git 仓库，无法更新。")
+            return
+
+        def runner(on_progress):
+            res = self._mgr().update(on_progress=on_progress)
+            return {"ok": bool(res.get("ok")),
+                    "updated": bool(res.get("updated")),
+                    "error": res.get("error") or ""}
+
+        def on_done(result):
+            self._after_install("更新失败: " + (result.get("error") or "未知")
+                                if not result.get("ok") else "更新完成")
+
+        self._run_with_progress("更新 H3 引擎", runner, on_done)
+
+    @QtCore.pyqtSlot(str)
+    def _after_install(self, msg: str):
+        """下载/装依赖/更新完成回主线程: 失败给「关闭 / 立即重试」两按钮."""
+        self._reset_deps_cache()
+        if msg.startswith("下载失败") or msg.startswith("更新失败") \
+                or msg.startswith("依赖安装失败"):
+            try:
+                from ui_qt.widgets.custom_confirm_dialog import CustomConfirmDialog
+                dlg = CustomConfirmDialog(
+                    parent=self,
+                    title="H3 短剧工作台操作失败",
+                    content=msg + "\n\n可以关闭 (手动检查网络 / 镜像) 或 立即重试.",
+                    buttons=[{"text": "关闭", "role": "normal"},
+                             {"text": "立即重试", "role": "primary"}],
+                    default_index=1,
+                    theme_manager=self.theme_manager,
+                )
+                dlg.exec_()
+                retry = (dlg.get_result() == 1)
+            except Exception:
+                retry = False
+            self._set_state(self._detect_state())
+            if retry:
+                try:
+                    self._on_primary_clicked()
+                except Exception:
+                    pass
+            return
+        self._set_state(self._detect_state())
+
+    def _run_with_progress(self, task_title, runner, on_done_slot, parent=None):
+        """后台任务调度 helper (复刻 webui_page._run_with_progress).
+
+        弹进度窗 + 注册后台任务 + on_progress 派发; on_done_slot 必须回主线程
+        (会动 _set_state / DialogHelper 等 Qt widgets).
+        """
+        from ui_qt.widgets.progress_dialog import ProgressDialog
+
+        parent = parent or self.app
+        registry = getattr(self.app, "_bg_task_registry", None)
+        task_id = registry.register(task_title) if registry else None
+        if isinstance(parent, QtWidgets.QWidget):
+            pd = ProgressDialog(
+                parent, title=task_title,
+                theme_manager=getattr(self, "theme_manager", None),
+                show_cancel=False, show_background=True,
+            )
+            pd.show()
+            QtWidgets.QApplication.processEvents()
+            if registry and task_id:
+                registry.set_dialog(task_id, pd)
+        else:
+            pd = None
+
+        def _apply_progress(text, percent):
+            if pd is None:
+                return
+            try:
+                pd.set_status(text)
+                pd.set_progress(percent if percent is not None else None)
+            except Exception:
+                pass
+
+        def on_progress(text, percent=None):
+            _ui_post = getattr(self.app, "ui_post", None)
+            if _ui_post:
+                _ui_post(lambda: _apply_progress(text, percent))
+
+        def _do_finish(success):
+            if registry and task_id:
+                try:
+                    registry.complete(task_id, error=not success)
+                except Exception:
+                    pass
+            if pd is not None:
+                try:
+                    pd.mark_complete("完成 ✓" if success else "完成(有失败)")
+                    pd.close()
+                except Exception:
+                    pass
+
+        def _finish(success, result):
+            _ui_post = getattr(self.app, "ui_post", None)
+            if _ui_post:
+                _ui_post(lambda: _do_finish(success))
+                _ui_post(lambda: on_done_slot(result))
+            else:
+                _do_finish(success)
+                on_done_slot(result)
+
+        def _worker():
+            result = None
+            try:
+                result = runner(on_progress)
+            except Exception as e:
+                result = {"ok": False, "error": str(e) or e.__class__.__name__}
+            success = bool(result and result.get("ok"))
+            _finish(success, result)
+
+        import threading
+        threading.Thread(target=_worker, daemon=True).start()
 
     def _start_service(self):
         self._set_state(STATE_STARTING)
@@ -760,6 +967,7 @@ class H3Page(BasePage):
         primary_ss = styles.primary_button_style()
         self._btn_primary.setStyleSheet(primary_ss)
         self._btn_open.setStyleSheet(primary_ss)
+        self._btn_update.setStyleSheet(styles.secondary_button_style())
         self._btn_log_clear.setStyleSheet(styles.secondary_button_style())
         self._btn_log_open.setStyleSheet(styles.secondary_button_style())
         self._port_edit.setStyleSheet(input_ss)

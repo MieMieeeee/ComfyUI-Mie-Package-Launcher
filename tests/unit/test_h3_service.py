@@ -166,7 +166,11 @@ def test_manager_status_reports_health_when_running(tmp_path, monkeypatch):
 def test_cli_info_uses_selected_runtime_deps(tmp_path, capsys):
     """service info h3-engine 的依赖检查走 h3_runtime (不是 openjutsu)."""
     from core.cli.cmd_service import run
-    pkg = _mk_pkg(tmp_path, with_mie_nodes=False)
+    pkg = _mk_pkg(tmp_path)
+    # 去掉环境的 python → 依赖检查应报「python 不可用」这类 H3 自己的缺项,
+    # 而不是 openjutsu 的 node / .proxy-site
+    import shutil
+    shutil.rmtree(pkg / "python_embeded", ignore_errors=True)
     app = _App(cwd=tmp_path, cfg=_cfg(pkg))
     args = SimpleNamespace(service_action="info", service_id="h3-engine",
                            json=True, env=None)
@@ -176,9 +180,9 @@ def test_cli_info_uses_selected_runtime_deps(tmp_path, capsys):
     payload = json.loads(capsys.readouterr().out)
     assert payload["service_id"] == "h3-engine"
     assert payload["runtime"] == "h3-engine"
-    # 缺 MieNodes → 依赖缺失, 且报的是 H3 的缺项 (不是 openjutsu 的 node)
     assert payload["deps_ok"] is False
-    assert any("MieNodes" in m for m in payload["deps_missing"])
+    assert any("python" in m for m in payload["deps_missing"])
+    assert not any("node" in m or ".proxy-site" in m for m in payload["deps_missing"])
 
 
 def test_cli_stop_passes_env_to_manager(tmp_path):
@@ -213,3 +217,77 @@ def test_cli_logs_target_includes_h3_engine():
     path = resolve_log_path(app, "h3-engine")
     assert path is not None
     assert path.name == "h3-engine.log"
+
+
+# ---------------- 安装链 (下载 / 依赖) ----------------
+
+def _make_local_repo(tmp_path: Path) -> Path:
+    """造一个本地 git 仓库当下载源 (不起网络)."""
+    import subprocess
+    repo = tmp_path / "src_repo"
+    repo.mkdir()
+    (repo / "webapp").mkdir()
+    (repo / "webapp" / "__main__.py").write_text("# entry", encoding="utf-8")
+    (repo / "requirements.txt").write_text("flask>=3.0\n", encoding="utf-8")
+    (repo / ".gitignore").write_text("asset_library/\nmie_llm_keys.json\n",
+                                     encoding="utf-8")
+    env = {"GIT_AUTHOR_NAME": "t", "GIT_AUTHOR_EMAIL": "t@t",
+           "GIT_COMMITTER_NAME": "t", "GIT_COMMITTER_EMAIL": "t@t",
+           "PATH": os.environ.get("PATH", "")}
+    for args in (["init", "-q", "."], ["add", "-A"], ["commit", "-qm", "init"]):
+        r = subprocess.run(["git", *args], cwd=str(repo), capture_output=True,
+                           env=env, timeout=60)
+        assert r.returncode == 0, r.stderr
+    return repo
+
+
+def test_manager_install_clones_engine(tmp_path):
+    """install: 真 clone 到 <包根>/ComfyUI/custom_nodes/ 下."""
+    from core.companion import h3_runtime
+    pkg = _mk_pkg(tmp_path)
+    repo = _make_local_repo(tmp_path)
+    app = _App(tmp_path, _cfg(pkg))
+    m = _mgr(app)
+    # 把仓库地址指到本地源 (spec 的默认是 GitHub)
+    import core.companion.spec as spec_mod
+    orig = spec_mod.H3_ENGINE_SPEC.repo_url
+    try:
+        object.__setattr__(spec_mod.H3_ENGINE_SPEC, "repo_url", str(repo))
+        res = m.install()
+    finally:
+        object.__setattr__(spec_mod.H3_ENGINE_SPEC, "repo_url", orig)
+    assert res["ok"] is True, res.get("error")
+    target = pkg / "ComfyUI" / "custom_nodes" / "ComfyUI-Mie-H3-Engine"
+    assert (target / "webapp" / "__main__.py").exists()
+    # 装完不建空的 asset_library (那会遮住老用户的资产)
+    assert not (target / "asset_library").exists()
+
+
+def test_manager_install_is_idempotent(tmp_path):
+    """已装 → 再 install 不重下, 也不删目录."""
+    pkg = _mk_pkg(tmp_path)
+    repo = _make_local_repo(tmp_path)
+    app = _App(tmp_path, _cfg(pkg))
+    m = _mgr(app)
+    import core.companion.spec as spec_mod
+    orig = spec_mod.H3_ENGINE_SPEC.repo_url
+    try:
+        object.__setattr__(spec_mod.H3_ENGINE_SPEC, "repo_url", str(repo))
+        first = m.install()
+        second = m.install()
+    finally:
+        object.__setattr__(spec_mod.H3_ENGINE_SPEC, "repo_url", orig)
+    assert first["ok"] is True
+    assert second["ok"] is True
+    assert second.get("already_exists") is True
+    target = pkg / "ComfyUI" / "custom_nodes" / "ComfyUI-Mie-H3-Engine"
+    assert (target / "webapp" / "__main__.py").exists()
+
+
+def test_cli_install_and_setup_actions_exist():
+    """CLI 有 install / setup 两个 action (与 webui 同构)."""
+    from core.cli.cmd_service import SERVICE_ACTIONS
+    assert "install" in SERVICE_ACTIONS
+    assert "setup" in SERVICE_ACTIONS
+    from core.cli.parser import SERVICE_ACTIONS as PARSER_ACTIONS
+    assert set(PARSER_ACTIONS) == set(SERVICE_ACTIONS)

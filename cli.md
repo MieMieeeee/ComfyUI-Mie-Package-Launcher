@@ -356,21 +356,22 @@ comfyui-launcher service list [--json]
 comfyui-launcher service <ACTION> <SERVICE_ID> [flags]
 ```
 
-`ACTION` ∈ `start / stop / status / info / restart / update`；`SERVICE_ID` ∈ `webui / openjutsu / h3-engine`（内置注册表 `core/companion/spec.py`）。
+`ACTION` ∈ `start / stop / status / info / restart / install / setup / update`；`SERVICE_ID` ∈ `webui / openjutsu / h3-engine`（内置注册表 `core/companion/spec.py`）。
 `service ... webui` 转发老 `webui` 子命令实现（strangler：webui 运行时本期不在新框架上，行为/退出码一致）。
 
 openjutsu（`requires_comfyui`）：`start` 前 ComfyUI 必须在跑，否则退 6（不强启动，自动起走 GUI 一键启动）；三进程链 `npm build → proxy(8197) → app(8198)`，pidfile 是 v2 多进程格式（`launcher/openjutsu.pid`），日志三路合一（`launcher/openjutsu.log`，`[build]/[proxy]/[app]` 前缀）。
 
-h3-engine（H3 短剧工作台）：ComfyUI-Mie-H3-Engine 自带的 Flask 工作台，单进程（`<环境 python> -u <插件根>/webapp/__main__.py`），端口 8200（覆盖键 `services.h3-engine.port`）。**不要求 ComfyUI 在跑**（工作台离线也能管资产/剧本，只有提交渲染才需要 ComfyUI），所以 `requires_comfyui=false`、也不会被 `stop_orphan_companions` 顺手停掉。就绪判据比端口更严：`GET /api/health` 要回 `status=ok` 且 `app=comfyui-mie-web`。日志直写文件（`launcher/h3-engine.log`），CLI 起完退出后服务照样能写日志。
+h3-engine（H3 短剧工作台）：ComfyUI-Mie-H3-Engine 自带的 Flask 工作台，单进程（`<环境 python> -u <插件根>/webapp/__main__.py`），端口 8200（覆盖键 `services.h3-engine.port`）。**不要求 ComfyUI 在跑**（工作台离线也能管资产/剧本，只有提交渲染才需要 ComfyUI），所以 `requires_comfyui=false`、也不会被 `stop_orphan_companions` 顺手停掉。就绪判据比端口更严：`GET /api/health` 要回 `status=ok` 且 `app=comfyui-mie-web`。日志直写文件（`launcher/h3-engine.log`），CLI 起完退出后服务照样能写日志。安装链与 WebUI 工作台同构：`install` = clone 引擎（目录已有内容则跳过，**不删用户数据**）；`setup` = 把引擎的 `requirements.txt` 装进该环境的 embedded python；`update` = `git fetch + reset --hard`（**用户的资产库与密钥不会被覆盖**：引擎仓库 .gitignore 已排除它们，更新前还会再体检一次）。
 
 | flag | 默认 | 说明 |
 |---|---|---|
 | `--env ENV_ID` | 激活环境 | 一次性环境覆盖（同全局约定，agent 默认不传）；`service` 的 stop/status/info **也认**它 |
+| `--url URL` | (服务声明的仓库地址) | install 时用这个 git URL 覆盖默认 |
 | `--no-wait` | off | start：spawn 完即返，不等端口就绪 |
 | `--timeout SEC` | 120 | start 等待端口就绪的最大秒数（openjutsu 含 npm build，别压太低） |
 | `--force` | off | stop：跳过优雅终止，直接进程树强杀 |
 
-**Exit codes:** `0` 成功（已在跑也返 0，`already_running=true` 幂等）/ `1` 通用（端口被占、spawn 失败、超时）/ `3` status 未在跑 / `6` ComfyUI 未跑（requires_comfyui 服务）/ `7` 未安装或环境无此服务 / `8` 依赖缺失（openjutsu: node / .proxy-site / node_modules；h3-engine: 入口 / 该环境 python / MieNodes 资产库 / mie_llm·mie_craft·mie_prompt·soundfile·flask 依赖）。
+**Exit codes:** `0` 成功（已在跑也返 0，`already_running=true` 幂等）/ `1` 通用（端口被占、spawn 失败、超时）/ `3` status 未在跑 / `6` ComfyUI 未跑（requires_comfyui 服务）/ `7` 未安装或环境无此服务 / `8` 依赖缺失（openjutsu: node / .proxy-site / node_modules；h3-engine: 入口 / 该环境 python / 资产库目录 / mie_llm·mie_craft·mie_prompt·soundfile·flask 依赖）。
 
 **Output schema（--json 单行，字段见 `service --help` epilog）:**
 - `list`：`services: [{id, name, runtime, requires_comfyui, available, running}]`

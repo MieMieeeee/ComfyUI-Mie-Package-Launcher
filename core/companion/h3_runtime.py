@@ -1,4 +1,4 @@
-"""H3 短剧工作台的 runtime: 路径解析 / 命令构建 / 依赖闸门 / 健康探针.
+"""H3 短剧工作台的 runtime: 路径解析 / 命令构建 / 依赖闸门 / 健康探针 / 安装链.
 
 服务形态 (2026-11-18 接入):
   H3 Engine (ComfyUI 自定义节点) 里带一个 Flask 工作台 (webapp/__main__.py),
@@ -6,9 +6,8 @@
 
   引擎侧 (F:/ComfyUI-Mie-H3-Engine/webapp/config.py) 认的环境变量:
     MIE_WEB_PORT / MIE_WEB_HOST / MIE_COMFYUI_ROOT / MIE_COMFYUI_URL /
-    MIE_PLUGIN_ROOT / MIE_LLM_KEYS_FILE / MIE_WEB_SETTINGS
-  全部在这里注入 —— 引擎侧的默认值里有**别的机器的硬编码绝对路径**
-  (如 MIE_PLUGIN_ROOT 兜底到 C:\\PP\\V9\\...\\comfyui_mienodes), 不显式注入
+    MIE_PLUGIN_ROOT / MIE_ASSET_LIBRARY / MIE_LLM_KEYS_FILE / MIE_WEB_SETTINGS
+  全部在这里注入 —— 引擎侧的默认值里有**别的机器的硬编码绝对路径**, 不显式注入
   就会读到别的整合包的资产库, 甚至把 LLM 密钥写回去 (webapp/services/llm.py
   会写 mie_llm_keys.json). 所以这几个变量是**必填**, 不是可选优化.
 
@@ -16,6 +15,13 @@
   - 解释器必须是**该环境 ComfyUI 的 embedded python**: mie_craft / mie_llm /
     mie_prompt / soundfile 都装在 <包根>/python_embeded 的 site-packages 里,
     换启动器自带的 python 会 import 不到 (依赖闸门会拦).
+  - **资产库归 H3 引擎自己** (2026-11-18 定): 用户的角色/场景/分镜与 LLM 密钥
+    住在 <插件根>/asset_library 与 <插件根>/mie_llm_keys.json, **不依赖 MieNodes
+    资产包**. 老布局 (资产还在同级 MieNodes 目录) 也兼容: 引擎目录里没有
+    asset_library 时, 资产归属回落到那个 sibling.
+  - 资产与密钥必须**不被 git 跟踪** —— 更新走 fetch + reset --hard, 被跟踪的
+    文件会被还原回仓库版本. 引擎仓库的 .gitignore 已排除这两个路径, 启动器的
+    更新流程还会再体检一次 (installer.protect_user_data).
   - 设置/任务/快照落在 <包根>/launcher/h3-engine/ 下 (MIE_WEB_SETTINGS 指定的
     文件所在目录), **按环境分开** —— 换环境时设置与任务列表跟着换.
   - 启动命令按**未 resolve 的插件根**拼: 命令行里带各环境自己的路径文本,
@@ -33,10 +39,12 @@ from typing import Any, Dict, List, Optional
 H3_DIR_NAME = "ComfyUI-Mie-H3-Engine"
 # 工作台入口 (相对插件根)
 H3_ENTRY_REL = "webapp/__main__.py"
-# MieNodes 资产库目录名 (三种历史命名都见过: comfyui_mienodes / ComfyUI_MieNodes /
-# ComfyUI-MieNodes —— 见引擎侧 webapp/config.py::_find_asset_pack)
+# MieNodes 资产包目录名 (三种历史命名都见过) —— 只用于**老布局兼容**:
+# 用户的资产曾经放在那个包里 (220MB), 现在归引擎自己.
 MIE_NODES_NAMES = ("comfyui_mienodes", "ComfyUI_MieNodes", "ComfyUI-MieNodes")
-# LLM 密钥文件名 (在 MieNodes 资产库根下)
+# 用户数据在插件根下的名字
+ASSET_LIBRARY_NAME = "asset_library"
+# LLM 密钥文件名 (在资产归属根下)
 LLM_KEYS_NAME = "mie_llm_keys.json"
 # 工作台自己的设置/任务/快照目录 (相对包根) —— 按环境分开
 SETTINGS_DIR_REL = ("launcher", "h3-engine")
@@ -101,21 +109,25 @@ def resolve_env_python(pkg_root: Path, configured: Optional[str]) -> Path:
     return Path(pkg_root) / "python_embeded" / "python.exe"
 
 
-def _find_mie_nodes(pkg_root: Path) -> Optional[Path]:
-    """当前环境的 MieNodes 资产库 (custom_nodes 下, 三种命名都认)."""
-    custom_nodes = Path(pkg_root) / "ComfyUI" / "custom_nodes"
+def _find_asset_owner(root: Path) -> Path:
+    """资产库归谁 —— 返回「拥有 asset_library 的那个目录」.
+
+    2026-11-18 起: 资产库归 **H3 引擎自己** (<插件根>/asset_library). 引擎目录
+    里没有 asset_library 时 (老布局: 资产还在同级的 MieNodes 资产包里), 回落
+    到那个 sibling —— 这样老用户不用搬数据也能继续用, 而新装的引擎自带一个
+    干净的空库.
+
+    找不到任何已有资产库 → 归引擎自己 (启动器/网页会负责建目录).
+    """
+    root = Path(root)
+    if (root / ASSET_LIBRARY_NAME).is_dir():
+        return root
+    custom_nodes = root.parent
     for name in MIE_NODES_NAMES:
         cand = custom_nodes / name
-        if cand.is_dir():
+        if (cand / ASSET_LIBRARY_NAME).is_dir():
             return cand
-    # 兜底: custom_nodes 下任何含 asset_library 的目录
-    try:
-        for child in sorted(custom_nodes.iterdir()):
-            if child.is_dir() and (child / "asset_library").is_dir():
-                return child
-    except Exception:
-        pass
-    return None
+    return root
 
 
 def resolve_paths(app: Any, env_id: Optional[str] = None) -> Dict[str, Any]:
@@ -141,12 +153,16 @@ def resolve_paths(app: Any, env_id: Optional[str] = None) -> Dict[str, Any]:
 
     comfyui_dir = Path(pkg_root) / "ComfyUI"
     settings_file = Path(pkg_root).joinpath(*SETTINGS_DIR_REL) / SETTINGS_FILE_NAME
+    asset_owner = _find_asset_owner(root)
     return {
         "pkg_root": Path(pkg_root),
         "root": root,
         "entry": root / "webapp" / "__main__.py",
         "py": resolve_env_python(Path(pkg_root), (paths or {}).get("python_path")),
-        "mie_nodes": _find_mie_nodes(Path(pkg_root)),
+        # 资产库归属 (引擎自己, 或老布局里的 MieNodes 资产包)
+        "asset_owner": asset_owner,
+        "asset_library": asset_owner / ASSET_LIBRARY_NAME,
+        "keys_file": asset_owner / LLM_KEYS_NAME,
         "settings_file": settings_file,
         "comfyui_root": comfyui_dir,
         "env_id": _effective_env_id(app, env_id, cfg),
@@ -183,9 +199,11 @@ def check_deps(paths: Dict[str, Any], *, timeout: int = 20) -> Dict[str, Any]:
     缺任何一项 → start 拒绝 (退出码 8):
       entry     webapp/__main__.py (引擎没装全)
       python    该环境的 embedded python 存在
-      mienodes  当前环境的 MieNodes 资产库 (**必填**: 引擎侧兜底到别的机器的
-                硬编码路径, 读错资产库还会把 LLM 密钥写回那份)
+      assets    资产库目录存在 (可为空 —— 用户还没建角色而已; 目录缺失才是问题)
       imports   flask / soundfile / mie_llm / mie_prompt / mie_craft 可导入
+
+    **不再要求 MieNodes 资产包**: 资产库归引擎自己 (见 _find_asset_owner).
+    LLM 密钥缺失只提示不拦 (用户还没填 key 时, 工作台的资产/剧本页照样能用).
     """
     missing: List[str] = []
     available: List[str] = []
@@ -202,12 +220,22 @@ def check_deps(paths: Dict[str, Any], *, timeout: int = 20) -> Dict[str, Any]:
     else:
         missing.append(f"python ({py})")
 
-    mie_nodes = paths.get("mie_nodes")
-    if mie_nodes is not None and Path(mie_nodes).is_dir():
-        available.append("mienodes")
+    library = paths.get("asset_library")
+    if library is not None and not Path(library).is_dir():
+        # 全新环境: 资产库目录还不存在 → 建一个 (空库; 用户在工作台里建自己的
+        # 角色). 只在「资产归属就是引擎自己」时建 —— 老用户的库在 MieNodes 资产
+        # 包里, 不能在这里建一个空的把它遮住.
+        owner = paths.get("asset_owner")
+        root = paths.get("root")
+        if owner is not None and root is not None and _same_dir(str(owner), str(root)):
+            try:
+                Path(library).mkdir(parents=True, exist_ok=True)
+            except Exception:
+                pass
+    if library is not None and Path(library).is_dir():
+        available.append("assets")
     else:
-        missing.append("MieNodes 资产库 (当前环境 custom_nodes 下未找到 "
-                       "comfyui_mienodes / ComfyUI_MieNodes / ComfyUI-MieNodes)")
+        missing.append("资产库目录缺失 (%s)" % library)
 
     if py is not None and Path(py).exists():
         ok, bad = _probe_imports(Path(py), timeout=timeout)
@@ -218,7 +246,18 @@ def check_deps(paths: Dict[str, Any], *, timeout: int = 20) -> Dict[str, Any]:
     else:
         missing.append("python 依赖缺失 (无法探测)")
 
-    return {"ok": not missing, "missing": missing, "available": available}
+    return {"ok": not missing, "missing": missing, "available": available,
+            "warnings": _dep_warnings(paths)}
+
+
+def _dep_warnings(paths: Dict[str, Any]) -> List[str]:
+    """不拦启动, 但值得提醒的事 (LLM 密钥没填之类)."""
+    warns: List[str] = []
+    keys = paths.get("keys_file")
+    if keys is not None and not Path(keys).exists():
+        warns.append("LLM 密钥文件不存在 (%s): 剧本/自动创作要调 LLM 平台时会失败, "
+                     "可以照着 .example 模板填一份" % keys)
+    return warns
 
 
 # ---------------- 命令构建 ----------------
@@ -249,10 +288,13 @@ def build_steps(paths: Dict[str, Any], ports: Dict[str, int],
     env["MIE_WEB_HOST"] = DEFAULT_HOST
     env["MIE_COMFYUI_ROOT"] = str(paths["comfyui_root"])
     env["MIE_COMFYUI_URL"] = "http://127.0.0.1:%d" % int(comfy_port)
-    mie_nodes = paths.get("mie_nodes")
-    if mie_nodes is not None:
-        env["MIE_PLUGIN_ROOT"] = str(mie_nodes)
-        env["MIE_LLM_KEYS_FILE"] = str(Path(mie_nodes) / LLM_KEYS_NAME)
+    # 资产归属: MIE_PLUGIN_ROOT = 拥有资产库的那个目录 (引擎自己, 或老布局里的
+    # MieNodes 资产包); MIE_ASSET_LIBRARY 显式给同一个库, 免得网页侧与
+    # ComfyUI 节点侧解析到两个不同的库.
+    owner = paths.get("asset_owner") or root
+    env["MIE_PLUGIN_ROOT"] = str(owner)
+    env["MIE_ASSET_LIBRARY"] = str(paths.get("asset_library") or (owner / ASSET_LIBRARY_NAME))
+    env["MIE_LLM_KEYS_FILE"] = str(paths.get("keys_file") or (owner / LLM_KEYS_NAME))
     env["MIE_WEB_SETTINGS"] = str(paths["settings_file"])
     cmd = [str(paths["py"]), "-u", str(entry)]
     return [{"role": "app", "kind": "long", "cmd": cmd, "env": env,
@@ -296,13 +338,13 @@ def ready_probe(paths: Dict[str, Any], ports: Dict[str, int]) -> bool:
 
 
 def health_info(paths: Dict[str, Any], ports: Dict[str, int]) -> Optional[Dict[str, Any]]:
-    """详细健康信息 (给 status / 页面显示): 附 plugin_root 是否属于当前环境."""
+    """详细健康信息 (给 status / 页面显示): 附 plugin_root 归属校验."""
     port = int(ports.get("app", DEFAULT_PORT))
     payload = _health_payload(port)
     if not isinstance(payload, dict):
         return None
     info = dict(payload)
-    expected = paths.get("mie_nodes")
+    expected = paths.get("asset_owner")
     got = payload.get("plugin_root")
     if expected is not None and got:
         info["plugin_root_ok"] = _same_dir(str(got), str(expected))
@@ -345,14 +387,106 @@ def comfyui_port(app: Any) -> int:
 
 
 def update(app: Any, paths: Dict[str, Any], on_progress=None) -> Dict[str, Any]:
-    """H3 引擎本体不在这里更新 —— 它是 ComfyUI 自定义节点, 走启动器的插件管理.
+    """更新引擎本体: git fetch + reset --hard origin/HEAD (与 WebUI 工作台同语义).
 
-    引擎升级 = git pull + 重启 ComfyUI, 由插件管理页负责; 这里明确拒绝,
-    免得 agent 以为 `service update h3-engine` 能升级引擎本体.
+    **用户的资产与密钥不会被覆盖**: 引擎仓库的 .gitignore 已排除 asset_library/
+    与 mie_llm_keys.json, 更新前还会再体检一次 (installer.protect_user_data),
+    万一它们被跟踪就自动从 git 索引摘掉 —— 被跟踪的文件会被 reset --hard 还原
+    回仓库版本, 那等于把用户的 220MB 资产打回原形.
     """
+    from core.companion import installer
+    root = Path(paths["root"])
+    res = installer.pull_service(
+        app, root,
+        protected_paths=("asset_library", LLM_KEYS_NAME),
+        on_progress=on_progress,
+        logger=getattr(app, "logger", None),
+        progress_prefix="[更新 H3 引擎]",
+    )
+    out = {
+        "ok": bool(res.get("ok")),
+        "updated": bool(res.get("updated")),
+        "log": res.get("log") or "",
+        "error": res.get("error"),
+    }
+    if out["ok"]:
+        # 更新完引擎, 资产归属可能变了 (老布局 → 新布局)
+        try:
+            paths["asset_owner"] = _find_asset_owner(root)
+            paths["asset_library"] = paths["asset_owner"] / ASSET_LIBRARY_NAME
+            paths["keys_file"] = paths["asset_owner"] / LLM_KEYS_NAME
+        except Exception:
+            pass
+    return out
+
+
+# ---------------- 安装链 (下载 / 依赖) ----------------
+
+def install(app: Any, paths: Dict[str, Any], on_progress=None,
+            repo_url: Optional[str] = None) -> Dict[str, Any]:
+    """下载引擎本体 (git clone 到 <插件根>).
+
+    不装 MieNodes —— 资产库归引擎自己. clone 完会把资产库目录建好 (空的也
+    行, 用户在工作台里建自己的角色).
+    """
+    from core.companion import installer
+    from core.companion.spec import H3_ENGINE_SPEC
+
+    root = Path(paths["root"])
+    url = (repo_url or "").strip() or H3_ENGINE_SPEC.repo_url
+    res = installer.clone_service(
+        app, root,
+        repo_url=url,
+        entry_markers=H3_ENGINE_SPEC.entry_markers,
+        on_progress=on_progress,
+        logger=getattr(app, "logger", None),
+        progress_prefix="[下载 H3 引擎]",
+    )
+    out = {
+        "ok": bool(res.get("ok")),
+        "cloned": bool(res.get("ok")) and not res.get("already_exists"),
+        "already_exists": bool(res.get("already_exists")),
+        "log": res.get("log") or "",
+        "error": res.get("error"),
+    }
+    if out["ok"]:
+        try:
+            # **不建**空的 asset_library: 建了就等于宣示「资产归引擎」,
+            # 老用户 (资产还在同级 MieNodes 资产包里, 实测 220MB) 的库会被
+            # 遮住. 空库等真要用时由 check_deps 建 (那才是全新环境).
+            keys = root / LLM_KEYS_NAME
+            example = root / (LLM_KEYS_NAME + ".example")
+            if not keys.exists() and example.exists():
+                keys.write_text(example.read_text(encoding="utf-8"),
+                                encoding="utf-8")
+        except Exception:
+            pass
+    return out
+
+
+def setup(app: Any, paths: Dict[str, Any], on_progress=None) -> Dict[str, Any]:
+    """装依赖: 把引擎的 requirements.txt 装进该环境的 embedded python.
+
+    逐包容错 (utils.pip.install_requirements_file), 一个包装不上不影响别的.
+    """
+    from core.companion import installer
+    from core.companion.spec import H3_ENGINE_SPEC
+
+    root = Path(paths["root"])
+    req_rel = H3_ENGINE_SPEC.requirements_file or "requirements.txt"
+    req = root / req_rel
+    res = installer.install_requirements(
+        app, Path(paths["py"]), req,
+        on_progress=on_progress,
+        logger=getattr(app, "logger", None),
+    )
     return {
-        "ok": False,
-        "updated": False,
-        "error": "H3 引擎本体是 ComfyUI 自定义节点, 请在「插件管理」里更新它; "
-                 "本命令只管工作台服务的启停.",
+        "ok": bool(res.get("ok")),
+        "deps_ok": bool(res.get("ok")),
+        "deps_installed": res.get("installed") or [],
+        "deps_satisfied": res.get("satisfied") or [],
+        "deps_missing": res.get("missing") or [],
+        "deps_failed": res.get("failed") or [],
+        "deps_error": res.get("error"),
+        "error": res.get("error"),
     }

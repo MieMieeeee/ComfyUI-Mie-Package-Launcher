@@ -92,6 +92,23 @@ class ServiceSpec:
     "h3-engine" 走 core/companion/h3_runtime;
     "webui-legacy" 转发老五件套 (本期 webui 的形态)."""
 
+    repo_url: str = ""
+    """「下载安装」用的 git 地址 (空 = 该服务不提供下载安装, 未安装就是未安装)."""
+
+    mirrors: Mapping[str, str] = field(default_factory=dict)
+    """仓库镜像表 ({"gitee": ..., "github": ...}); 空 = 只有 repo_url 一个源."""
+
+    requirements_file: str = ""
+    """依赖清单相对 root 的路径 (如 "requirements.txt"); 空 = 该服务不装 pip 依赖."""
+
+    protected_paths: Tuple[str, ...] = ()
+    """root 下**不能被 git 跟踪**的用户数据 (相对 root).
+
+    更新走 fetch + reset --hard, 而 reset --hard 会把**被跟踪**的文件还原回仓库
+    版本 —— 用户的资产库 / 密钥若被跟踪, 更新一次就没了. installer.pull_service
+    更新前会先体检, 发现被跟踪就自动 `git rm --cached` 摘出索引.
+    """
+
 
 # ---------------- 内置注册表 ----------------
 
@@ -157,6 +174,14 @@ H3_ENGINE_SPEC = ServiceSpec(
     requires_comfyui=False,
     browser_url_role="app",
     runtime="h3-engine",
+    # 「下载安装」: clone 引擎本体 + 装它的 pip 依赖 (进该环境的 embedded python).
+    # **不装 MieNodes** —— 引擎的资产库归自己 (asset_library), MieNodes 只是
+    # 老布局下资产曾经待过的地方.
+    repo_url="https://github.com/MieMieeeee/ComfyUI-Mie-H3-Engine.git",
+    mirrors={"github": "https://github.com/MieMieeeee/ComfyUI-Mie-H3-Engine.git"},
+    requirements_file="requirements.txt",
+    # 用户的角色/场景/分镜与 LLM 密钥住在插件目录里 —— 更新时绝不能被覆盖
+    protected_paths=("asset_library", "mie_llm_keys.json"),
 )
 
 BUILTIN_SERVICES = {

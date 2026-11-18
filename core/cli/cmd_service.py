@@ -33,7 +33,8 @@ from core.cli.output import format_human, format_json
 
 __all__ = ["run", "SERVICE_ACTIONS"]
 
-SERVICE_ACTIONS = ["list", "start", "stop", "status", "info", "restart", "update"]
+SERVICE_ACTIONS = ["list", "start", "stop", "status", "info", "restart",
+                   "install", "setup", "update"]
 
 
 def _known_services() -> dict:
@@ -189,6 +190,36 @@ def _do_restart(app, args) -> dict:
     }
 
 
+def _do_install(app, args) -> dict:
+    """install: 下载服务本体 (runtime 提供 install 钩子时)."""
+    service_id = args.service_id
+    if _is_legacy(service_id):
+        from core.cli import cmd_webui
+        res = cmd_webui._do_install(app, args)
+        res["service"] = service_id
+        return res
+    from core.companion.manager import CompanionServiceManager
+    m = CompanionServiceManager(app, service_id, env_id=getattr(args, "env", None))
+    res = m.install(repo_url=getattr(args, "url", None))
+    res["service"] = service_id
+    return res
+
+
+def _do_setup(app, args) -> dict:
+    """setup: 装服务运行依赖 (runtime 提供 setup 钩子时)."""
+    service_id = args.service_id
+    if _is_legacy(service_id):
+        from core.cli import cmd_webui
+        res = cmd_webui._do_setup(app, args)
+        res["service"] = service_id
+        return res
+    from core.companion.manager import CompanionServiceManager
+    m = CompanionServiceManager(app, service_id, env_id=getattr(args, "env", None))
+    res = m.setup()
+    res["service"] = service_id
+    return res
+
+
 def _do_update(app, args) -> dict:
     service_id = args.service_id
     if _is_legacy(service_id):
@@ -209,6 +240,8 @@ _DISPATCH = {
     "status": _do_status,
     "info": _do_info,
     "restart": _do_restart,
+    "install": _do_install,
+    "setup": _do_setup,
     "update": _do_update,
 }
 

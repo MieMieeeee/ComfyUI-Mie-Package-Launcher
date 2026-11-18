@@ -91,9 +91,20 @@ class ServiceSpec:
   | `log_mode()` | `"file"` = 子进程直写日志文件（CLI 退出后仍能写日志）；缺省 `"pipe"`（launcher 进程内 drain 线程） |
   | `health_info(paths, ports)` | 详细健康信息（进 `status` 的 `health` 字段） |
 
-- **H3 的环境变量注入是必填**：`MIE_WEB_PORT` / `MIE_WEB_HOST`（启动器绑 127.0.0.1，引擎默认 0.0.0.0）/ `MIE_COMFYUI_ROOT` / `MIE_COMFYUI_URL` / `MIE_PLUGIN_ROOT` / `MIE_LLM_KEYS_FILE` / `MIE_WEB_SETTINGS`。引擎侧的兜底值指向**别的机器的硬编码路径**，且 `services/llm.py` 会把密钥写回那份 → 缺 MieNodes 资产库必须判依赖缺失硬失败。
+- **H3 的环境变量注入是必填**：`MIE_WEB_PORT` / `MIE_WEB_HOST`（启动器绑 127.0.0.1，引擎默认 0.0.0.0）/ `MIE_COMFYUI_ROOT` / `MIE_COMFYUI_URL` / `MIE_PLUGIN_ROOT` / `MIE_ASSET_LIBRARY` / `MIE_LLM_KEYS_FILE` / `MIE_WEB_SETTINGS`。引擎侧的兜底值原本指向**别的机器的硬编码路径**（已删），但仍要显式注入，免得读到别的环境的资产库。
 - **解释器**：必须是该环境 ComfyUI 的 embedded python（mie_* 装在它的 site-packages 里）；相对 `python_path` 按**所选包根**解析（不是 `stable_project_root()`）。
 - **设置/任务/快照**统一落在 `<包根>/launcher/h3-engine/settings.json` 所在目录（引擎侧 `webui_node.settings_path()` 同口径），按环境分开。
+- **资产库归引擎自己**（2026-11-18 核实）：H3 的代码不依赖 MieNodes 资产包（它要的是 pip 包，requirements.txt 里写明三个 authoring 包版本独立）。归属规则 = 引擎目录里有 `asset_library/` 就归引擎，否则回落同级的 MieNodes 资产包（老布局，用户的 220MB 数据在那儿，不能遮住）。资产位置在 mie_craft 里三级可配：`resolve_library_dir` → 显式参数 → `$MIE_ASSET_LIBRARY` → `<plugin_root>/asset_library` —— 引擎侧只设 `MIE_ASSET_LIBRARY`（`MIE_PLUGIN_ROOT` 是「谁拥有资产库」的全局开关，MieNodes 自己会指向它，引擎抢了会打断它）。
+
+**安装链（2026-11-18，与 WebUI 工作台同构）**：
+
+| action | 做什么 | 实现 |
+|---|---|---|
+| `install` | `git clone --depth 1` → `<包根>/ComfyUI/custom_nodes/ComfyUI-Mie-H3-Engine`；目标目录已有内容则**跳过**（不删用户数据）；走用户配置的 git 代理 | `installer.clone_service` |
+| `setup` | 引擎 `requirements.txt` 逐包容错装进该环境的 embedded python；镜像上没有的新版本自动回退官方 PyPI | `installer.install_requirements` |
+| `update` | `git fetch` + `git reset --hard origin/HEAD`；**用户资产与密钥先挪出仓库外暂存、更新完搬回** | `installer.pull_service` + `protect_user_data` |
+
+> **为什么「从索引摘除」不够**：`reset --hard` 会把索引重置成 `origin/HEAD` 的树 —— 远端历史里若含那些路径（用户曾 `git add -f` 提交过），工作树里的文件照样被还原（实测）。所以保护动作必须是「搬出工作树」。正常情况下引擎仓库的 `.gitignore` 已排除 `asset_library/` 与 `mie_llm_keys.json`，未跟踪 + 被忽略的文件不受 reset 影响。
 
 **openjutsu 的声明要点**（步骤构建在 `core/companion/openjutsu_runtime.py`）：
 
@@ -122,7 +133,8 @@ class ServiceSpec:
 | `pidstore.py` | v2 多进程 pidfile（§7） |
 | `proctree.py` | 进程树终止 + 身份门 + 端口清残（§8） |
 | `openjutsu_runtime.py` | openjutsu 的步骤/env 构建、依赖闸门、update 链（§10） |
-| `h3_runtime.py` | H3 短剧工作台的路径解析/依赖闸门/命令构建/健康探针（2026-11-18） |
+| `h3_runtime.py` | H3 短剧工作台的路径解析/依赖闸门/命令构建/健康探针/**安装链**（2026-11-18） |
+| `installer.py` | **通用安装器**（2026-11-18）：`clone_service` / `pull_service` / `protect_user_data` / `install_requirements` —— 从 `core/webui_installer.py` 泛化，webui 之后迁到本框架时直接复用 |
 | `core/cli/cmd_service.py` | `service` 命令族（§9） |
 
 不依赖 PyQt5（与 `WebuiProcessManager` 同一约束），CLI/GUI 复用；app 耦合仍走鸭子属性（`app._cwd / app.config / app.logger / app.get_active_paths / app.services`），`HeadlessAppContext` 已全部提供（headless_app.py:121-231），零新增 app 接口。
