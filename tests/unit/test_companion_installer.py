@@ -153,22 +153,19 @@ def test_pull_service_keeps_user_data_after_reset(tmp_path, git_repo):
     _git(git_repo, "add", "-f", "asset_library/hero.json", "mie_llm_keys.json")
     _git(git_repo, "commit", "-qm", "tracked user data")
 
+    target = tmp_path / "dst"
+    _git(tmp_path, "clone", "-q", str(git_repo), str(target))
+
     # 源仓库再推一个新提交 (模拟远端有新版本)
     (git_repo / "webapp" / "__main__.py").write_text("# entry v2", encoding="utf-8")
     _git(git_repo, "add", "-A")
     _git(git_repo, "commit", "-qm", "v2")
 
-    # 目标仓库 = 源的一个 clone
-    target = tmp_path / "dst"
-    _git(tmp_path, "clone", "-q", str(git_repo), str(target))
     # 用户数据在目标里 (且被跟踪 —— 最坏情况)
     tlib = target / "asset_library"
     tlib.mkdir(exist_ok=True)
     (tlib / "hero.json").write_text("{\"mine\": true}", encoding="utf-8")
     (target / "mie_llm_keys.json").write_text("{\"key\": \"secret\"}", encoding="utf-8")
-    _git(target, "add", "-f", "asset_library/hero.json", "mie_llm_keys.json")
-    _git(target, "commit", "-qm", "tracked user data here")
-
     res = installer.pull_service(
         _App(tmp_path), target, protected_paths=("asset_library", "mie_llm_keys.json"))
     assert res["ok"] is True, res.get("error")
@@ -273,3 +270,76 @@ def test_install_requirements_reports_failure(tmp_path, monkeypatch):
     res = installer.install_requirements(_App(tmp_path), py, req)
     assert res["ok"] is False
     assert res["missing"] == ["nope>=1"]
+
+
+def test_pull_service_uses_commit_from_proxy_not_origin_head(tmp_path, git_repo, monkeypatch):
+    from core.companion import installer
+
+    target = tmp_path / "target"
+    mirror = tmp_path / "mirror"
+    _git(tmp_path, "clone", "-q", str(git_repo), str(target))
+    _git(tmp_path, "clone", "-q", str(git_repo), str(mirror))
+    _git(target, "remote", "set-url", "origin", "https://github.com/example/repo.git")
+    (mirror / "requirements.txt").write_text("flask>=3.1\n", encoding="utf-8")
+    _git(mirror, "commit", "-qam", "mirror update")
+    expected = _git(mirror, "rev-parse", "HEAD").strip()
+    monkeypatch.setattr(installer, "_proxy_settings", lambda app: {"git_proxy_mode": "custom"})
+    monkeypatch.setattr(installer, "_apply_git_proxy", lambda app, url: str(mirror))
+
+    result = installer.pull_service(_App(tmp_path), target)
+    assert result["ok"] and result["updated"], result
+    assert _git(target, "rev-parse", "HEAD").strip() == expected
+    again = installer.pull_service(_App(tmp_path), target)
+    assert again["ok"] and not again["updated"], again
+
+
+def test_pull_refuses_dirty_and_divergent_code(tmp_path, git_repo):
+    from core.companion import installer
+
+    target = tmp_path / "target"
+    _git(tmp_path, "clone", "-q", str(git_repo), str(target))
+    code = target / "requirements.txt"
+    code.write_text("flask>=3.5" + chr(10), encoding="utf-8")
+    before = _git(target, "rev-parse", "HEAD")
+    assert not installer.pull_service(_App(tmp_path), target)["ok"]
+    assert _git(target, "rev-parse", "HEAD") == before
+    assert "3.5" in code.read_text(encoding="utf-8")
+    _git(target, "commit", "-qam", "local code")
+    (git_repo / "requirements.txt").write_text("flask>=3.1" + chr(10), encoding="utf-8")
+    _git(git_repo, "commit", "-qam", "upstream code")
+    before = _git(target, "rev-parse", "HEAD")
+    assert not installer.pull_service(_App(tmp_path), target)["ok"]
+    assert _git(target, "rev-parse", "HEAD") == before
+
+
+def test_partial_backup_is_restored(tmp_path, git_repo, monkeypatch):
+    from core.companion import installer
+
+    target = tmp_path / "target"
+    _git(tmp_path, "clone", "-q", str(git_repo), str(target))
+    library = target / "asset_library"
+    library.mkdir()
+    (library / "user.txt").write_text("my asset", encoding="utf-8")
+    keys = target / "mie_llm_keys.json"
+    keys.write_text("my settings", encoding="utf-8")
+    upstream_library = git_repo / "asset_library"
+    upstream_library.mkdir()
+    (upstream_library / "example").touch()
+    (git_repo / "mie_llm_keys.json").touch()
+    _git(git_repo, "add", "-f", "asset_library", "mie_llm_keys.json")
+    _git(git_repo, "commit", "-qm", "track template files")
+    original_replace = type(target).replace
+
+    def replace(source, dst):
+        if source == keys:
+            raise OSError("simulated failed move")
+        return original_replace(source, dst)
+
+    monkeypatch.setattr(type(target), "replace", replace)
+    before = _git(target, "rev-parse", "HEAD")
+    result = installer.pull_service(_App(tmp_path), target,
+                                    protected_paths=("asset_library", keys.name))
+    assert not result["ok"]
+    assert _git(target, "rev-parse", "HEAD") == before
+    assert (library / "user.txt").read_text(encoding="utf-8") == "my asset"
+    assert keys.read_text(encoding="utf-8") == "my settings"

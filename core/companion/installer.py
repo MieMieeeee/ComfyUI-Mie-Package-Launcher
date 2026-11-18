@@ -6,7 +6,7 @@
 
 与 webui 实现的差异 (H3 接入时引入):
 
-1. **用户数据保护** —— 更新走 `git fetch` + `git reset --hard origin/HEAD`,
+1. **用户数据保护** —— 更新走 `git fetch` + `git merge --ff-only`,
    而 reset --hard 会把**被 git 跟踪**的文件还原回仓库里的版本. 用户的资产库
    (角色/场景/分镜, 实测 220MB) 和 LLM 密钥就住在插件目录里, 一旦它们被跟踪,
    更新一次就把用户的东西打回原形.
@@ -22,6 +22,9 @@ from __future__ import annotations
 
 import os
 import subprocess
+import shutil
+import tempfile
+import uuid
 from pathlib import Path
 from typing import Any, Callable, Iterable, Optional, Sequence, Tuple
 
@@ -237,17 +240,22 @@ def clone_service(
             "already_exists": False}
 
 
-def _tracked_paths(repo_dir: Path, git_exe: str) -> list:
-    """仓库里被 git 跟踪的文件列表 (相对路径)."""
-    try:
-        out = subprocess.run([git_exe, "ls-files"], cwd=str(repo_dir),
-                             capture_output=True, text=True, errors="ignore",
-                             timeout=30)
-        if out.returncode != 0:
-            return []
-        return [ln.strip() for ln in (out.stdout or "").splitlines() if ln.strip()]
-    except Exception:
-        return []
+def _git_command(git_exe: str, repo_dir: Path, *args: str, timeout: int = 30):
+    kwargs = _git_popen_kwargs()
+    return subprocess.run([git_exe, *args], cwd=repo_dir, timeout=timeout, **kwargs)
+
+
+def _tracked_paths(repo_dir: Path, git_exe: str, commit: Optional[str] = None) -> list:
+    args = ("ls-tree", "-r", "-z", "--name-only", commit) if commit else ("ls-files", "-z")
+    result = _git_command(git_exe, repo_dir, *args)
+    if result.returncode:
+        raise RuntimeError("无法检查 Git 跟踪的文件")
+    return result.stdout.rstrip("\0").split("\0")
+
+
+def _tracked_groups(paths, protected_paths):
+    return [rel for rel in protected_paths
+            if any(path == rel or path.startswith(rel + "/") for path in paths)]
 
 
 def protect_user_data(
@@ -256,93 +264,69 @@ def protect_user_data(
     protected_paths: Iterable[str],
     *,
     logger: Optional[Any] = None,
+    target: Optional[str] = None,
 ) -> dict:
-    """检查用户数据有没有被 git 跟踪 —— 被跟踪的**挪到仓库外**暂存.
-
-    为什么不能只「从索引摘除」: `git reset --hard origin/HEAD` 会把**索引**重置成
-    origin/HEAD 的树, 而那棵树里若含 asset_library/xxx (用户曾经误提交过),
-    工作树里那个路径就会被还原成远端版本 —— 用户的 220MB 资产当场被覆盖.
-    只有「先搬出工作树」才管用: reset 只动它认识的文件, 搬走的那份不受影响.
-
-    正常情况下 (.gitignore 已排除) 数据本来就是 untracked 的, 这里什么都不做.
-
-    返 {"ok", "tracked": [...], "stashed": {rel: 备份路径}, "error"}.
-    备份要用 restore_user_data() 搬回去.
-    """
+    """Move protected paths tracked in either revision into a unique backup."""
     repo_dir = Path(repo_dir)
-    git_exe = _resolve_git_executable(app)
-    if not git_exe:
-        return {"ok": True, "tracked": [], "stashed": {}, "error": None}
-    tracked = _tracked_paths(repo_dir, git_exe)
-    tracked_set = set(tracked)
-    stash: dict = {}
-    hit_paths: list = []
-    for rel in protected_paths:
-        rel = str(rel).strip("/").replace("\\", "/")
-        if not rel:
-            continue
-        if any(p == rel or p.startswith(rel + "/") for p in tracked_set):
-            hit_paths.append(rel)
-    if not hit_paths:
-        return {"ok": True, "tracked": [], "stashed": {}, "error": None}
-
-    bak_root = repo_dir.parent / (repo_dir.name + ".userdata.bak")
+    protected_paths = tuple(str(rel).strip("/").replace("\\", "/")
+                            for rel in protected_paths if rel)
+    stash = {}
+    hit_paths = []
+    backup = None
     try:
-        bak_root.mkdir(parents=True, exist_ok=True)
-    except Exception as e:
-        return {"ok": False, "tracked": hit_paths, "stashed": {},
-                "error": "无法创建用户数据备份目录: %s" % e}
-
-    for rel in hit_paths:
-        src = repo_dir / rel
-        if not src.exists():
-            continue
-        dst = bak_root / rel
-        try:
+        git_exe = _resolve_git_executable(app)
+        if not git_exe:
+            raise RuntimeError("未找到 git 命令")
+        tracked = _tracked_paths(repo_dir, git_exe)
+        if target:
+            tracked += _tracked_paths(repo_dir, git_exe, target)
+        hit_paths = _tracked_groups(tracked, protected_paths)
+        for rel in hit_paths:
+            src = repo_dir / rel
+            if not os.path.lexists(src):
+                continue
+            if backup is None:
+                backup = Path(tempfile.mkdtemp(prefix=repo_dir.name + ".userdata.bak-",
+                                               dir=repo_dir.parent))
+            dst = backup / rel
             dst.parent.mkdir(parents=True, exist_ok=True)
-            if dst.exists():
-                import shutil
-                shutil.rmtree(dst) if dst.is_dir() else dst.unlink()
-            import shutil
-            shutil.move(str(src), str(dst))
-        except Exception as e:
-            return {"ok": False, "tracked": hit_paths, "stashed": stash,
-                    "error": "无法暂存用户数据 %s: %s" % (rel, e)}
-        stash[rel] = dst
-        if logger:
+            src.replace(dst)
+            stash[rel] = dst
+            if logger:
+                logger.warning("已暂存用户数据 %s，备份位置 %s", rel, dst)
+    except (OSError, RuntimeError, subprocess.SubprocessError) as exc:
+        if backup is not None and not stash:
             try:
-                logger.warning("用户数据 %s 曾被 git 跟踪, 已挪到仓库外暂存 "
-                               "(更新后自动搬回)", rel)
-            except Exception:
+                backup.rmdir()
+            except OSError:
                 pass
+        return {"ok": False, "tracked": hit_paths, "stashed": stash, "error": str(exc)}
     return {"ok": True, "tracked": hit_paths, "stashed": stash, "error": None}
 
 
-def restore_user_data(repo_dir: Path, stash: dict) -> None:
-    """把 protect_user_data 暂存的用户数据搬回原位 (覆盖远端版本)."""
-    if not stash:
-        return
-    import shutil
+def restore_user_data(repo_dir: Path, stash: dict) -> list[str]:
+    """Put originals back, leaving their backup paths available on failure."""
     repo_dir = Path(repo_dir)
-    for rel, bak in (stash or {}).items():
-        bak = Path(bak)
-        if not bak.exists():
-            continue
+    errors = []
+    for rel, backup in stash.items():
+        backup = Path(backup)
         dst = repo_dir / rel
         try:
             dst.parent.mkdir(parents=True, exist_ok=True)
-            if dst.exists():
-                shutil.rmtree(dst) if dst.is_dir() else dst.unlink()
-            shutil.move(str(bak), str(dst))
-        except Exception:
+            if dst.is_dir() and not dst.is_symlink():
+                shutil.rmtree(dst)
+            elif os.path.lexists(dst):
+                dst.unlink()
+            backup.replace(dst)
+        except OSError as exc:
+            errors.append(f"无法恢复 {rel}，备份位置 {backup}: {exc}")
+    for rel, backup in stash.items():
+        root = Path(backup).parents[len(Path(rel).parts) - 1]
+        try:
+            root.rmdir()
+        except OSError:
             pass
-    # 备份目录空了再删
-    try:
-        bak_root = repo_dir.parent / (repo_dir.name + ".userdata.bak")
-        if bak_root.is_dir() and not any(bak_root.rglob("*")):
-            bak_root.rmdir()
-    except Exception:
-        pass
+    return errors
 
 
 def _ensure_gitignore(repo_dir: Path, rel: str) -> None:
@@ -372,147 +356,111 @@ def pull_service(
     logger: Optional[Any] = None,
     progress_prefix: str = "[更新]",
 ) -> dict:
-    """更新已安装的仓库: fetch + reset --hard origin/HEAD.
-
-    为什么不用 `git pull`: 本地分支跟 origin divergent 时, pull 在没设
-    pull.rebase / pull.ff 时会 fatal "Need to specify how to reconcile
-    divergent branches"; fetch + reset 永远走 fast-forward 语义, 与本地状态无关.
-
-    返 {"ok", "log", "error", "updated"}.
-    """
+    """Fetch the configured upstream and fast-forward to that exact revision."""
     repo_dir = Path(repo_dir)
-    log_lines: list[str] = []
+    log_lines = []
 
-    def _log(line: str):
-        log_lines.append(line)
-        if logger:
-            try:
-                logger.info(line)
-            except Exception:
-                pass
+    def fail(error):
+        return {"ok": False, "log": "\n".join(log_lines), "error": error, "updated": False}
 
-    if not (repo_dir / ".git").exists():
-        return {"ok": False, "log": "\n".join(log_lines),
-                "error": "目录不是 git 仓库: %s" % repo_dir}
-
+    if os.path.normcase(os.path.realpath(repo_dir)) != os.path.normcase(os.path.abspath(repo_dir)):
+        return fail(f"目录是链接或 junction，请在源码仓库中更新: {repo_dir}")
+    if not (repo_dir / ".git").is_dir():
+        return fail(f"目录不是独立部署 Git 仓库: {repo_dir}")
     git_exe = _resolve_git_executable(app)
     if not git_exe:
-        return {"ok": False, "log": "\n".join(log_lines), "error": "未找到 git 命令"}
+        return fail("未找到 git 命令")
 
-    # 1. 先保护用户数据 (在动索引之前): 被 git 跟踪的挪到仓库外暂存
-    protect = protect_user_data(app, repo_dir, protected_paths or (), logger=logger)
-    if not protect.get("ok"):
-        return {"ok": False, "log": "\n".join(log_lines),
-                "error": protect.get("error") or "用户数据保护失败"}
-    stash = protect.get("stashed") or {}
-    for rel in (protect.get("tracked") or []):
-        _log("用户数据 " + rel + " 曾被 git 跟踪, 已挪到仓库外暂存 (更新后搬回)")
+    lock = repo_dir / ".git" / "mie-companion-update.lock"
     try:
-        return _pull_impl(app, repo_dir, on_progress=on_progress, logger=logger,
-                          progress_prefix=progress_prefix, log_lines=log_lines,
-                          stash=stash)
+        with lock.open("x"):
+            pass
+    except OSError as exc:
+        return fail(f"无法锁定更新，可能已有更新在执行: {exc}")
+    stash = {}
+    ref = "refs/mie-companion/fetch/" + uuid.uuid4().hex
+    result = None
+    try:
+        result = _pull_impl(app, repo_dir, git_exe, ref, tuple(protected_paths),
+                            stash, log_lines, on_progress, logger, progress_prefix)
+    except (OSError, RuntimeError, subprocess.SubprocessError) as exc:
+        result = fail(str(exc))
     finally:
-        restore_user_data(repo_dir, stash)
+        recovery_errors = restore_user_data(repo_dir, stash)
+        try:
+            _git_command(git_exe, repo_dir, "update-ref", "-d", ref)
+        except (OSError, subprocess.SubprocessError):
+            pass
+        try:
+            lock.unlink()
+        except OSError as exc:
+            recovery_errors.append(f"无法释放更新锁 {lock}: {exc}")
+        if recovery_errors:
+            prior = result and result.get("error")
+            result = fail("\n".join(([prior] if prior else []) + recovery_errors))
+    return result
 
 
-def _pull_impl(app: Any, repo_dir: Path, *, on_progress=None, logger=None,
-               progress_prefix: str = "[更新]", log_lines=None,
-               stash=None) -> dict:
-    """fetch + reset --hard 的实际执行 (调用方负责前后搬用户数据)."""
-    repo_dir = Path(repo_dir)
-    log_lines = log_lines if log_lines is not None else []
+def _pull_impl(app, repo_dir, git_exe, ref, protected_paths, stash, log_lines,
+               on_progress, logger, progress_prefix):
+    def git(*args, timeout=30):
+        return _git_command(git_exe, repo_dir, *args, timeout=timeout)
 
-    def _log(line: str):
-        log_lines.append(line)
-        if logger:
-            try:
-                logger.info(line)
-            except Exception:
-                pass
+    def checked(message, *args):
+        result = git(*args)
+        if result.returncode:
+            raise RuntimeError(f"{message} (Git 退出码 {result.returncode})")
+        return result.stdout.strip()
 
-    git_exe = _resolve_git_executable(app)
-    if not git_exe:
-        return {"ok": False, "log": "\n".join(log_lines), "error": "未找到 git 命令"}
+    protected_paths = tuple(str(rel).strip("/").replace("\\", "/")
+                            for rel in protected_paths if rel)
+    normal_paths = (".", *(":(top,exclude,literal)" + rel for rel in protected_paths))
+    if checked("无法检查工作区", "status", "--porcelain=v1", "--untracked-files=all",
+               "--", *normal_paths) or git("diff", "--cached", "--quiet").returncode:
+        raise RuntimeError("工作区有未提交改动，请先处理后再更新")
 
-    # 2. 决定 fetch 的地址: 代理模式 + origin 是 github → 用代理地址
+    previous = checked("无法读取当前 HEAD", "rev-parse", "--verify", "HEAD")
+    upstream = git("rev-parse", "--symbolic-full-name", "@{upstream}")
+    tracking = upstream.stdout.strip() if upstream.returncode == 0 else ""
+    if not tracking.startswith("refs/remotes/origin/"):
+        tracking = checked("无法确定 origin 目标分支", "symbolic-ref", "refs/remotes/origin/HEAD")
+    branch = tracking.removeprefix("refs/remotes/origin/")
     fetch_url = "origin"
-    try:
-        ps = _proxy_settings(app)
-        proxy_mode = (ps.get("git_proxy_mode") or "none").strip()
-        if proxy_mode != "none":
-            raw = ""
-            try:
-                raw = subprocess.run(
-                    [git_exe, "remote", "get-url", "origin"], cwd=str(repo_dir),
-                    capture_output=True, text=True, errors="ignore", timeout=20,
-                ).stdout.strip()
-            except Exception:
-                raw = ""
-            if raw and "github.com" in raw.lower():
-                proxied = _apply_git_proxy(app, raw)
-                if proxied and proxied != raw:
-                    fetch_url = proxied
-                    _log("通过 " + proxied + " 更新")
-    except Exception:
-        fetch_url = "origin"
+    if (_proxy_settings(app).get("git_proxy_mode") or "none").strip() != "none":
+        origin = checked("无法读取 origin 地址", "remote", "get-url", "origin")
+        if "github.com" in origin.lower():
+            fetch_url = _apply_git_proxy(app, origin)
 
     cb = _wrap_progress(on_progress, progress_prefix)
-    kwargs = _git_popen_kwargs()
+    if cb:
+        cb("拉取中…", 0)
+    fetched = git("fetch", "--no-tags", "--no-write-fetch-head", "--", fetch_url,
+                  f"refs/heads/{branch}:{ref}", timeout=180)
+    if fetched.returncode:
+        raise RuntimeError(f"git fetch 失败 (Git 退出码 {fetched.returncode})")
+    target = checked("无法读取本次拉取的提交", "rev-parse", "--verify", ref + "^{commit}")
+    log_lines.append(f"{branch}: {previous} → {target}")
+    if logger:
+        logger.info(log_lines[-1])
+    if target != previous:
+        if git("merge-base", "--is-ancestor", previous, target).returncode:
+            raise RuntimeError("本地分支已分叉或领先，无法快进")
 
-    try:
-        if cb:
-            cb("拉取中…", 0)
-    except Exception:
-        pass
-
-    try:
-        proc = subprocess.Popen([git_exe, "fetch", fetch_url, "--depth", "1"],
-                                cwd=str(repo_dir), **kwargs)
-        out = proc.stdout.read() if proc.stdout else ""
-        proc.wait()
-        fetch_rc = proc.returncode
-    except Exception as e:
-        return {"ok": False, "log": "\n".join(log_lines),
-                "error": "无法启动 git fetch: " + str(e)}
-    for line in (out or "").splitlines():
-        line = line.rstrip()
-        if line:
-            _log(line)
-            try:
-                if cb:
-                    cb(line, None)
-            except Exception:
-                pass
-    if fetch_rc != 0:
-        return {"ok": False, "log": "\n".join(log_lines),
-                "error": "git fetch 退出码 %s" % fetch_rc}
-
-    try:
-        proc = subprocess.Popen([git_exe, "reset", "--hard", "origin/HEAD"],
-                                cwd=str(repo_dir), **kwargs)
-        out = proc.stdout.read() if proc.stdout else ""
-        proc.wait()
-        reset_rc = proc.returncode
-    except Exception as e:
-        return {"ok": False, "log": "\n".join(log_lines),
-                "error": "无法启动 git reset: " + str(e)}
-    for line in (out or "").splitlines():
-        line = line.rstrip()
-        if line:
-            _log(line)
-    if reset_rc != 0:
-        return {"ok": False, "log": "\n".join(log_lines),
-                "error": "git reset --hard 退出码 %s" % reset_rc}
-
-    updated = any("Already up to date" not in ln and "已经是最新的" not in ln
-                  for ln in log_lines if ln.strip())
-    try:
-        if cb:
-            cb("更新完成", 100)
-    except Exception:
-        pass
+        current_tracked = _tracked_groups(_tracked_paths(repo_dir, git_exe), protected_paths)
+        protect = protect_user_data(app, repo_dir, protected_paths, logger=logger, target=target)
+        stash.update(protect["stashed"])
+        if not protect["ok"]:
+            raise RuntimeError(protect["error"] or "用户数据保护失败")
+        if current_tracked:
+            checked("无法恢复快进前的 Git 基线", "restore", "--source=HEAD", "--worktree",
+                    "--", *current_tracked)
+        checked("Git 无法安全快进", "merge", "--ff-only", "--no-overwrite-ignore", target)
+        if checked("无法校验更新后的 HEAD", "rev-parse", "--verify", "HEAD") != target:
+            raise RuntimeError("更新后的 HEAD 与拉取提交不一致")
+    if cb:
+        cb("更新完成", 100)
     return {"ok": True, "log": "\n".join(log_lines), "error": None,
-            "updated": updated}
+            "updated": previous != target}
 
 
 def install_requirements(

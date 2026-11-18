@@ -750,15 +750,22 @@ class H3Page(BasePage):
         threading.Thread(target=_worker, daemon=True).start()
 
     def _stop_service(self):
+        manager = self._mgr()
+        health = manager.status().get("health") or {}
+        busy = health.get("idle") is False
+        if busy and not DialogHelper.show_confirmation(
+                self, "H3 工作台正在渲染", "仍要停止 H3 工作台吗？",
+                yes_text="停止工作台", no_text="继续运行", destructive=True):
+            return
         self._set_state(STATE_STOPPING)
 
         def _worker():
-            res = self._mgr().stop(timeout=10)
+            res = manager.stop(timeout=10, force=busy)
             err = res.get("error")
             QtCore.QMetaObject.invokeMethod(
                 self, "_after_action_done",
                 QtCore.Qt.QueuedConnection,
-                QtCore.Q_ARG(bool, True),
+                QtCore.Q_ARG(bool, bool(res.get("ok"))),
                 QtCore.Q_ARG(str, err or ""),
             )
 

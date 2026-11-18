@@ -152,6 +152,12 @@ class CompanionServiceManager:
             else:
                 # 未知 role: 任一身份规则命中即可 (向后兼容手改的 pidstore)
                 ok = pidstore.is_alive(pid) and proctree.is_our_pid(pid, self._identity_rules(), root)
+            if ok and self.spec.id == "h3-engine":
+                import psutil
+                try:
+                    ok = self._runtime().matches_entry(psutil.Process(pid), self._paths())
+                except (psutil.Error, OSError, RuntimeError):
+                    ok = False
             if ok:
                 live.append({"pid": pid, "role": role})
         if not live:
@@ -174,11 +180,23 @@ class CompanionServiceManager:
         要求**每个**绑定端口都有命中身份的占用者, 任一端口是无关节程 → 不收养
         (走正常的端口占用报错路径).
         """
+        raw = self._raw_store() or {}
+        if raw.get("env_id") and raw["env_id"] != self._effective_env_id():
+            return False
         root = self._root()
         ports = self._ports()
         processes: List[Dict[str, Any]] = []
         seen: set = set()
-        for binding in self.spec.ports:
+        owned = getattr(self._runtime(), "owned_listener", None)
+        if owned:
+            try:
+                listener = owned(self._paths(), ports)
+            except Exception:
+                return False
+            if listener is None:
+                return False
+            processes.append({"pid": listener[0].pid, "role": "app"})
+        for binding in (() if owned else self.spec.ports):
             port = ports.get(binding.role, binding.default_port)
             try:
                 from core.probe import find_pids_by_port_safe
@@ -303,8 +321,13 @@ class CompanionServiceManager:
                 info = getattr(self._runtime(), "health_info", None)
                 if callable(info):
                     health = info(self._paths(), ports)
+                owned = getattr(self._runtime(), "owned_listener", None)
+                if ready and owned:
+                    listener = owned(self._paths(), ports)
+                    ready = bool(listener and any(e["pid"] == listener[0].pid for e in live))
             except Exception:
                 health = None
+                ready = False
         return {
             "service_id": self.spec.id,
             "name": self.spec.name,
@@ -342,6 +365,10 @@ class CompanionServiceManager:
         # 1. 已在跑 (身份校验过) → 短路
         live = self._live_processes()
         if live:
+            if self.spec.id == "h3-engine" and _port_listening(self._ports()["app"]):
+                listener = self._runtime().owned_listener(self._paths(), self._ports())
+                if not listener or all(e["pid"] != listener[0].pid for e in live):
+                    return _fail("端口已占用，无法确认属于当前 H3 工作台", 1, port_in_use=True)
             result.update({"ok": True, "exit_code": 0, "already_running": True,
                            "pids": live, "ports": self._ports(),
                            "elapsed_sec": time.time() - start_t,
@@ -391,7 +418,7 @@ class CompanionServiceManager:
                 occupy = find_pids_by_port_safe(str(port))
             except Exception:
                 occupy = []
-            if occupy:
+            if occupy or (self.spec.id == "h3-engine" and _port_listening(port)):
                 return _fail(f"端口 {port} 已被占用 (PID: {', '.join(map(str, occupy))}),"
                              f" 请先停掉那个进程或改 {binding.config_key}",
                              1, port_in_use=True)
@@ -464,6 +491,7 @@ class CompanionServiceManager:
             return result
 
         probe = self._ready_probe()
+        owned = getattr(self._runtime(), "owned_listener", None)
         deadline = time.time() + timeout
         ready = False
         dead_roles: List[str] = []
@@ -473,13 +501,19 @@ class CompanionServiceManager:
             if dead_roles:
                 break
             if all(_port_listening(p) for p in ports.values()):
-                if probe is not None:
+                if owned:
+                    listener = owned(paths, ports)
+                    if not listener or all(e["pid"] != listener[0].pid for e in processes):
+                        time.sleep(0.5)
+                        continue
+                elif probe is not None:
                     try:
                         if not probe(paths, ports):
                             time.sleep(0.5)
                             continue
                     except Exception:
-                        pass
+                        time.sleep(0.5)
+                        continue
                 ready = True
                 break
             time.sleep(0.5)
@@ -487,7 +521,8 @@ class CompanionServiceManager:
         if ready:
             # 就绪后按端口校正 pidstore (app 的 npm root 是短命进程, 见
             # _refresh_pidstore_from_ports; 不校正的话页面很快误判未跑)
-            self._refresh_pidstore_from_ports()
+            if not owned:
+                self._refresh_pidstore_from_ports()
             result["pids"] = [{"pid": e["pid"], "role": e["role"]}
                               for e in self._live_processes()] or processes
             result.update({"ok": True, "exit_code": 0,
@@ -515,6 +550,9 @@ class CompanionServiceManager:
         force=True: 跳过自有句柄的优雅 terminate, 直接树杀 (对外部 pid 无差别 ——
         外部 pid 本来就只能 taskkill).
         """
+        if self.spec.id == "h3-engine":
+            return self._stop_h3(timeout, force)
+
         start_t = time.time()
         live = self._live_processes()
 
@@ -562,6 +600,56 @@ class CompanionServiceManager:
             "error": None,
             "service_id": self.spec.id,
         }
+
+    def _stop_h3(self, timeout: float, force: bool) -> dict:
+        import psutil
+
+        start_t = time.time()
+        ports = self._ports()
+        port = ports["app"]
+        killed = False
+        error = None
+        raw = self._raw_store() or {}
+        env = self._effective_env_id()
+        foreign_store = bool(raw.get("env_id") and env and raw["env_id"] != env)
+        listener = None
+        try:
+            paths = self._paths()
+            runtime = self._runtime()
+            listener = runtime.owned_listener(paths, ports) if _port_listening(port) else None
+            if listener:
+                process, health = listener
+                if health.get("idle") is False and not force:
+                    error = "H3 工作台正在渲染。确认停止后可用 --force。"
+                else:
+                    process.terminate()
+                    process.wait(timeout=timeout)
+                    killed = True
+            elif not _port_listening(port) and not foreign_store:
+                launch = self._procs.get("app")
+                if launch and launch["proc"].poll() is None:
+                    # A handle created by this manager also covers a service
+                    # that has not bound the port yet.
+                    process = launch["proc"]
+                    process.terminate()
+                    process.wait(timeout=timeout)
+                    killed = True
+                elif self._live_processes():
+                    error = "H3 工作台尚未就绪，无法从监听端口确认进程。"
+        except (psutil.Error, subprocess.SubprocessError, OSError, RuntimeError) as exc:
+            error = f"无法停止 H3 工作台: {exc}"
+        residual = [port] if _port_listening(port) else []
+        if residual and not killed and not error:
+            error = f"端口 {port} 已占用，无法确认属于当前 H3 工作台。"
+        if not error and not residual and not foreign_store:
+            self._clear_store()
+            self._kill_spawned(join_only=True)
+        if residual and not error:
+            error = f"端口 {port} 在停止后仍被占用。"
+        return {"ok": not error,
+                "killed": killed, "residual_ports": residual,
+                "elapsed_sec": time.time() - start_t, "error": error,
+                "service_id": self.spec.id}
 
     def install(self, *, on_progress=None, repo_url=None) -> dict:
         """下载安装服务本体 (runtime 提供 install 钩子时).

@@ -141,6 +141,7 @@ def test_manager_env_gate_ignores_other_env_instance(tmp_path):
     with patch("core.companion.proctree.kill_tree", return_value=True) as killer:
         m.stop()
     assert not killer.called
+    assert m._raw_store()["env_id"] == "env_b"
 
 
 def test_manager_status_reports_health_when_running(tmp_path, monkeypatch):

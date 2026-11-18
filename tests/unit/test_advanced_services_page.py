@@ -211,18 +211,18 @@ def test_h3_hidden_when_unavailable(qt_app):
     assert not page._tabs.isTabVisible(idx)
 
 
-def test_h3_visible_when_available_and_kick_back(qt_app):
-    """available=True → tab 显示; 随后失焦且正停在该 tab → 切回 WebUI."""
+def test_h3_tab_switches_with_installable_environment(qt_app, tmp_path):
     page = _make_page(qt_app)
-    with patch("core.companion.registry.availability",
-               return_value={"available": True}):
+    root = tmp_path / "ComfyUI"
+    (root / "custom_nodes").mkdir(parents=True)
+    paths = {"comfyui_root": root}
+    with patch("core.companion.h3_runtime.resolve_paths", return_value=paths):
         page.refresh_h3_tab_visibility()
     idx = page._tabs.indexOf(page._h3_scroll)
     assert page._tabs.isTabVisible(idx)
     page._tabs.setCurrentIndex(idx)
     QtWidgets.QApplication.processEvents()
-    with patch("core.companion.registry.availability",
-               return_value={"available": False}):
+    with patch("core.companion.h3_runtime.resolve_paths", side_effect=RuntimeError):
         page.refresh_h3_tab_visibility()
     assert not page._tabs.isTabVisible(idx)
     assert page._tabs.currentIndex() == page._tabs.indexOf(page._webui_scroll)
@@ -250,3 +250,50 @@ def test_background_task_panel_tab_font(qt_app):
     assert f.pointSize() == 10
     assert f.bold()
     assert panel._tabs.elideMode() == QtCore.Qt.ElideRight
+
+
+def test_h3_download_tab_visible_in_uninstalled_package(qt_app, tmp_path):
+    page = _make_page(qt_app)
+    (tmp_path / "ComfyUI" / "custom_nodes").mkdir(parents=True)
+    with patch("core.companion.h3_runtime.resolve_paths", return_value={
+        "comfyui_root": tmp_path / "ComfyUI", "entry": tmp_path / "missing",
+    }):
+        page.refresh_h3_tab_visibility()
+    assert page._tabs.isTabVisible(page._tabs.indexOf(page._h3_scroll))
+
+
+def test_h3_download_can_retry_and_switch_to_setup_or_start(qt_app):
+    from ui_qt.pages.h3_page import H3Page
+
+    manager = MagicMock()
+    manager.is_running.return_value = False
+    installed = False
+    deps_ready = False
+
+    def download(on_progress=None):
+        nonlocal installed
+        installed = manager.install.call_count == 2
+        return {"ok": installed, "error": "mirror unavailable"}
+
+    def run_task(self, title, runner, done):
+        done(runner(None))
+
+    manager.install.side_effect = download
+    with patch.object(H3Page, "_start_log_tail"), \
+         patch.object(H3Page, "_mgr", return_value=manager), \
+         patch.object(H3Page, "_availability", lambda self: {"available": installed}), \
+         patch.object(H3Page, "_deps_cached", lambda self: {"ok": deps_ready}), \
+         patch.object(H3Page, "_run_with_progress", run_task), \
+         patch("ui_qt.widgets.custom_confirm_dialog.CustomConfirmDialog") as dialog:
+        dialog.return_value.get_result.return_value = 1
+        page = H3Page(app=None, theme_manager=_stub_theme())
+        assert "下载 H3 引擎" in page._btn_primary.text()
+        page._btn_primary.click()
+        assert manager.install.call_count == 2
+        assert "安装依赖" in page._btn_primary.text()
+        deps_ready = True
+        page._refresh_state()
+        assert "一键启动" in page._btn_primary.text()
+        manager.is_running.return_value = True
+        page._refresh_state()
+        assert "停止" in page._btn_primary.text()

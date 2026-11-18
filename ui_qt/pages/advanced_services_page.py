@@ -144,20 +144,16 @@ class AdvancedServicesPage(BasePage):
     # ---------------- 显隐 ----------------
 
     def refresh_h3_tab_visibility(self) -> None:
-        """H3 短剧工作台 tab 按当前环境显隐 (同 openjutsu 的规则).
-
-        判定 = registry.availability (纯文件系统检查): 当前环境的
-        ComfyUI/custom_nodes 下有没有 ComfyUI-Mie-H3-Engine/webapp/__main__.py.
-        """
+        """Keep the download entry visible in an installable environment."""
         if self._h3_scroll is None:
             return
         available = False
         try:
-            from core.companion import registry
-            from core.companion.spec import H3_ENGINE_SPEC
-            available = bool(registry.availability(self.app, H3_ENGINE_SPEC).get("available"))
-        except Exception:
-            available = False
+            from core.companion import h3_runtime
+            paths = h3_runtime.resolve_paths(self.app)
+            available = (paths["comfyui_root"] / "custom_nodes").is_dir()
+        except (OSError, RuntimeError):
+            pass
         try:
             idx_h3 = self._tabs.indexOf(self._h3_scroll)
             if idx_h3 >= 0:

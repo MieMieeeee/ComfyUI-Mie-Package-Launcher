@@ -291,3 +291,12 @@ def test_update_delegates_to_installer_with_protected_paths(tmp_path, monkeypatc
     assert res["ok"] is True
     assert "asset_library" in captured["protected"]
     assert "mie_llm_keys.json" in captured["protected"]
+
+
+def test_ready_probe_refuses_other_environment(tmp_path, monkeypatch):
+    from core.companion import h3_runtime
+
+    monkeypatch.setattr(h3_runtime, "_health_payload", lambda port: {
+        "status": "ok", "app": "comfyui-mie-web", "plugin_root": str(tmp_path / "other"),
+    })
+    assert not h3_runtime.ready_probe({"asset_owner": tmp_path / "owner"}, {"app": 8200})

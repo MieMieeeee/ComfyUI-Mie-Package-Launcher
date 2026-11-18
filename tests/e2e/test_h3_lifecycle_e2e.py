@@ -178,7 +178,8 @@ def test_port_conflict_reports_and_spares_occupier(real_env):
         assert str(port) in res["error"]
         # 占用者还活着 (stop 不会去动它)
         stop_res = m.stop(timeout=10)
-        assert stop_res["ok"] is True
+        assert stop_res["ok"] is False
+        assert "无法确认" in stop_res["error"]
         assert stop_res["residual_ports"], "占用者应仍在 (如实上报残留端口)"
         conn = socket.create_connection(("127.0.0.1", port), timeout=2)
         conn.close()

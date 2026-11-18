@@ -342,16 +342,45 @@ def _health_payload(port: int, timeout: float = 2.0) -> Optional[Dict[str, Any]]
 
 
 def ready_probe(paths: Dict[str, Any], ports: Dict[str, int]) -> bool:
-    """就绪判据: 端口在听 **且** /api/health 说「是我」.
+    return _healthy_for_environment(paths, health_info(paths, ports))
 
-    只看端口不够: 端口被别的 app 抢走时端口照样通. 这里同时校验
-    status=ok 与 app=comfyui-mie-web.
-    """
-    port = int(ports.get("app", DEFAULT_PORT))
-    payload = _health_payload(port)
-    if not isinstance(payload, dict):
+
+def _healthy_for_environment(paths, payload):
+    if not payload or payload.get("status") != "ok" or payload.get("app") != "comfyui-mie-web":
         return False
-    return payload.get("status") == "ok" and payload.get("app") == "comfyui-mie-web"
+    if paths.get("asset_owner") and not payload.get("plugin_root_ok"):
+        return False
+    reported_settings = payload.get("settings_file")
+    return not reported_settings or not paths.get("settings_file") or _same_dir(
+        reported_settings, paths["settings_file"])
+
+
+def matches_entry(process, paths):
+    args = process.cmdline()[1:]
+    script = next((arg for arg in args if not arg.startswith("-")), None)
+    return bool(script and paths.get("entry") and _same_dir(script, paths["entry"]))
+
+
+def owned_listener(paths, ports):
+    """Return a reusable process handle only for this environment's listener."""
+    import psutil
+    from core.probe import find_pids_by_port_safe
+
+    port = int(ports.get("app", DEFAULT_PORT))
+    try:
+        pids = find_pids_by_port_safe(str(port))
+        if len(pids) != 1 or pids[0] == os.getpid():
+            return None
+        process = psutil.Process(pids[0])
+        if not matches_entry(process, paths):
+            return None
+        health = health_info(paths, ports)
+        if (_healthy_for_environment(paths, health)
+                and health.get("pid", process.pid) == process.pid and process.is_running()):
+            return process, health
+    except (psutil.Error, OSError, TypeError, ValueError):
+        pass
+    return None
 
 
 def health_info(paths: Dict[str, Any], ports: Dict[str, int]) -> Optional[Dict[str, Any]]:
@@ -377,7 +406,7 @@ def _same_dir(a: str, b: str) -> bool:
     比较是可靠的口径.
     """
     def _n(p: str) -> str:
-        return str(p).replace("\\", "/").rstrip("/").lower()
+        return os.path.normcase(os.path.abspath(p)).replace("\\", "/").rstrip("/")
     return _n(a) == _n(b)
 
 
@@ -404,13 +433,7 @@ def comfyui_port(app: Any) -> int:
 
 
 def update(app: Any, paths: Dict[str, Any], on_progress=None) -> Dict[str, Any]:
-    """更新引擎本体: git fetch + reset --hard origin/HEAD (与 WebUI 工作台同语义).
-
-    **用户的资产与密钥不会被覆盖**: 引擎仓库的 .gitignore 已排除 asset_library/
-    与 mie_llm_keys.json, 更新前还会再体检一次 (installer.protect_user_data),
-    万一它们被跟踪就自动从 git 索引摘掉 —— 被跟踪的文件会被 reset --hard 还原
-    回仓库版本, 那等于把用户的 220MB 资产打回原形.
-    """
+    """Fast-forward the deployed engine while preserving its asset library and keys."""
     from core.companion import installer
     root = Path(paths["root"])
     res = installer.pull_service(
