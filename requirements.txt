@@ -14,10 +14,13 @@
 pyinstaller>=5.0.0
 PyQt5>=5.15.0
 PyYAML>=6.0
+# 进程身份校验（core/probe.py is_comfyui_pid）+ 端口扫描快路径的硬依赖。
+# 曾被当「可选」注释掉，导致打包 exe 里身份门只剩 wmic 一条路——Win11 24H2+
+# 移除 wmic 后全断，收养机制失效、stop 沦为人工 taskkill（2026-11-07 事故）。
+psutil>=5.9.0
 
 # 可选依赖（用于扩展功能）
 # GitPython==3.1.40  # Git操作（用于版本管理）
-# psutil==5.9.6      # 系统监控（用于进程管理）
 # requests==2.31.0   # HTTP请求（用于在线更新）
 
 # 注意：

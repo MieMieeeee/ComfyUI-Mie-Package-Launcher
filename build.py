@@ -336,6 +336,10 @@ def step_nuitka_compile(is_test):
         '--follow-import-to=launcher',
         '--follow-import-to=services',
         '--follow-import-to=headless_app',
+        # psutil 是 try-import（probe.py），静态分析可能漏——显式全包带上，
+        # 否则 exe 里身份门 is_comfyui_pid 退化到 wmic/CIM 外部查询
+        # （2026-11-07 V9 机器事故：psutil 没进包 + Win11 移除 wmic = 收养全灭）
+        '--include-package=psutil',
 
         # 图标
         '--windows-icon-from-ico=assets/rabbit.ico',

@@ -39,6 +39,8 @@ class ProcessManager:
         self._probe_cache_ttl_idle = 5.0
         self._refresh_in_flight = False
         self._refresh_pending = False
+        self._launch_cancel = threading.Event()
+        self._launch_spawn_lock = threading.Lock()
 
     def _post_to_ui(self, fn):
         try:
@@ -54,6 +56,8 @@ class ProcessManager:
         # 让用户能中止一次误启动。停止过程中仍静默忽略(停止是幂等快速操作,
         # 重复点没有意义,反而可能干扰)。
         try:
+            if getattr(self, "_stopping", False):
+                return
             if getattr(self.app, "_launching", False):
                 try:
                     self.app.logger.info("启动中再次点击:询问用户是否取消启动")
@@ -100,41 +104,49 @@ class ProcessManager:
             # 正在操作中，忽略点击
             return
 
-        # 按钮状态是 "idle"，执行启动前的端口检测。
-        # 先立即把大按钮切到「启动中…」：下面的可达性探测 + 端口占用扫描
-        # 都在 UI 线程同步跑（is_http_reachable 最多 ~2s；find_pids_by_port_safe
-        # 的 psutil 兜底路径逐进程查连接，可能好几秒），不先切的话用户点击后
-        # 按钮纹丝不动好几秒，像是没点上。探测发现「其实已在跑」或端口被占
-        # 用而放弃启动的分支，各自恢复 idle 显示。
-        def _show_idle():
-            try:
-                self.app.big_btn.set_state("idle")
-                self.app.big_btn.set_display("🚀 一键启动")
-            except Exception:
-                pass
-
+        # 先记录启动任务并更新按钮，然后返回事件循环让 Qt 绘制。
+        # HTTP/端口扫描放后台；弹窗、按钮更新仍由 UI 线程处理。
         try:
+            self.app._launching = True
+            self._launch_cancel = threading.Event()
             self.app.big_btn.set_state("starting")
             self.app.big_btn.set_display("启动中…", "点击停止")
         except Exception:
             pass
 
-        running = False
+        cancel = self._launch_cancel
         try:
-            if self.comfyui_process and self.comfyui_process.poll() is None:
-                running = True
-                try:
-                    self.app.logger.info("[toggle] comfyui_process 运行中 (pid=%s)", self.comfyui_process.pid)
-                except Exception:
-                    pass
-            else:
-                running = is_http_reachable(self.app, _log=False)
-                try:
-                    self.app.logger.info("[toggle] 检测结果: running=%s, btn_state=%s", running, btn_state)
-                except Exception:
-                    pass
+            port = (self.app.custom_port.get() or "8188").strip()
         except Exception:
-            running = False
+            port = "8188"
+
+        def probe():
+            try:
+                running = bool(self.comfyui_process and self.comfyui_process.poll() is None)
+                if not running:
+                    running = is_http_reachable(self.app, _log=False)
+                if cancel.is_set():
+                    return
+                pids = [] if running else find_pids_by_port_safe(port)
+                self._post_to_ui(lambda: self._finish_launch_probe(cancel, running, pids, port))
+            except Exception as exc:
+                self._post_to_ui(lambda msg=str(exc): self.on_start_failed(msg)
+                                 if not cancel.is_set() else None)
+
+        self._preflight_thread = threading.Thread(target=probe, daemon=True)
+        try:
+            self._preflight_thread.start()
+        except Exception as exc:
+            self.on_start_failed(str(exc))
+
+    def _finish_launch_probe(self, cancel, running, pids, port):
+        if cancel.is_set() or cancel is not self._launch_cancel:
+            return
+
+        def _show_idle():
+            self.app._launching = False
+            self.app.big_btn.set_state("idle")
+            self.app.big_btn.set_display("🚀 一键启动")
 
         # 如果检测到运行但按钮状态是 idle，说明状态不同步，先修正状态
         if running:
@@ -144,17 +156,10 @@ class ProcessManager:
             except Exception:
                 pass
             # 然后执行停止
+            self.app._launching = False
             self.stop_comfyui()
             return
 
-        # 未运行，执行启动逻辑
-        # 启动前追加端口占用检测：若任何进程占用目标端口，则避免重复启动
-        port = "8188"
-        try:
-            port = (self.app.custom_port.get() or "8188").strip()
-            pids = find_pids_by_port_safe(port)
-        except Exception:
-            pids = []
         if pids:
             pid_text = ", ".join(map(str, pids)) if pids else "未知"
             proceed_open = self._ask_yes_no(
@@ -200,19 +205,31 @@ class ProcessManager:
         self.start_comfyui()
 
     def start_comfyui(self):  #
+        if not getattr(self.app, "_launching", False):
+            self._launch_cancel = threading.Event()
+        self.app._launching = True
+        self.app.big_btn.set_state("starting")
+        self.app.big_btn.set_display("启动中…", "点击停止")
+        cancel = self._launch_cancel
+        self._prepare_thread = threading.Thread(
+            target=self._prepare_launch, args=(cancel,), daemon=True,
+        )
         try:
-            # 设置正在启动状态
-            self.app._launching = True
-            try:
-                self.app.big_btn.set_state("starting")
-                self.app.big_btn.set_display("启动中…", "点击停止")
-                # 强制刷新 UI
-                from PyQt5 import QtWidgets
+            self._prepare_thread.start()
+        except Exception as exc:
+            self.on_start_failed(str(exc))
 
-                QtWidgets.QApplication.processEvents()
-            except Exception:
-                pass
+    def _prepare_launch(self, cancel):
+        if cancel.is_set():
+            return
+        def failed(message):
+            def show():
+                if not cancel.is_set():
+                    self.on_start_failed(message)
+                    self._show_error("启动失败", message)
+            self._post_to_ui(show)
 
+        try:
             from core.launcher_cmd import build_launch_params
 
             cmd, env, run_cwd, py, main = build_launch_params(self.app)
@@ -222,12 +239,10 @@ class ProcessManager:
             except Exception:
                 pass
             if not py.exists():
-                self._show_error("错误", f"Python不存在: {py}")
-                self.on_start_failed(f"Python不存在: {py}")
+                failed(f"Python不存在: {py}")
                 return
             if not main.exists():
-                self._show_error("错误", f"主文件不存在: {main}")
-                self.on_start_failed(f"主文件不存在: {main}")
+                failed(f"主文件不存在: {main}")
                 return
             try:
                 from pathlib import Path as _P
@@ -236,12 +251,10 @@ class ProcessManager:
                     [str(py), "--version"], capture_output=True, text=True, timeout=0.8
                 )
                 if rver.returncode != 0:
-                    self._show_error("错误", f"Python无法执行: {py}")
-                    self.on_start_failed(f"Python无法执行: {py}")
+                    failed(f"Python无法执行: {py}")
                     return
             except Exception as _e:
-                self._show_error("错误", str(_e))
-                self.on_start_failed(str(_e))
+                failed(str(_e))
                 return
             try:
                 _gd = getattr(self.app, "gpu_device", None)
@@ -283,15 +296,10 @@ class ProcessManager:
             except Exception:
                 _log_path = None
 
-            run_start(self.app, self, cmd, env, run_cwd, log_path=_log_path)
+            self._post_to_ui(lambda: run_start(self.app, self, cmd, env, run_cwd, log_path=_log_path)
+                             if not cancel.is_set() else None)
         except Exception as e:
-            msg = str(e)
-            try:
-                self._show_error("启动失败", msg)
-            except Exception:
-                pass
-            # 同样使用默认参数绑定，避免在 after 回调中出现自由变量问题
-            self.on_start_failed(msg)
+            failed(str(e))
 
     def on_start_success(self):  #
         self.app._launching = False
@@ -344,6 +352,8 @@ class ProcessManager:
         if getattr(self, "_stopping", False):
             return True
         self._stopping = True
+        cancelling = bool(getattr(self.app, "_launching", False))
+        self._launch_cancel.set()
         self._invalidate_probe_cache()
 
         try:
@@ -354,6 +364,15 @@ class ProcessManager:
 
         def _bg():
             try:
+                # 与 spawn 串行：取消早于 spawn 则不再创建；晚于 spawn 则停掉新进程。
+                with self._launch_spawn_lock:
+                    if cancelling and self.comfyui_process is None:
+                        def cancelled():
+                            self.app._launching = False
+                            self.app.big_btn.set_state("idle")
+                            self.app.big_btn.set_display("🚀 一键启动")
+                        self._post_to_ui(cancelled)
+                        return
                 try:
                     from core.runner_stop import stop as run_stop
                     import time
@@ -415,12 +434,21 @@ class ProcessManager:
                 self._stopping = False
 
         try:
-            threading.Thread(target=_bg, daemon=True).start()
+            self._stop_thread = threading.Thread(target=_bg, daemon=True)
+            self._stop_thread.start()
         except Exception:
             self._stopping = False
         return True
 
     def stop_comfyui_sync(self):
+        cancelling = bool(getattr(self.app, "_launching", False))
+        self._launch_cancel.set()
+        with self._launch_spawn_lock:
+            if cancelling and self.comfyui_process is None:
+                self.app._launching = False
+                self.app.big_btn.set_state("idle")
+                self.app.big_btn.set_display("🚀 一键启动")
+                return True
         try:
             self.app.big_btn.set_state("starting")
             self.app.big_btn.set_display("停止中…")

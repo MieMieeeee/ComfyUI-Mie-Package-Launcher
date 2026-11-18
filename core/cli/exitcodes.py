@@ -59,3 +59,17 @@ EXIT_WEBUI_NOT_INSTALLED: Final[int] = 7
 
 EXIT_WEBUI_DEPS_MISSING: Final[int] = 8
 """webui：依赖缺失（用 webui setup 安装）。"""
+
+# ---- service 子命令（伴生服务族，v1.1.0 新增）----
+# 与 webui 段同值：6/7/8 的语义本来就是「伴生于 ComfyUI 的服务」通用语义，
+# service 是泛化后的正式命名。**同值是契约**——service 与 webui 指同一服务时
+# （如 service start webui 转发老实现）退出码必须一致。
+
+EXIT_SERVICE_CORE_NOT_RUNNING: Final[int] = 6
+"""service start：requires_comfyui 的服务在 ComfyUI 未运行时启动（不强启动，退 6）。"""
+
+EXIT_SERVICE_NOT_INSTALLED: Final[int] = 7
+"""service：服务未安装 / 当前环境无此服务（root 或 entry_markers 缺失）。"""
+
+EXIT_SERVICE_DEPS_MISSING: Final[int] = 8
+"""service：服务依赖缺失（如 openjutsu 的 node / .proxy-site / node_modules）。"""

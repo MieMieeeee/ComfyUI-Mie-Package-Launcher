@@ -168,3 +168,31 @@ class TestDispatch:
             cmd_plugins.run(args, _app())
         out = capsys.readouterr().out
         assert "count" in out  # human 模式仍有 count 键
+
+
+class TestErrorDetail:
+    """issue #111：cm-cli 失败时 CLI 也要带 cm-cli 原始输出尾部（含 traceback）。
+
+    之前失败只有一句「cm-cli install 退出码 1」，agent 无法定位。
+    """
+
+    def test_install_failure_carries_error_detail(self, capsys):
+        args = _args("install", name="https://github.com/x/Y", json=True)
+        with patch("services.plugin_service.PluginService.install",
+                   return_value={"ok": False, "log": "head", "error": "cm-cli install 退出码 1",
+                                 "error_detail": "Traceback ...\nTypeError: boom"}):
+            rc = cmd_plugins.run(args, _app())
+        assert rc == EXIT_ERROR
+        d = json.loads(capsys.readouterr().out)
+        assert d["error"] == "cm-cli install 退出码 1"
+        assert "TypeError: boom" in d["error_detail"]
+
+    def test_install_success_has_empty_error_detail(self, capsys):
+        args = _args("install", name="https://github.com/x/Y", json=True)
+        with patch("services.plugin_service.PluginService.install",
+                   return_value={"ok": True, "log": "done", "error": None,
+                                 "error_detail": ""}):
+            rc = cmd_plugins.run(args, _app())
+        assert rc == EXIT_OK
+        d = json.loads(capsys.readouterr().out)
+        assert d["error_detail"] == ""

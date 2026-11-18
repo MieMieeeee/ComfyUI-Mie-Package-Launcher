@@ -1,6 +1,7 @@
 
 from PyQt5 import QtWidgets, QtCore
 from ui_qt.widgets.custom_confirm_dialog import CustomConfirmDialog
+from ui_qt.widgets.cmcli_error_dialog import CmCliErrorDialog
 
 class DialogHelper:
     """Helper class for showing custom styled dialogs"""
@@ -55,7 +56,28 @@ class DialogHelper:
             theme_manager=DialogHelper._get_theme_manager(parent)
         )
         dialog.exec_()
-        
+
+    @staticmethod
+    def show_error_with_detail(parent, title, content, detail=""):
+        """Show an error dialog that also shows the raw tool output (cm-cli 等).
+
+        detail 为空时退化成普通 show_error。detail 非空时弹 CmCliErrorDialog：
+        正文 + 只读原始输出框 + 「复制详情」按钮（issue #111：失败原因原本
+        只有一句「退出码 1」，用户/开发者都看不到真正报错）。
+        """
+        detail = (detail or "").strip()
+        if not detail:
+            DialogHelper.show_error(parent, title, content)
+            return
+        dialog = CmCliErrorDialog(
+            parent,
+            title=title,
+            content=content,
+            detail=detail,
+            theme_manager=DialogHelper._get_theme_manager(parent)
+        )
+        dialog.exec_()
+
     @staticmethod
     def show_confirmation(parent, title, content, yes_text="是", no_text="否", destructive=False):
         """

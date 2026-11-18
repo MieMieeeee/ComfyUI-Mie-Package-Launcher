@@ -108,6 +108,15 @@ def _resolve_log_path(app, target: str) -> Optional[Path]:
             return Path(app._cwd) / "launcher" / "webui.log"
         except Exception:
             return None
+    # 伴生服务 (新框架) 的日志: launcher/<service_id>.log, 与 LOGS_TARGETS 里的
+    # "openjutsu" 对应. 走注册表判定, 未来加内置服务不用改这里.
+    try:
+        from core.companion.spec import BUILTIN_SERVICES
+        spec = BUILTIN_SERVICES.get(target)
+        if spec is not None and spec.runtime != "webui-legacy":
+            return Path(app._cwd) / "launcher" / (spec.id + ".log")
+    except Exception:
+        pass
     return None
 
 
@@ -273,6 +282,20 @@ def start_service(app, *, no_wait: bool = False, timeout: int = 60, env_id=None)
             )
         return result
 
+    # 端口被「非 ComfyUI」进程占着 → spawn 出的进程必因 bind 失败秒死（Windows
+    # 上 ComfyUI 打一行 [ERROR] Port ... already in use 后静默退出，2026-11-05
+    # 缺陷报告）。直接拒绝并点名占用者，不再制造注定失败的进程。ComfyUI 身份的
+    # 占用者已被上面的收养分支按「已在跑」处理；走到这里还占着端口的是身份
+    # 不明者——保守起见不自动杀（pidfile 驱动的 stop 不能误杀无关进程），交用户处理。
+    holders = _probe_module.find_pids_by_port_safe(str(port))
+    if holders:
+        holder_str = ",".join(str(p) for p in sorted(holders))
+        return _err_result(
+            port, url, log_path, start_t,
+            f"端口 {port} 被非 ComfyUI 进程占用（pid {holder_str}），"
+            f"请先结束该进程或更换端口",
+        )
+
     # 解析 cmd / env / cwd（传 env_id 让 build_launch_params 用指定环境）
     try:
         cmd, env, run_cwd, py, main = build_launch_params(app, env_id=env_id)
@@ -327,6 +350,13 @@ def start_service(app, *, no_wait: bool = False, timeout: int = 60, env_id=None)
     ready = pm.start_outcome == CliProcessManager.OUTCOME_SUCCESS
     pid = pm.comfyui_process.pid if pm.comfyui_process else pid
 
+    # 定格失败（非超时未决）时把原因冒到返回值——bind 失败 / 就绪校验不过
+    # 这类「进程死了但端口上还有旧实例应答」的场景，调用方必须能看到为什么
+    # （2026-11-05 缺陷报告第 4 点：started:true, ready:true 的假阳性）。
+    failure_msg = None
+    if not ready and pm.start_outcome == CliProcessManager.OUTCOME_FAILED:
+        failure_msg = pm.failure_reason or "启动失败"
+
     if ready and pid and not read_pidfile(default_path(app._cwd)):
         write_pidfile(default_path(app._cwd), pid, port, log_path, env_id=effective_env_id)
 
@@ -336,7 +366,7 @@ def start_service(app, *, no_wait: bool = False, timeout: int = 60, env_id=None)
     if ready:
         _sync_comfyui_running_ui(app, True)
 
-    return {
+    result = {
         "started": pid is not None,
         "pid": pid,
         "port": port,
@@ -346,6 +376,9 @@ def start_service(app, *, no_wait: bool = False, timeout: int = 60, env_id=None)
         "log_path": str(log_path) if log_path else None,
         "env_id": effective_env_id,
     }
+    if failure_msg:
+        result["error"] = failure_msg
+    return result
 
 
 def _err_result(port: int, url: str, log_path: Optional[Path], start_t: float, msg: str) -> dict:
@@ -367,8 +400,10 @@ def stop_service(app, *, timeout: int = 10, force: bool = False) -> dict:
     """停止 ComfyUI（等价于 GUI 的 stop 按钮）。
 
     流程：
-    1. 读 pidfile，没有有效 PID → no-op，stopped=False
-    2. 调 core.runner_stop.stop(app, pm)
+    1. 读 pidfile；失联时按端口收养（外部重启 / Manager 重启链换 PID 后 pidfile
+       就此失明——2026-11-05 缺陷报告：stop 返回 pid:null 什么都不做，端口上的
+       旧实例继续服务旧代码）。收养不到有效 PID 才 no-op，stopped=False
+    2. 调 core.runner_stop.stop(app, pm)（pm 无句柄时其内部走 _stop_by_port_fallback）
     3. 清 pidfile
     """
     start_t = time.time()
@@ -376,11 +411,17 @@ def stop_service(app, *, timeout: int = 10, force: bool = False) -> dict:
     pid_data = read_pidfile(pid_path)
 
     if pid_data is None or not pid_data.get("pid"):
-        return {
-            "stopped": False,
-            "pid": None,
-            "elapsed_sec": time.time() - start_t,
-        }
+        # pidfile 失联 → 端口兜底：先收养（只收 is_comfyui_pid 校验过的 PID，
+        # 发现链与 status/start 的 adopt_external_service 完全一致），再走正常
+        # 停止链。否则 runner_stop 里的端口回退链永远到不了，cli.md 承诺的
+        # 「pidfile + 端口回退链」名存实亡。
+        pid_data = adopt_external_service(app)
+        if pid_data is None or not pid_data.get("pid"):
+            return {
+                "stopped": False,
+                "pid": None,
+                "elapsed_sec": time.time() - start_t,
+            }
 
     # 把 force 透传给 runner_stop：它走 _stop_tracked_process / _stop_by_port_fallback，
     # 不直接读 app._force。这里在调用前打标，供 runner_stop / 测试观察。

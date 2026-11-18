@@ -173,33 +173,39 @@ class BackgroundTasksPage(QtWidgets.QWidget):
                 border-bottom: none;
                 border-top-left-radius: {_px(8)}px;
                 border-top-right-radius: {_px(8)}px;
-                /* 14px horizontal padding + 96px min-width keeps Chinese
-                   titles (and count badges) readable even when the page
-                   is narrow; previous 20px padding squeezed tabs past their
-                   text sizeHint and clipped half-width. */
+                /* 字体不写在 QSS 里: QSS 伪元素字体只管渲染不进 sizeHint
+                   (2026-11-10, 同 advanced_services_page 的真机 bug ——
+                   QSS 10pt YaHei 渲染 + Segoe UI 9pt 算 hint, tab 比文字窄,
+                   尾字硬切). 字体走下方 tabBar.setFont, hint 与渲染同源. */
                 padding: {_px(8)}px {_px(14)}px;
+                /* min-width 只是两个短标题 tab 的点击面积下限, 不再承担
+                   「防裁字」职责 (那是字体 hint 的事, 见上) */
                 min-width: {_px(96)}px;
                 margin-right: {_px(4)}px;
-                font: {_pt(10)}pt 'Microsoft YaHei UI';
             }}
             QTabBar::tab:selected {{
                 background-color: {tab_bg};
                 color: {accent};
                 font-weight: bold;
             }}
+            QTabBar::tab:!selected {{ font-weight: normal; }}
             QTabBar::tab:hover:!selected {{ color: {label}; }}
         """)
         self._active_page = self._make_list_page("当前没有正在运行的任务")
         self._done_page = self._make_list_page("还没有已完成的任务")
         self._tab_active = self._tabs.addTab(self._active_page, "进行中")
         self._tab_done = self._tabs.addTab(self._done_page, "已完成")
-        # Lock tab sizing: keep each tab at its own sizeHint (no auto
-        # stretching), disable text eliding so Chinese titles always render
-        # in full, and pin a sane minimum width for the tab strip itself
-        # (two ~110px tabs + page chrome must fit even on narrow sidebars).
+        # tab 宽度 hint 用 API 字体 (bold 取最宽变体, 选中态加粗渲染必然
+        # 放得下; 未选中态 QSS 压回 normal), 放不下时省略号而不是硬裁.
         from PyQt5 import QtCore as _QtCore
+        from PyQt5 import QtGui as _QtGui
+        _tab_font = _QtGui.QFont()
+        _tab_font.setFamily("Microsoft YaHei UI")
+        _tab_font.setPointSize(_pt(10))
+        _tab_font.setBold(True)
+        self._tabs.tabBar().setFont(_tab_font)
         self._tabs.tabBar().setExpanding(False)
-        self._tabs.setElideMode(_QtCore.Qt.TextElideMode.ElideNone)
+        self._tabs.setElideMode(_QtCore.Qt.TextElideMode.ElideRight)
         self._tabs.setMinimumSize(_QtCore.QSize(_px(260), 0))
         self._tabs.setCurrentIndex(0)
         layout.addWidget(self._tabs, 1)

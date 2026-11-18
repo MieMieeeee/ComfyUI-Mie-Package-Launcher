@@ -26,6 +26,17 @@ class _App:
         self.logger = type("L", (), {"info": lambda *a, **kw: None, "warning": lambda *a, **kw: None})()
 
 
+@pytest.fixture(autouse=True)
+def _no_real_port_scan(monkeypatch):
+    """隔离真实端口：本文件默认端口扫描返回空。
+
+    同 test_webui_cmd_actions 的事故教训（2026-11-07）：stop/status 相关用例
+    在 pidfile 失效时会做真实端口扫描，本机 8199 若有别的任务在监听就会被
+    兜底链误杀。默认返回空；需要扫描语义的用例在各自 with patch 里覆盖。
+    """
+    monkeypatch.setattr("core.probe.find_pids_by_port_safe", lambda port: [])
+
+
 def test_init_no_process():
     from core.webui_process_manager import WebuiProcessManager
     pm = WebuiProcessManager(_App())
@@ -346,8 +357,10 @@ def test_stop_uses_os_kill_on_posix(tmp_path):
 
     # 强制走兜底分支: 没有 pidfile (read 返 None) + Popen 句柄为 None;
     # 再 patch find_pids_by_port_safe 返回假 PID + 强制 os.name 走 posix 分支.
+    # 身份门 mock 成真（2026-11-07 起端口兜底只杀 _is_webui_pid 校验过的）
     fake_pids = [24681]
     with patch("core.probe.find_pids_by_port_safe", return_value=fake_pids), \
+         patch("core.webui_process_manager._is_webui_pid", return_value=True), \
          patch.object(wpm_mod.os, "kill", create=True) as mock_kill, \
          patch.object(wpm_mod, "os") as mock_os_mod:
         # 让 wpm_mod.os.name == "posix" 走 SIGTERM 分支; 其它 os.* 调用透传给真 os.

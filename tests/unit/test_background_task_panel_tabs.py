@@ -1,14 +1,16 @@
 ﻿"""Regression tests for ui_qt.widgets.background_task_panel.
 
 锁定 ``BackgroundTasksPage`` 的 tab 标题不再被裁:
-1. ``padding`` 从 8px 20px 收紧到 8px 14px (QSS).
-2. ``min-width: 96px`` (QSS) 让 tab cell 不被压扁.
-3. ``setExpanding(False)`` + ``setElideMode(ElideNone)`` + ``setMinimumSize(260, 0)``
-   程序上锁死, 防止未来无意改回 auto-expanding / 默认 elide.
+1. tab 字体走 ``tabBar().setFont``（API 字体）—— QSS ``font:`` 简写只参与
+   渲染、**不进 tab 的 sizeHint**，hint 会用 widget 默认字体（Segoe UI 9pt）
+   计算，比 QSS 渲染的 10pt YaHei 窄 ~10%，tab 被排得比文字短而尾字硬切
+   （2026-11-10 advanced_services_page 同源真机 bug，见其模块 docstring）。
+2. ``padding`` 8px 14px + ``min-width: 96px``（QSS）—— 点击面积下限。
+3. ``setExpanding(False)`` + ``setElideMode(ElideRight)`` + ``setMinimumSize(260, 0)``
+   程序上锁死; 放不下时省略号优于硬裁（旧 ElideNone 在溢出时直接切字尾）。
 
-历史背景: 用户报 background-task 窗口里的 “进行中 / 已完成” 两个 tab 标题
-显示不全 (被压成 “程中” / “U导成 (”). 根因是 QSS padding 8px 20px 太大
-(QTabBar sizeHint 比可分配宽度宽) + 缺 min-width + 没显式 setExpanding(False).
+历史背景: 早期裁字（“程中” / “U导成 (”）曾用收 padding + min-width 压住,
+2026-11-10 找到真正根因（QSS 字体不进 sizeHint）后由 API 字体根治。
 """
 
 import os
@@ -50,7 +52,8 @@ class TestTabQssLayout:
         )
 
     def test_qss_pins_min_width(self, panel_source):
-        """Min-width: 96px 必须存在, 否则窄容器里 Qt 会把 tab cell 压到字号以下.
+        """Min-width: 96px 是两个短标题 tab 的点击面积下限（不再承担防裁字职责,
+        防裁字由 API 字体保证, 见 TestTabFontHint）.
 
         Now DPI-tokenized: ``min-width: {_px(96)}px;``.
         """
@@ -59,10 +62,23 @@ class TestTabQssLayout:
             panel_source,
             flags=re.DOTALL,
         )
-        assert m is not None, "QTabBar::tab 没有 min-width, 这是 user-reported 裁字的元凶"
+        assert m is not None, "QTabBar::tab 没有 min-width"
         px = int(m.group(1))
         assert 80 <= px <= 160, (
             f"min-width={px}px 不合理 (太小容不下 4 个 Chinese + 括号, 太大挤压布局)."
+        )
+
+    def test_qss_tab_block_has_no_font_shorthand(self, panel_source):
+        """QTabBar::tab 里禁止再出现 ``font:`` 简写 —— 根因锁定.
+
+        QSS 伪元素字体只管渲染不进 sizeHint, 会让 tab 比 10pt YaHei 渲染出的
+        文字窄而硬切尾字. 字体必须走 tabBar().setFont（API）.
+        """
+        m = re.search(r"QTabBar::tab\s*\{\{([\s\S]*?)\}\}", panel_source, flags=re.DOTALL)
+        assert m is not None, "QTabBar::tab block not found"
+        assert not re.search(r"font\s*:", m.group(1)), (
+            "QTabBar::tab 出现 QSS font: 简写 —— 它不进 sizeHint, 会让 tab "
+            "比渲染文字窄（2026-11-10 真机裁字根因）, 字体请走 tabBar().setFont"
         )
 
 
@@ -74,12 +90,31 @@ class TestTabQtabwidgetApi:
             "一个 tab 不到 50px 时 Chinese 标题被裁."
         )
 
-    def test_program_calls_setElideMode_ElideNone(self, panel_source):
-        """ElideMode.ElideNone 防 Qt 默认 elideRight 把标题变 "进行..."""
+    def test_program_calls_setElideMode_ElideRight(self, panel_source):
+        """ElideMode.ElideRight: 放不下时省略号收尾, 绝不硬裁字符串.
+
+        旧 ElideNone 在溢出时直接把尾字切半个; 尺寸本身由 API 字体 hint 保证,
+        这里只兜溢出极端情况."""
         assert "setElideMode(" in panel_source, "缺 ElideMode 锁定"
         assert (
-            "TextElideMode.ElideNone" in panel_source
-        ), "ElideMode 没设 ElideNone, Qt 默认会按宽度裁字符串尾部"
+            "TextElideMode.ElideRight" in panel_source
+        ), "ElideMode 应为 ElideRight（溢出时省略号优于硬裁）"
+
+
+class TestTabFontHint:
+    """tab 宽度 hint 的真正来源: tabBar().setFont（API 字体, bold 基准）."""
+
+    def test_tab_bar_font_set_via_api(self, panel_source):
+        m = re.search(
+            r"self\._tabs\.tabBar\(\)\.setFont\(_tab_font\)", panel_source
+        )
+        assert m is not None, "tab bar 字体必须走 API setFont（hint 与渲染同源）"
+
+    def test_tab_font_bold_base(self, panel_source):
+        """hint 按最宽变体（bold）算 —— 选中态 QSS 加粗渲染必然放得下."""
+        assert "_tab_font.setBold(True)" in panel_source, (
+            "tab 基础字体应取 bold（hint 最宽变体, 选中态加粗不裁字）"
+        )
 
     def test_program_calls_setMinimumSize_for_tab_strip(self, panel_source):
         """QTabWidget 自身最小宽度 260: 两个 ~110px tab + page chrome 不被压扁."""

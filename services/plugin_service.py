@@ -95,9 +95,47 @@ _stream_counter = itertools.count(1)
 def _truncate(text: str, limit: int = _LOG_LIMIT) -> str:
     if not text:
         return ""
+    if not isinstance(text, str):
+        text = str(text)
     if len(text) <= limit:
         return text
     return text[:limit] + f"\n...[truncated {len(text) - limit} chars]"
+
+
+def _tail(text: str, limit: int = _LOG_LIMIT) -> str:
+    """取文本**尾部** limit 个字符（头部截断带标记）。
+
+    为什么不用 _truncate：cm-cli 失败时的 traceback 在输出**末尾**，_truncate 保留
+    头部会把 traceback 整段切掉 → 失败弹窗只剩一句「cm-cli update 退出码 1」，
+    用户和开发者都看不到真正原因（issue #111）。错误详情一律走 _tail。
+    """
+    if not text:
+        return ""
+    if not isinstance(text, str):
+        text = str(text)
+    if len(text) <= limit:
+        return text
+    return f"...[前 {len(text) - limit} 字符已省略]\n" + text[-limit:]
+
+
+def _cmcli_output(res: dict) -> str:
+    """把一次 cm-cli 调用的 stdout/stderr 合成一段文本。
+
+    流式路径 stderr 已并入 stdout（非流式才有独立 stderr），两段都非空时按
+    stdout → stderr 顺序拼接（traceback 在 stderr，保留在尾部）。
+
+    非 str 值一律忽略（测试里 _run_cmcli 常被 mock 成 MagicMock，直接 .strip()
+    会拿到 MagicMock 再 join 炸掉）。
+    """
+    parts = []
+    for key in ("stdout", "stderr"):
+        v = res.get(key) if isinstance(res, dict) else None
+        if not isinstance(v, str):
+            continue
+        v = v.strip()
+        if v:
+            parts.append(v)
+    return "\n".join(parts)
 
 
 def _cmcli_update_progress(raw: str) -> Optional[tuple[int, int, str]]:
@@ -1650,17 +1688,19 @@ class PluginService:
         """更新全部插件（cm-cli update all，含 pip 依赖修复；不走 Manager 队列 API）。
 
         on_progress(done, total, name)：可选，逐插件进度回调（流式管道）。
-        返回契约（对齐 services.update_service）：{updated, up_to_date, log, error}
+        返回契约（对齐 services.update_service）：{updated, up_to_date, log, error, error_detail}
+        error_detail = cm-cli 输出尾部（含 traceback），失败时供 UI 弹窗展示。
         """
         return self._do_update(["all"], on_progress=on_progress)
 
     def update_selected(self, nodes: list[str], on_progress=None) -> dict[str, Any]:
         """更新指定插件（cm-cli update <node>...；不走 Manager 队列 API）。
 
-        on_progress(done, total, name)：可选，逐插件进度回调（流式管道）。"""
+        on_progress(done, total, name)：可选，逐插件进度回调（流式管道）。
+        返回契约同 update_all：{updated, up_to_date, log, error, error_detail}。"""
         if not nodes:
             return {"updated": False, "up_to_date": False, "log": "",
-                    "error": "未指定要更新的插件"}
+                    "error": "未指定要更新的插件", "error_detail": ""}
         return self._do_update([str(n) for n in nodes], on_progress=on_progress)
 
     def uninstall(self, target):
@@ -1677,12 +1717,17 @@ class PluginService:
 
     def install(self, node_spec):
         """安装插件（cm-cli install <CNR id | git url>；不走 Manager 队列 API，见上方
-        2026-10 策略调整注释）。"""
+        2026-10 策略调整注释）。
+
+        返回契约：{ok, log, error, error_detail}（error_detail = cm-cli 输出尾部，
+        含 traceback，失败时供 UI 弹窗展示）。"""
         # install 需要 git clone + pip 依赖安装，无法本地替代 → 保留 cm-cli 路径
         res = self._run_cmcli(["install", str(node_spec)])
+        combined = _cmcli_output(res)
         if res["error"]:
-            return {"ok": False, "log": "", "error": res["error"]}
-        log = _truncate((res["stdout"] or res["stderr"]).strip())
+            return {"ok": False, "log": "", "error": res["error"],
+                    "error_detail": _tail(combined)}
+        log = _truncate(combined)
         rc = res["returncode"]
         if rc == 0:
             # install 结果目录名不确定（CNR id / github url 的目录命名不同）→ 清全部
@@ -1691,12 +1736,13 @@ class PluginService:
             except Exception:
                 pass
         return {"ok": rc == 0, "log": log,
-                "error": None if rc == 0 else f"cm-cli install 退出码 {rc}"}
+                "error": None if rc == 0 else f"cm-cli install 退出码 {rc}",
+                "error_detail": _tail(combined) if rc != 0 else ""}
 
     def install_streaming(self, node_spec, on_stage=None, cancel_event=None) -> dict[str, Any]:
         """安装插件（流式）：cm-cli install <spec>，逐阶段回调。
 
-        与 install 同返回契约 {ok, log, error}，但内部用 _run_cmcli_streaming
+        与 install 同返回契约 {ok, log, error, error_detail}，但内部用 _run_cmcli_streaming
         实时读 cm-cli（git clone + pip install）输出，用 _cmcli_install_stage 映射成
         阶段文案，非 None 时回调 on_stage(stage)（供 UI 更新进度文字）。cancel_event
         透传给 _run_cmcli_streaming，用户取消时 kill cm-cli 进程。CLI 路径继续用
@@ -1749,9 +1795,11 @@ class PluginService:
 
         res = self._run_cmcli_streaming(["install", str(node_spec)],
                                         on_output=_on_output, cancel_event=cancel_event)
+        combined = _cmcli_output(res)
         if res["error"]:
-            return {"ok": False, "log": "", "error": res["error"]}
-        log = _truncate((res["stdout"] or res["stderr"]).strip())
+            return {"ok": False, "log": "", "error": res["error"],
+                    "error_detail": _tail(combined)}
+        log = _truncate(combined)
         rc = res["returncode"]
         # P1-3：install 成功 → 清全部 git info 缓存（新增插件目录名未知，保险全清）
         if rc == 0:
@@ -1760,7 +1808,8 @@ class PluginService:
             except Exception:
                 pass
         return {"ok": rc == 0, "log": log,
-                "error": None if rc == 0 else f"cm-cli install 退出码 {rc}"}
+                "error": None if rc == 0 else f"cm-cli install 退出码 {rc}",
+                "error_detail": _tail(combined) if rc != 0 else ""}
 
     # ---- B2：lifecycle 终态核实 + target 规范化 ----
     # cm-cli 对「Manager 内部名（cnr id / url basename）≠ 目录名」的插件输出
@@ -2088,10 +2137,17 @@ class PluginService:
         """跑 cm-cli update。on_progress(done, total, name) 提供时走流式管道，
         把 cm-cli 的逐插件进度行（"k/N [ STATUS ]: name => ..."，见
         _cmcli_update_progress）实时回调给 UI 驱动 k/N 进度条；否则保持原来的
-        整体捕获行为。"""
+        整体捕获行为。
+
+        返回契约：{updated, up_to_date, log, error, error_detail}
+        - log：cm-cli 输出**头部**截断（人类可读的进度文本）
+        - error_detail：cm-cli 输出**尾部**（含 traceback），失败时供 UI 弹窗展示
+          （issue #111：失败原因原本只体现为「退出码 1」，用户无从判断）
+        """
         if not self.is_available():
             return {"updated": False, "up_to_date": False, "log": "",
-                    "error": "ComfyUI-Manager 未安装（在 custom_nodes/ComfyUI-Manager 找不到 cm-cli.py）"}
+                    "error": "ComfyUI-Manager 未安装（在 custom_nodes/ComfyUI-Manager 找不到 cm-cli.py）",
+                    "error_detail": ""}
         if on_progress is not None:
             def _tap(raw):
                 hit = _cmcli_update_progress(raw)
@@ -2103,15 +2159,18 @@ class PluginService:
             res = self._run_cmcli_streaming(["update", *nodes], on_output=_tap)
         else:
             res = self._run_cmcli(["update", *nodes])
+        combined = _cmcli_output(res)
         if res["error"]:
-            return {"updated": False, "up_to_date": False, "log": "", "error": res["error"]}
+            return {"updated": False, "up_to_date": False, "log": "",
+                    "error": res["error"], "error_detail": _tail(combined)}
         rc = res["returncode"]
-        out = (res["stdout"] or "").strip()
-        err = (res["stderr"] or "").strip()
-        log = _truncate(out if out else err)
+        log = _truncate(combined)
+        detail = _tail(combined)
         if rc != 0:
+            # rc != 0：cm-cli 进程异常退出（update 分支正常跑完只会 rc=0），
+            # 真正的报错在 stderr 尾部 —— error_detail 带着它。
             return {"updated": False, "up_to_date": False, "log": log,
-                    "error": f"cm-cli update 退出码 {rc}"}
+                    "error": f"cm-cli update 退出码 {rc}", "error_detail": detail}
         # P1-3：写操作后 evict。all → 全部清；指定名 → 只 evict 那几个
         try:
             if "all" in nodes:
@@ -2122,4 +2181,5 @@ class PluginService:
             pass
         # cm-cli update 成功（rc=0）。其输出是人类文本，难以可靠区分「真更新了」与「本就最新」，
         # 保守按「跑过更新流程」报 updated=True；细节见 log。
-        return {"updated": True, "up_to_date": False, "log": log, "error": None}
+        return {"updated": True, "up_to_date": False, "log": log, "error": None,
+                "error_detail": ""}

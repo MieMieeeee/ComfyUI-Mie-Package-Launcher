@@ -1148,3 +1148,74 @@ def test_controller_update_selected_streams_progress_to_ui(qt_app):
     kw["on_progress"](1, 2, "A")
     kw["on_progress"](2, 2, "B")
     assert got == [(1, 2, "A"), (2, 2, "B")]
+
+
+# ---- issue #111：失败时把 cm-cli 原始输出（error_detail）带到 UI ----
+
+def test_controller_keeps_error_detail_on_update_failure(qt_app):
+    """更新失败时，service 返回的 error_detail（cm-cli 输出尾部）要被存下来。
+
+    issue #111：失败弹窗原本只有「cm-cli update 退出码 1」，看不到 traceback。
+    """
+    from ui_qt.pages.plugins_page import PluginsPage, PluginController
+
+    page = PluginsPage(theme_manager=_stub_theme())
+    svc = MagicMock()
+    svc.update_selected.return_value = {
+        "updated": False, "up_to_date": False, "log": "",
+        "error": "cm-cli update 退出码 1",
+        "error_detail": "Traceback (most recent call last):\nTypeError: boom",
+    }
+    svc.list_installed.return_value = [_plugin("A")]
+    run_bg, post_ui = _sync_runner()
+    ctrl = PluginController(page, svc, run_bg, post_ui)
+
+    got = {}
+    ctrl.run_update_selected(["A"], on_done=lambda ok, msg: got.update(ok=ok, msg=msg))
+    assert got["ok"] is False
+    assert "cm-cli update 退出码 1" in got["msg"]
+    assert "TypeError: boom" in ctrl.last_error_detail()
+
+
+def test_controller_clears_stale_error_detail_before_next_run(qt_app):
+    """上一次失败的详情不能挂到下一次操作上（否则弹窗显示旧报错）。"""
+    from ui_qt.pages.plugins_page import PluginsPage, PluginController
+
+    page = PluginsPage(theme_manager=_stub_theme())
+    svc = MagicMock()
+    svc.update_selected.side_effect = [
+        {"updated": False, "up_to_date": False, "log": "",
+         "error": "cm-cli update 退出码 1", "error_detail": "OLD-DETAIL"},
+        {"updated": True, "up_to_date": False, "log": "", "error": None},
+    ]
+    svc.list_installed.return_value = [_plugin("A")]
+    svc.outdated_plugins.return_value = []
+    run_bg, post_ui = _sync_runner()
+    ctrl = PluginController(page, svc, run_bg, post_ui)
+
+    ctrl.run_update_selected(["A"], on_done=lambda ok, msg: None)
+    assert "OLD-DETAIL" in ctrl.last_error_detail()
+
+    ctrl.run_update_selected(["A"], on_done=lambda ok, msg: None)
+    assert ctrl.last_error_detail() == ""
+
+
+def test_controller_update_all_keeps_error_detail(qt_app):
+    """「更新全部」失败同样要带详情。"""
+    from ui_qt.pages.plugins_page import PluginsPage, PluginController
+
+    page = PluginsPage(theme_manager=_stub_theme())
+    svc = MagicMock()
+    svc.update_all.return_value = {
+        "updated": False, "up_to_date": False, "log": "",
+        "error": "cm-cli update 退出码 1",
+        "error_detail": "ALL-DETAIL",
+    }
+    svc.list_installed.return_value = [_plugin("A")]
+    run_bg, post_ui = _sync_runner()
+    ctrl = PluginController(page, svc, run_bg, post_ui)
+
+    got = {}
+    ctrl.run_update_all(on_done=lambda ok, msg: got.update(ok=ok, msg=msg))
+    assert got["ok"] is False
+    assert "ALL-DETAIL" in ctrl.last_error_detail()

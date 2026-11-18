@@ -39,12 +39,15 @@ def _do_list(app) -> dict:
 def _do_lifecycle(app, op, target) -> dict:
     """install/uninstall/disable/enable 共用：跑 cm-cli <op> <target>。"""
     if not target:
-        return {"ok": False, "log": "", "error": f"{op} 需要一个参数（插件 dir_name / git URL / CNR id）"}
+        return {"ok": False, "log": "", "error_detail": "",
+                "error": f"{op} 需要一个参数（插件 dir_name / git URL / CNR id）"}
     svc = _svc(app)
     fn = {"install": svc.install, "uninstall": svc.uninstall,
           "disable": svc.disable, "enable": svc.enable}[op]
     res = fn(target)
     return {"ok": bool(res.get("ok")), "log": res.get("log") or "",
+            # cm-cli 输出尾部（含 traceback）：失败时 agent 直接看这个定位
+            "error_detail": res.get("error_detail") or "",
             "error": res.get("error")}
 
 
@@ -88,10 +91,12 @@ def run(args, app) -> int:
             if r.get("error") or not r.get("ok"):
                 _emit(as_json, {"action": action, "target": target,
                                 "ok": False, "log": r.get("log") or "",
+                                "error_detail": r.get("error_detail") or "",
                                 "error": r.get("error")})
                 return EXIT_ERROR
             _emit(as_json, {"action": action, "target": target,
-                            "ok": True, "log": r.get("log") or "", "error": None})
+                            "ok": True, "log": r.get("log") or "",
+                            "error_detail": "", "error": None})
             return EXIT_OK
 
         if action == "check-updates":

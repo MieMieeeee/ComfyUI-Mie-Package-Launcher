@@ -78,6 +78,61 @@ def find_pids_by_port_safe(port: str):
         pass
     return []
 
+def _cmdline_via_windows_query(app, pid: int) -> str:
+    """Windows 下查进程命令行：wmic（老系统）→ PowerShell CIM（兜底的兜底）。
+
+    背景（2026-11-07 V9 机器事故）：身份门 is_comfyui_pid 依赖 psutil，而
+    psutil 曾被注释出 requirements 没进 exe；Windows 11 24H2+ 又移除了
+    wmic——两条路全断后身份校验恒 False，进程收养形同虚设，stop 沦为
+    「候选集全杀」危险兜底 + 人工 taskkill。CIM（Get-CimInstance
+    Win32_Process）是 wmic 的官方继任，PowerShell ≥3.0 的 Windows 都有；
+    单次查询 ~0.5s，只在身份校验冷路径（端口被占 / 收养 / 停止兜底）触发，
+    正常启动（端口空闲）不走这里。
+
+    返回命令行文本（可能多行 / 空串）；查不到返回 ""。
+    """
+    try:
+        if getattr(app, "_wmic_available", None) is None:
+            app._wmic_available = bool(shutil.which("wmic"))
+    except Exception:
+        try:
+            app._wmic_available = False
+        except Exception:
+            pass
+    preferred_enc = locale.getpreferredencoding(False) or "utf-8"
+    if app._wmic_available:
+        try:
+            r = run_hidden(
+                ["wmic", "process", "where", f"ProcessId={pid}", "get", "CommandLine", "/format:list"],
+                capture_output=True, text=True, encoding=preferred_enc, errors="ignore",
+                timeout=8,
+            )
+            if r.returncode == 0 and r.stdout:
+                return r.stdout
+            # wmic 在场但查询失败（策略禁用 / 输出为空）→ 落到 CIM
+        except FileNotFoundError:
+            try:
+                app._wmic_available = False
+            except Exception:
+                pass
+        except Exception:
+            pass
+    # CIM 兜底：wmic 缺席（Win11 24H2+ 移除）或查询失败时
+    ps_script = f"(Get-CimInstance Win32_Process -Filter 'ProcessId={int(pid)}').CommandLine"
+    try:
+        r = run_hidden(
+            ["powershell.exe", "-NoProfile", "-NonInteractive", "-ExecutionPolicy", "Bypass",
+             "-Command", ps_script],
+            capture_output=True, text=True, encoding=preferred_enc, errors="ignore",
+            timeout=8,
+        )
+        if r.returncode == 0 and r.stdout:
+            return r.stdout
+    except Exception:
+        pass
+    return ""
+
+
 def is_comfyui_pid(app, pid: int) -> bool:
     if psutil:
         try:
@@ -110,31 +165,26 @@ def is_comfyui_pid(app, pid: int) -> bool:
         except (Exception):
             pass
     if os.name == 'nt':
+        # 自 PID 排除（与 psutil 分支同语义）：launcher exe 路径本身含
+        # 「...\ComfyUI启动器.exe」，comfy_root 子串规则会误命中自己
         try:
-            if getattr(app, "_wmic_available", None) is None:
-                app._wmic_available = bool(shutil.which("wmic"))
+            if pid == os.getpid():
+                return False
         except Exception:
-            app._wmic_available = False
-        if app._wmic_available:
-            try:
-                # 多环境支持：读激活环境的 comfyui_root
-                paths = app.get_active_paths() if hasattr(app, "get_active_paths") \
-                    else app.config.get("paths", {})
-                base = Path(paths.get("comfyui_root") or ".").resolve()
-                comfy_root = str((base / "ComfyUI").resolve()).lower()
-            except Exception:
-                comfy_root = None
-            preferred_enc = locale.getpreferredencoding(False) or "utf-8"
-            try:
-                r = run_hidden(["wmic", "process", "where", f"ProcessId={pid}", "get", "CommandLine", "/format:list"], capture_output=True, text=True, encoding=preferred_enc, errors="ignore")
-                if r.returncode == 0 and r.stdout:
-                    out = r.stdout.lower()
-                    if ("main.py" in out and "comfyui" in out) or (comfy_root and comfy_root in out):
-                        return True
-            except FileNotFoundError:
-                app._wmic_available = False
-            except Exception:
-                pass
+            pass
+        # 多环境支持：读激活环境的 comfyui_root
+        try:
+            paths = app.get_active_paths() if hasattr(app, "get_active_paths") \
+                else app.config.get("paths", {})
+            base = Path(paths.get("comfyui_root") or ".").resolve()
+            comfy_root = str((base / "ComfyUI").resolve()).lower()
+        except Exception:
+            comfy_root = None
+        out = _cmdline_via_windows_query(app, pid)
+        if out:
+            lowered = out.lower()
+            if ("main.py" in lowered and "comfyui" in lowered) or (comfy_root and comfy_root in lowered):
+                return True
     return False
 
 def is_http_reachable(app, _log=False) -> bool:

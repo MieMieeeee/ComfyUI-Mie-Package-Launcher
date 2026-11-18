@@ -90,10 +90,15 @@ def main() -> int:
         base_dir = os.path.dirname(os.path.abspath(sys.executable))
     else:
         base_dir = os.path.dirname(os.path.abspath(__file__))
-    try:
-        os.chdir(base_dir)
-    except Exception:
-        pass
+    # 测试隔离钩子（2026-10-31）：test_main_cli 用独立 cwd + 独立 config 跑真子进程，
+    # 下面的 chdir 会把它拉回启动器目录、读到真实 config —— tmp config 从未生效，
+    # 子进程一直探测 repo config 的 8188，本机测试床 ComfyUI 常驻时 status 假绿
+    # (rc=0≠3 flake)。设 COMFYUI_LAUNCHER_KEEP_CWD=1 跳过 chdir；默认行为不变。
+    if os.environ.get("COMFYUI_LAUNCHER_KEEP_CWD") != "1":
+        try:
+            os.chdir(base_dir)
+        except Exception:
+            pass
     sys.path.insert(0, ".")
 
     # 本地正向代理（Clash 等，issue #109）：必须在任何出网动作之前改 os.environ。

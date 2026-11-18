@@ -26,10 +26,11 @@ commands:
   status       查询 ComfyUI 运行状态
   restart      先停后启 ComfyUI
   info         打印当前生效的配置
-  logs         tail 日志文件（launcher / comfyui / webui 三选一）
+  logs         tail 日志文件（launcher / comfyui / webui / openjutsu / h3-engine 五选一）
   update       更新组件（comfyui 内核 / plugins 全部插件）
   plugins      管理 custom_nodes 插件（list/install/uninstall/disable/enable/check-updates/force-update）
   webui        管理 Comfyui-Workbench-Mie (webui) 服务，与 ComfyUI 平级（详见 `webui --help`）
+  service      管理伴生服务（openjutsu / h3-engine；webui 为名义条目转发老实现，详见 `service --help`）
   package      加载整合包更新 manifest，show / diff / apply（详见 `package --help`）
   help         打印帮助（无参 = 顶层；带子命令名 = 该子命令的 help）
 ```
@@ -70,21 +71,27 @@ comfyui-launcher start [--no-wait] [--timeout SEC] [--env ENV_ID]
 
 **Exit codes:**
 - `0` 服务就绪（或 `--no-wait` 且进程 spawn 成功）
-- `1` 启动失败（路径不存在、env 异常、进程异常退出、超时）
-- `2` 已在跑（pidfile 显示有活进程）
+- `1` 启动失败（路径不存在、env 异常、进程异常退出、超时、端口被非 ComfyUI 进程占用、就绪校验不过）
+- `2` 已在跑（pidfile 显示有活进程，或端口被身份校验过的 ComfyUI 实例占用——收养后按已跑返回）
 
 **Output schema (human / `--json`):**
 - `started (bool)` 本次调用是否 spawn 了新进程
 - `pid (int|null)` ComfyUI PID；未启动时为 null
 - `port (int)` HTTP 端口
 - `url (str)` `http://127.0.0.1:<port>`
-- `ready (bool)` 是否在 `--timeout` 内拿到 200
+- `ready (bool)` 是否在 `--timeout` 内拿到 200 **且监听端口的就是本进程**（旧实例占着端口应答探针、新进程 bind 失败秒死的情况会判 false 并带 `error`）
 - `elapsed_sec (float)` 从 spawn 到就绪（或失败）的耗时
 - `log_path (str|null)` ComfyUI 日志路径
+- `error (str)` 仅失败时出现：失败原因（含端口占用者 pid）
+- `running_env_id (str)` 仅「已在跑」拒绝时出现：当前在跑的环境 id
 
 ### stop
 
 按 pidfile + 端口回退链停掉 ComfyUI。未运行是 no-op（也返回 0）。
+
+pidfile 失联（外部重启 / Manager 网页重启链换了 PID）时，会先按端口**收养**
+（`find_pids_by_port_safe` + `is_comfyui_pid` 身份校验，只收校验过的 PID）再停——
+端口上没有身份匹配的 ComfyUI 进程才视为「未在跑」no-op。
 
 ```
 comfyui-launcher stop [--timeout SEC] [--force]
@@ -101,7 +108,7 @@ comfyui-launcher stop [--timeout SEC] [--force]
 
 **Output schema:**
 - `stopped (bool)` 是否真的 kill 了进程
-- `pid (int|null)` 被停掉的 PID；nothing-to-stop 时为 null
+- `pid (int|null)` 被停掉的 PID（含收养来的外部实例）；nothing-to-stop 时为 null
 - `elapsed_sec (float)` 从请求到确认停止的耗时
 
 ### status
@@ -149,10 +156,17 @@ comfyui-launcher restart [--no-wait] [--timeout SEC] [--env ENV_ID]
 | `--env` | (config 的 `active_env_id`) | 一次性指定本次重启使用的环境 ID；不传则用 GUI 当前激活环境 |
 
 **Exit codes:**
-- `0` 重启后服务就绪
-- `1` 重启失败（stop 或 start 步骤失败）
+- `0` 重启后服务就绪（**必须是本次拉起的新进程在应答**——旧实例占着端口、新进程没换上的情况绝不返回 0）
+- `1` 重启失败（stop 或 start 步骤失败、就绪校验不过、端口被非 ComfyUI 进程占用）
+- `2` 没换成：start 拒绝重复（端口上已有实例，多见于 stop 没能杀掉持有者；人类通道会打一行「重启未生效：端口 X 仍被 pid Y 持有」）
 
-**Output schema:** 合并 stop + start 字段（`stopped`, `started`, `ready`, `pid`, `port`, `url`, `elapsed_sec`）。
+**Output schema:** 合并 stop + start 字段：
+- `stopped (bool)` / `stopped_pid (int)` 旧实例是否被停掉 / 被停的是谁
+- `started (bool)` 是否拉起了新进程
+- `ready (bool)` 新实例是否就绪（就绪校验含监听者身份，见 start）
+- `pid (int|null)` / `port (int)` / `url (str)` / `log_path (str|null)` / `elapsed_sec (float)`
+- `error (str)` 仅失败时出现
+- `running_env_id (str)` 仅 start 拒绝时出现：当前在跑的环境 id
 
 ### info
 
@@ -186,10 +200,12 @@ tail 日志文件。
 comfyui-launcher logs TARGET [-n N] [-f | --no-follow]
 ```
 
-`TARGET` ∈ `comfyui` / `launcher` / `webui`，对应：
+`TARGET` ∈ `comfyui` / `launcher` / `webui` / `openjutsu` / `h3-engine`，对应：
 - `comfyui` → `<comfyui_root>/user/comfyui.log`
 - `launcher` → `<cwd>/launcher/launcher.log`
 - `webui` → `<cwd>/launcher/webui.log`
+- `openjutsu` → `<cwd>/launcher/openjutsu.log`
+- `h3-engine` → `<cwd>/launcher/h3-engine.log`
 
 | flag | 默认 | 说明 |
 |---|---|---|
@@ -204,7 +220,7 @@ comfyui-launcher logs TARGET [-n N] [-f | --no-follow]
 - `1` log 文件不存在（且无回退路径）
 
 **Output schema:**
-- `target (str)` `"launcher"` / `"comfyui"` / `"webui"`
+- `target (str)` `"launcher"` / `"comfyui"` / `"webui"` / `"openjutsu"` / `"h3-engine"`
 - `log_path (str)` 解析到的日志路径
 - `lines (int)` 实际打印的行数
 - `following (bool)` `-f` 模式是否生效
@@ -242,6 +258,9 @@ comfyui-launcher update TARGET [--yes] [--dry-run] [--json]
 - `from_version (str|null)` 更新前版本（plugins target 为 null）
 - `to_version (str|null)` 更新后版本（未变时为 null）
 - `log (str)` 人类可读的更新摘要
+- `error_detail (str)` **仅失败时非空**：cm-cli 原始输出的**尾部**（含 traceback，
+  最多 4000 字符）。cm-cli 的报错栈在输出末尾，`log`（头部截断）里看不到 ——
+  失败时直接读这个字段定位（GUI 侧同一份内容显示在失败弹窗里）
 
 ### plugins
 
@@ -269,7 +288,9 @@ comfyui-launcher plugins ACTION [NAME] [--json]
 
 **Output schema:**
 - `list`: `plugins (list)` 每项 `{name, dir_name, is_git, enabled, version, remote_url}`；`count (int)`
-- `install/uninstall/disable/enable`: `action (str)` `target (str)` `ok (bool)` `log (str)` `error (str|null)`
+- `install/uninstall/disable/enable`: `action (str)` `target (str)` `ok (bool)` `log (str)` `error_detail (str)` `error (str|null)`
+  - `error_detail`：失败时是 cm-cli 原始输出的**尾部**（含 traceback，最多 4000 字符），
+    成功时为空串。cm-cli 的报错栈在输出末尾，`log`（头部截断）里看不到。
 - `check-updates`: `outdated (list)` 有更新的 dir_name 列表；`count (int)`
 - `force-update`: `results (list)` 每项 `{name, ok, skipped, detail}`；`all_ok (bool)`
 
@@ -326,6 +347,40 @@ comfyui-launcher package <ACTION> <PATH-OR-URL> [flags]
 确认要跑 → `package apply <url> --auto-yes` → 失败查 `package apply` 的 `--json` report。
 model 项永远需要用户手动下载（启动器不下载模型，只校验文件存在）；UP 主会在视频描述给链接。
 
+### service
+
+伴生服务（companion services）统一入口。服务是生命周期单元：`start` 阻塞到**全部端口就绪**（端口探测，不做 HTTP），`stop` 是进程树终止 + 端口复核 + **身份过滤**清残。服务 100% 限定在整合包路径（环境 `comfyui_root`）下——当前环境没有该服务时返回退出码 7。
+
+```
+comfyui-launcher service list [--json]
+comfyui-launcher service <ACTION> <SERVICE_ID> [flags]
+```
+
+`ACTION` ∈ `start / stop / status / info / restart / update`；`SERVICE_ID` ∈ `webui / openjutsu / h3-engine`（内置注册表 `core/companion/spec.py`）。
+`service ... webui` 转发老 `webui` 子命令实现（strangler：webui 运行时本期不在新框架上，行为/退出码一致）。
+
+openjutsu（`requires_comfyui`）：`start` 前 ComfyUI 必须在跑，否则退 6（不强启动，自动起走 GUI 一键启动）；三进程链 `npm build → proxy(8197) → app(8198)`，pidfile 是 v2 多进程格式（`launcher/openjutsu.pid`），日志三路合一（`launcher/openjutsu.log`，`[build]/[proxy]/[app]` 前缀）。
+
+h3-engine（H3 短剧工作台）：ComfyUI-Mie-H3-Engine 自带的 Flask 工作台，单进程（`<环境 python> -u <插件根>/webapp/__main__.py`），端口 8200（覆盖键 `services.h3-engine.port`）。**不要求 ComfyUI 在跑**（工作台离线也能管资产/剧本，只有提交渲染才需要 ComfyUI），所以 `requires_comfyui=false`、也不会被 `stop_orphan_companions` 顺手停掉。就绪判据比端口更严：`GET /api/health` 要回 `status=ok` 且 `app=comfyui-mie-web`。日志直写文件（`launcher/h3-engine.log`），CLI 起完退出后服务照样能写日志。
+
+| flag | 默认 | 说明 |
+|---|---|---|
+| `--env ENV_ID` | 激活环境 | 一次性环境覆盖（同全局约定，agent 默认不传）；`service` 的 stop/status/info **也认**它 |
+| `--no-wait` | off | start：spawn 完即返，不等端口就绪 |
+| `--timeout SEC` | 120 | start 等待端口就绪的最大秒数（openjutsu 含 npm build，别压太低） |
+| `--force` | off | stop：跳过优雅终止，直接进程树强杀 |
+
+**Exit codes:** `0` 成功（已在跑也返 0，`already_running=true` 幂等）/ `1` 通用（端口被占、spawn 失败、超时）/ `3` status 未在跑 / `6` ComfyUI 未跑（requires_comfyui 服务）/ `7` 未安装或环境无此服务 / `8` 依赖缺失（openjutsu: node / .proxy-site / node_modules；h3-engine: 入口 / 该环境 python / MieNodes 资产库 / mie_llm·mie_craft·mie_prompt·soundfile·flask 依赖）。
+
+**Output schema（--json 单行，字段见 `service --help` epilog）:**
+- `list`：`services: [{id, name, runtime, requires_comfyui, available, running}]`
+- `start`：`{ok, exit_code, pids: [{pid, role}], ports: {role: port}, url, already_running, adopted, log_path, error}`
+- `status`：`{running, ready, pids, ports: {role: {port, listening}}, url, since, env_id, health}`（`health` 只有提供语义探针的 runtime 才有值）
+- `info`：`{installed, root, ports, deps_ok, deps_missing, ...}`（依赖按**所选服务自己的 runtime** 查）
+- `update`（openjutsu 五步链 `git fetch+reset → npm ci → build → pip --target → patch`）：`{ok, updated, log, error}`（h3-engine 的 update 会明确拒绝：引擎本体走「插件管理」）
+
+`logs openjutsu` 读 `<cwd>/launcher/openjutsu.log`，`logs h3-engine` 读 `<cwd>/launcher/h3-engine.log`（自动化里**务必 `--no-follow`**）。
+
 ### help
 
 打印帮助。和 `-h/--help` 等价，但是是可以拼接的：可以看任意子命令的 help。
@@ -368,20 +423,22 @@ $ echo $?
 |---|---|---|
 | 0 | 成功 | 所有 |
 | 1 | 通用错误 | 所有 |
-| 2 | start 拒绝重复 | start |
+| 2 | start 拒绝重复；restart 没换成（端口上已有实例，服务没被换新） | start, restart |
 | 3 | 未在跑 | status |
 | 4 | 已是最新 | update |
 | 5 | package apply 部分失败（≥1 项 failed） | package |
-| 6 | webui start 时 ComfyUI 未运行（用了 `--with-comfyui`） | webui |
-| 7 | webui 路径未安装（用 `webui install` 拉取） | webui |
-| 8 | webui 依赖缺失（用 `webui setup` 安装） | webui |
+| 6 | webui start 时 ComfyUI 未运行（用了 `--with-comfyui`）；service start 的 requires_comfyui 服务（openjutsu）发现 ComfyUI 未跑 | webui, service |
+| 7 | webui 路径未安装（用 `webui install` 拉取）；service 的服务未安装 / 当前环境无此服务 | webui, service |
+| 8 | webui 依赖缺失（用 `webui setup` 安装）；service 的服务依赖缺失 | webui, service |
 | 9 | package apply 前置不兼容（dirty tree / env 不匹配且未 `--auto-yes`） | package |
 | 10 | package manifest 无效（schema / sha256 / version 超支持范围） | package |
 | 11 | package 源不可达（文件不存在 / URL 失败 / manifest URL 非 HTTPS） | package |
 
-> webui 的退出码（6/7/8）仅 `webui` 子命令返回；package 的退出码（5/9/10/11）仅 `package`
-> 子命令返回。ComfyUI 主服务（start/stop/status/info/logs/update/plugins）只用到 0–4。
-> package 刻意避开 webui 的 6/7/8，让外部监控脚本能按退出码区分子命令来源。
+> webui 的退出码（6/7/8）由 `webui` 与 `service` 两个子命令共用（同值同义——service 是
+> webui 语义的泛化命名，`service ... webui` 转发老实现，指同一服务时码必须一致）；
+> package 的退出码（5/9/10/11）仅 `package` 子命令返回。
+> ComfyUI 主服务（start/stop/status/info/logs/update/plugins）只用到 0–4。
+> package 刻意避开 6/7/8，让外部监控脚本能按退出码区分子命令来源。
 
 外部脚本（systemd / NSSM / 监控 agent）按这张表判断是否需要重试 / 告警；
 值稳定，请勿随意改。

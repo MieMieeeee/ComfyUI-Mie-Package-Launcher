@@ -2,6 +2,7 @@ import os
 import time
 import threading
 import subprocess
+from contextlib import nullcontext
 from pathlib import Path
 from typing import Optional
 from urllib.request import urlopen, Request
@@ -224,7 +225,66 @@ def _check_system_stats(port: str, timeout: float = 1.5) -> bool:
         return False
 
 
+def _verify_listener_is_spawned(pm, port: str) -> Optional[str]:
+    """就绪探针命中后，验证应答的就是本进程拉起的实例（2026-11-05 缺陷报告）。
+
+    /system_stats 是端口级探针：8188 上有**任何一个** ComfyUI 在应答它就通过，
+    分辨不出「刚 spawn 的」和「上一班留下的」。旧实例占着端口时，新进程会因
+    bind 失败悄悄退出（ComfyUI 只往日志写一行 [ERROR] Port ... already in use），
+    探针却永远命中旧进程——restart 因此报成功，整晚渲染跑的都是旧代码。
+
+    收口规则：本进程此刻仍活着 + 端口监听者集合包含本进程 pid，才算真就绪。
+    端口扫描拿不到监听者（psutil / netstat 均不可用）视为「无法证伪」放行，
+    校验链自身故障不应误杀正常启动。
+
+    返回 None = 通过；非 None = 失败原因（进 on_start_failed，冒到 CLI
+    返回值 / GUI 弹窗）。
+    """
+    try:
+        proc = getattr(pm, "comfyui_process", None)
+        if proc is None:
+            return "进程句柄缺失，无法确认就绪归属"
+        if proc.poll() is not None:
+            return "进程意外退出"
+        from core.probe import find_pids_by_port_safe
+        listeners = find_pids_by_port_safe(str(port))
+        if not listeners:
+            return None
+        if proc.pid not in listeners:
+            holder = ",".join(str(p) for p in sorted(listeners))
+            return (
+                f"端口 {port} 未由本进程（pid {proc.pid}）监听，当前监听者 pid "
+                f"{holder}——疑似旧实例仍在服务，本次启动未生效"
+            )
+        return None
+    except Exception:
+        return None
+
+
 def start(app, pm, cmd, env, run_cwd, log_path=None):
+    cancel = getattr(pm, "_launch_cancel", None)
+    if not isinstance(cancel, threading.Event):
+        cancel = None  # CLI / 旧调用者没有 GUI 启动任务。
+    if cancel is not None and cancel.is_set():
+        return
+
+    def cancelled():
+        return cancel is not None and cancel.is_set()
+
+    def post(fn):
+        # 入队和执行时都检查，避免停止后迟到的成功回调恢复运行态/打开网页。
+        if cancel is None:
+            _post_to_ui(app, fn)
+            return
+        if not cancelled():
+            _post_to_ui(app, lambda: fn() if not cancelled() else None)
+
+    def wait(seconds):
+        if cancel is not None:
+            return cancel.wait(seconds)
+        time.sleep(seconds)
+        return False
+
     app.big_btn.set_state("starting")
     app.big_btn.set_display("启动中…", "点击停止")
     app._launching = True
@@ -251,45 +311,64 @@ def start(app, pm, cmd, env, run_cwd, log_path=None):
             except Exception:
                 pass
 
-            _spawn_process(
-                pm, cmd, env, run_cwd,
-                show_console=show_console,
-                log_path=log_path,
-            )
+            with pm._launch_spawn_lock if cancel is not None else nullcontext():
+                if cancelled():
+                    return
+                _spawn_process(
+                    pm, cmd, env, run_cwd,
+                    show_console=show_console,
+                    log_path=log_path,
+                )
 
             # 等待进程初始化，再开始轮询 API
-            time.sleep(3)
+            if wait(3):
+                return
 
             # 轮询 /system_stats 直到 ComfyUI 完全启动（最多 120 秒）
             deadline = time.time() + 120.0
             while time.time() < deadline:
+                if cancelled():
+                    return
                 # 进程已退出
                 if pm.comfyui_process and pm.comfyui_process.poll() is not None:
-                    _post_to_ui(app, lambda: pm.on_start_failed("进程意外退出"))
+                    post(lambda: pm.on_start_failed("进程意外退出"))
                     return
 
                 if _check_system_stats(port):
+                    # 探针只证明「端口上有个 ComfyUI 在应答」，不证明是我 spawn
+                    # 的那个（旧实例占端口 + 新进程 bind 失败秒死 = 假就绪）。
+                    # 校验不过必须响亮失败，不能让 restart 拿旧进程当新进程报成功。
+                    mismatch = _verify_listener_is_spawned(pm, port)
+                    if mismatch is not None:
+                        try:
+                            app.logger.error("就绪校验失败：%s", mismatch)
+                        except Exception:
+                            pass
+                        post(lambda r=mismatch: pm.on_start_failed(r))
+                        return
                     try:
                         app.logger.info("ComfyUI /system_stats 就绪，启动完成")
                     except Exception:
                         pass
-                    _post_to_ui(app, pm.on_start_success)
+                    post(pm.on_start_success)
                     return
 
-                time.sleep(1.5)
+                if wait(1.5):
+                    return
 
             # 超时，但进程仍在运行 - 视为启动成功
             try:
                 if pm.comfyui_process and pm.comfyui_process.poll() is None:
                     app.logger.warning("启动轮询超时，但进程仍在运行，视为启动成功")
-                    _post_to_ui(app, pm.on_start_success)
+                    post(pm.on_start_success)
                 else:
-                    _post_to_ui(app, lambda: pm.on_start_failed("启动超时"))
+                    post(lambda: pm.on_start_failed("启动超时"))
             except Exception:
-                _post_to_ui(app, lambda: pm.on_start_failed("启动超时"))
+                post(lambda: pm.on_start_failed("启动超时"))
 
         except Exception as e:
             msg = str(e)
-            _post_to_ui(app, lambda m=msg: pm.on_start_failed(m))
+            post(lambda m=msg: pm.on_start_failed(m))
 
-    threading.Thread(target=worker, daemon=True).start()
+    pm._start_thread = threading.Thread(target=worker, daemon=True)
+    pm._start_thread.start()

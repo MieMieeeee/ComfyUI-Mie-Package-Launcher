@@ -13,11 +13,12 @@ from services.model_service import ModelService
 from services.launcher_update_service import LauncherUpdateService
 from services.plugin_service import PluginService
 from services.package_update_service import PackageUpdateService
+from services.pip_service import PipService
 
 
 class ServiceContainer:
     def __init__(self, process: ProcessService, version: VersionService, config: ConfigService,
-                 update: UpdateService, git: GitService, network: NetworkService, runtime: RuntimeService, announcement: AnnouncementService, startup: StartupService, model_path: ModelPathService, model: ModelService, launcher_update: LauncherUpdateService, plugins: PluginService, package: PackageUpdateService):
+                 update: UpdateService, git: GitService, network: NetworkService, runtime: RuntimeService, announcement: AnnouncementService, startup: StartupService, model_path: ModelPathService, model: ModelService, launcher_update: LauncherUpdateService, plugins: PluginService, package: PackageUpdateService, pip: PipService):
         self.process = process
         self.version = version
         self.config = config
@@ -32,6 +33,7 @@ class ServiceContainer:
         self.launcher_update = launcher_update
         self.plugins = plugins
         self.package = package
+        self.pip = pip
 
     @classmethod
     def from_app(cls, app):
@@ -57,4 +59,5 @@ class ServiceContainer:
             launcher_update=LauncherUpdateService(app),
             plugins=PluginService(app),
             package=PackageUpdateService(app),
+            pip=PipService(app),
         )

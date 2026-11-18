@@ -3,6 +3,7 @@ pip 工具模块
 提供 pip 可执行文件检测、包版本查询、安装和更新功能
 """
 
+import json
 import logging
 from pathlib import Path, PurePosixPath
 from typing import Optional, Union, Dict, Any, Iterable, List
@@ -100,6 +101,7 @@ def install_or_update_package(
     on_progress=None,
     env: Optional[dict] = None,
     force_reinstall: bool = False,
+    cancel_event=None,
 ) -> Dict[str, Any]:
     """Install or upgrade a single package, optionally streaming pip progress.
 
@@ -139,10 +141,23 @@ def install_or_update_package(
         if index_url:
             cmd.extend(["-i", index_url])
         logger.info(f"执行 pip 操作: {' '.join(cmd)}")
-        if on_progress is not None:
-            pip_result = _run_pip_streaming(cmd, logger, on_progress, env=env)
+        if on_progress is not None or cancel_event is not None:
+            # cancel_event 仅在给出时才透传：老调用方/测试的 _run_pip_streaming
+            # 替身签名没有该参数，恒传 None 会破坏既有契约。
+            stream_kwargs = {"env": env}
+            if cancel_event is not None:
+                stream_kwargs["cancel_event"] = cancel_event
+            pip_result = _run_pip_streaming(
+                cmd, logger, on_progress or (lambda text: None), **stream_kwargs)
         else:
             pip_result = run_hidden(cmd, capture_output=True, text=True, env=env)
+        if _is_cancelled(pip_result):
+            result["error"] = (
+                "已取消（中途取消可能留下不完整安装，可重新安装修复）"
+            )
+            result["error_code"] = "USER_CANCELLED"
+            logger.info("pip 操作被用户取消: %s", package_name)
+            return result
         if pip_result.returncode == 0:
             result["success"] = True
             stdout = getattr(pip_result, "stdout", "") or ""
@@ -197,7 +212,208 @@ def batch_install_packages(
     return results
 
 
-def _run_pip_streaming(cmd, logger, on_progress, env=None):
+class PipListError(RuntimeError):
+    """pip list 失败（非零退出码 / 超时 / 输出不可解析）。"""
+
+
+def list_installed_packages(
+    python_exec: Union[str, Path],
+    timeout: int = 120,
+    logger: Optional[logging.Logger] = None,
+) -> List[Dict[str, str]]:
+    """列出环境中已安装的 pip 包（pip list --format=json）。
+
+    一律走 ``<python> -m pip``，不依赖 pip.exe 的存在。返回按包名排序的
+    ``[{"name": ..., "version": ...}]``；命令失败或输出不可解析时抛
+    :class:`PipListError`。
+    """
+    if logger is None:
+        logger = logging.getLogger(__name__)
+    python_path = Path(python_exec).resolve()
+    cmd = [
+        str(python_path), "-m", "pip", "list",
+        "--format=json", "--disable-pip-version-check",
+    ]
+    logger.info("执行 pip 列表查询: %s", " ".join(cmd))
+    r = run_hidden(cmd, capture_output=True, text=True, timeout=timeout)
+    if r.returncode != 0:
+        tail = ((r.stderr or "") + (r.stdout or ""))[-500:]
+        raise PipListError(
+            f"pip list 失败（退出码 {r.returncode}）: {tail.strip()}"
+        )
+    try:
+        data = json.loads(r.stdout or "[]")
+    except json.JSONDecodeError as e:
+        raise PipListError(f"pip list 输出解析失败: {e}") from e
+    packages: List[Dict[str, str]] = []
+    for item in data if isinstance(data, list) else []:
+        if not isinstance(item, dict):
+            continue
+        name = str(item.get("name") or "").strip()
+        version = str(item.get("version") or "").strip()
+        if name:
+            packages.append({"name": name, "version": version})
+    packages.sort(key=lambda p: p["name"].lower())
+    return packages
+
+
+def uninstall_packages(
+    names: Iterable[str],
+    python_exec: Union[str, Path],
+    logger: Optional[logging.Logger] = None,
+    on_progress=None,
+    cancel_event=None,
+    env: Optional[dict] = None,
+) -> Dict[str, Any]:
+    """卸载包（``<python> -m pip uninstall -y <names>``）。
+
+    强制带 ``-y``：子进程 stdin 是 DEVNULL，无 -y 时 pip 的确认交互会
+    直接 EOF 失败。on_progress / cancel_event 语义与
+    ``install_or_update_package`` 一致。
+    """
+    if logger is None:
+        logger = logging.getLogger(__name__)
+    result: Dict[str, Any] = {
+        "success": False,
+        "error": None,
+        "error_code": None,
+        "uninstalled": [],
+        "cancelled": False,
+    }
+    name_list = [str(n).strip() for n in (names or []) if str(n).strip()]
+    if not name_list:
+        result["error"] = "未提供要卸载的包名"
+        result["error_code"] = "PIP_NO_PACKAGES"
+        return result
+    try:
+        python_path = Path(python_exec).resolve()
+        cmd = [str(python_path), "-m", "pip", "uninstall", "-y", *name_list]
+        logger.info("执行 pip 卸载: %s", " ".join(cmd))
+        if on_progress is not None or cancel_event is not None:
+            pip_result = _run_pip_streaming(
+                cmd, logger, on_progress or (lambda text: None),
+                env=env, cancel_event=cancel_event,
+            )
+        else:
+            pip_result = run_hidden(cmd, capture_output=True, text=True, env=env)
+        stdout = getattr(pip_result, "stdout", "") or ""
+        result["uninstalled"] = [
+            line.split("Successfully uninstalled", 1)[1].strip()
+            for line in stdout.splitlines()
+            if line.startswith("Successfully uninstalled")
+        ]
+        if _is_cancelled(pip_result):
+            result["cancelled"] = True
+            result["error"] = (
+                "已取消（中途取消可能留下不完整卸载，可重新安装修复）"
+            )
+            result["error_code"] = "USER_CANCELLED"
+            logger.info("pip 卸载被用户取消: %s", name_list)
+            return result
+        if pip_result.returncode == 0:
+            result["success"] = True
+        else:
+            stderr = getattr(pip_result, "stderr", "") or ""
+            result["error"] = f"pip 卸载失败: {stderr[-500:]}"
+            result["error_code"] = "PIP_COMMAND_FAILED"
+            logger.error(result["error"])
+    except Exception as e:
+        result["error"] = f"pip 卸载异常: {e}"
+        result["error_code"] = "PIP_OPERATION_EXCEPTION"
+        logger.error(result["error"])
+    return result
+
+
+def run_pip_args(
+    pip_args: Iterable[str],
+    python_exec: Union[str, Path],
+    logger: Optional[logging.Logger] = None,
+    on_progress=None,
+    cancel_event=None,
+    env: Optional[dict] = None,
+) -> Dict[str, Any]:
+    """通用 pip 参数透传：``<python> -m pip <pip_args>``（流式执行）。
+
+    供「Python 库管理」页的自定义命令通道用：调用方负责把用户输入
+    规范化成 pip 参数列表（不含 python / -m pip 前缀）。镜像不在此处
+    注入——尊重命令显式 ``--index-url`` 与 python 根下 pip.ini。
+    """
+    if logger is None:
+        logger = logging.getLogger(__name__)
+    result: Dict[str, Any] = {
+        "success": False,
+        "returncode": None,
+        "stdout": "",
+        "stderr": "",
+        "error": None,
+        "error_code": None,
+        "cancelled": False,
+    }
+    try:
+        python_path = Path(python_exec).resolve()
+        cmd = [str(python_path), "-m", "pip", *[str(a) for a in pip_args]]
+        logger.info("执行 pip 命令: %s", " ".join(cmd))
+        pip_result = _run_pip_streaming(
+            cmd, logger, on_progress or (lambda text: None),
+            env=env, cancel_event=cancel_event,
+        )
+        result["returncode"] = pip_result.returncode
+        result["stdout"] = getattr(pip_result, "stdout", "") or ""
+        result["stderr"] = getattr(pip_result, "stderr", "") or ""
+        result["cancelled"] = _is_cancelled(pip_result)
+        if result["cancelled"]:
+            result["error"] = "已取消（中途取消可能留下不完整安装，可重新安装修复）"
+            result["error_code"] = "USER_CANCELLED"
+        elif pip_result.returncode == 0:
+            result["success"] = True
+        else:
+            result["error"] = (
+                f"pip 命令执行失败（退出码 {pip_result.returncode}）"
+            )
+            result["error_code"] = "PIP_COMMAND_FAILED"
+    except Exception as e:
+        result["error"] = f"pip 操作异常: {e}"
+        result["error_code"] = "PIP_OPERATION_EXCEPTION"
+        logger.error(result["error"])
+    return result
+
+
+def _is_cancelled(pip_result) -> bool:
+    """读 CompletedProcess 上的 cancelled 标记。
+
+    必须 ``is True``：测试里常拿 MagicMock 冒充 CompletedProcess，其
+    ``cancelled`` 属性是真值 MagicMock，用 bool() 会误判为「已取消」。
+    """
+    return getattr(pip_result, "cancelled", False) is True
+
+
+def _kill_tree(pid: int) -> None:
+    """杀掉进程树（pip 可能派生构建隔离/编译子进程）。
+
+    与 ``services/plugin_service._tree_kill_pid`` 同语义；utils 层不
+    import services，各自维护一份，避免反向依赖。
+    """
+    try:
+        if os.name == "nt":
+            run_hidden(
+                ["taskkill", "/PID", str(int(pid)), "/T", "/F"],
+                capture_output=True, text=True, timeout=10,
+            )
+        else:
+            import signal
+            import time as _time
+            os.kill(pid, signal.SIGTERM)
+            _time.sleep(1.2)
+            try:
+                os.kill(pid, 0)  # 探活：还活着才补刀
+            except OSError:
+                return
+            os.kill(pid, signal.SIGKILL)
+    except Exception:
+        pass
+
+
+def _run_pip_streaming(cmd, logger, on_progress, env=None, cancel_event=None):
     """Run pip with streaming stdout/stderr, reporting progress via on_progress.
 
     pip 的进度和阶段信息会同时写到 stdout 和 stderr：下载阶段基本
@@ -210,6 +426,11 @@ def _run_pip_streaming(cmd, logger, on_progress, env=None):
     现在把两个流共用一个行解析器；它们会并发地写"当前包"到同一个
     pkg_state，用轻量锁保护；on_progress 自身经 ui_post 投递到 UI
     线程，可以从任意线程调用。
+
+    ``cancel_event``（可选）：取消支持。逐行检查 + 心跳线程每 0.5s
+    检查（下载静默期没有输出行也能响应），命中即 ``_kill_tree`` 杀掉
+    pip 进程树；返回的 CompletedProcess 额外带 ``cancelled=True`` 属性
+    （普通 CompletedProcess 没有该字段，调用方用 getattr 取）。
     """
     import re as _re
     import subprocess
@@ -226,6 +447,12 @@ def _run_pip_streaming(cmd, logger, on_progress, env=None):
     if logger:
         logger.info("执行 pip requirements 安装（流式）: %s", " ".join(map(str, cmd)))
 
+    # 取消发生在启动前：不开子进程，直接返回 cancelled 结果。
+    if cancel_event is not None and cancel_event.is_set():
+        cancelled_result = subprocess.CompletedProcess(args=cmd, returncode=-1, stdout="", stderr="")
+        cancelled_result.cancelled = True
+        return cancelled_result
+
     # GUI 进程下，子进程必须显式给 stdin 一个 NUL 句柄，否则
     # subprocess._get_handles() 继承 GUI 的无效 stdin 报 WinError 6。
     proc = subprocess.Popen(
@@ -237,6 +464,16 @@ def _run_pip_streaming(cmd, logger, on_progress, env=None):
         creationflags=cf,
         env=env,
     )
+
+    user_cancelled = {"flag": False}
+
+    def _request_cancel():
+        # 行循环或心跳线程发现取消 → 杀掉 pip 进程树（含编译孙进程）。
+        user_cancelled["flag"] = True
+        try:
+            _kill_tree(proc.pid)
+        except Exception:
+            pass
 
     # 两个线程（主线程读 stdout，后台线程读 stderr）会同时改"当前包"，
     # 用锁保护。on_progress 的最终接收者是 UI 线程，不需要再保护。
@@ -260,6 +497,10 @@ def _run_pip_streaming(cmd, logger, on_progress, env=None):
 
     def _handle_line(raw):
         """把一行 pip 输出翻译成 UI 进度消息。stdout 和 stderr 共用。"""
+        # 每行先看取消：流式输出期间（下载进度条连续刷行）能即时响应。
+        if cancel_event is not None and cancel_event.is_set():
+            _request_cancel()
+            return
         try:
             if raw.startswith("Collecting "):
                 token = raw[len("Collecting "):].split()[0]
@@ -404,14 +645,24 @@ def _run_pip_streaming(cmd, logger, on_progress, env=None):
     # 不打任何东西 UI 就一直卡在"开始安装…"。每 5s 看一下距上次"真实行"
     # 多久了，超过 5s 就推一条"正在解析/下载中…（已等待 Ns）"覆盖 UI，
     # 让用户知道 pip 还在跑。pip 一打新行就由 on_progress 立刻覆盖。
+    # 取消检查也挂在这个线程上（0.5s 粒度）：静默期没有输出行，行循环
+    # 查不到 cancel_event，只能靠这里保证取消最迟 ~0.5s 生效。
     heartbeat_start = time.monotonic()
     heartbeat_stop = threading.Event()
 
     def _heartbeat():
+        waited_since_event = 0.0
         while not heartbeat_stop.is_set():
-            # 5s 检查一次；用 Event.wait 让 stop 立刻响应
-            if heartbeat_stop.wait(5.0):
+            if cancel_event is not None and cancel_event.is_set():
+                _request_cancel()
                 break
+            # 0.5s 一档等待；stop 立刻响应
+            if heartbeat_stop.wait(0.5):
+                break
+            waited_since_event += 0.5
+            if waited_since_event < 5.0:
+                continue
+            waited_since_event = 0.0
             with last_event_lock:
                 since_last = time.monotonic() - last_event_at["t"]
             # 5s 内有真实行 → 不打扰 pip 的进度显示
@@ -442,15 +693,24 @@ def _run_pip_streaming(cmd, logger, on_progress, env=None):
     stderr_thread.join(timeout=5)
     stderr_out = b"".join(stderr_parts).decode("utf-8", errors="ignore")
 
+    # 保险：cancel 命中但 kill 还没生效（例如进程刚好在等 wait）→ 再杀一次
+    if cancel_event is not None and cancel_event.is_set() and proc.poll() is None:
+        _kill_tree(proc.pid)
+
     if logger:
         logger.info("pip 流式安装完成: rc=%d", proc.returncode)
 
-    return subprocess.CompletedProcess(
+    result = subprocess.CompletedProcess(
         args=cmd,
         returncode=proc.returncode,
         stdout="\n".join(stdout_lines),
         stderr=stderr_out,
     )
+    result.cancelled = (
+        (cancel_event is not None and cancel_event.is_set())
+        or user_cancelled["flag"]
+    )
+    return result
 
 
 import re as _re_missing

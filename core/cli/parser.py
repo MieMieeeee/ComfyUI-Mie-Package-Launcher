@@ -14,6 +14,8 @@
     logs        tail 日志（launcher / comfyui 二选一）
     update      更新组件（comfyui 内核 / plugins 全部插件）
     plugins     管理 custom_nodes 插件（list/install/uninstall/disable/enable/check-updates/force-update）
+    webui       管理 WebUI 工作台（老命令，契约不变）
+    service     管理伴生服务（openjutsu 等；webui 为名义条目转发老实现）
 """
 import argparse
 from typing import Final, List
@@ -29,12 +31,13 @@ SUBCOMMANDS: Final[List[str]] = [
     "update",
     "plugins",
     "webui",
+    "service",
     "package",
     "help",
 ]
 
 # logs 子命令的稳定目标清单。
-LOGS_TARGETS: Final[List[str]] = ["launcher", "comfyui", "webui"]
+LOGS_TARGETS: Final[List[str]] = ["launcher", "comfyui", "webui", "openjutsu", "h3-engine"]
 
 # update 子命令的稳定目标清单。
 UPDATE_TARGETS: Final[List[str]] = ["comfyui", "plugins"]
@@ -51,6 +54,11 @@ WEBUI_ACTIONS: Final[List[str]] = [
     "install", "setup", "update",
 ]
 
+# service 子命令的稳定 action 清单 (与 cmd_service.SERVICE_ACTIONS 一致).
+SERVICE_ACTIONS: Final[List[str]] = [
+    "list", "start", "stop", "status", "info", "restart", "update",
+]
+
 # package 子命令的稳定 action 清单（与 cmd_package.py 一致）.
 PACKAGE_ACTIONS: Final[List[str]] = ["show", "diff", "apply"]
 
@@ -60,17 +68,24 @@ PACKAGE_ACTIONS: Final[List[str]] = ["show", "diff", "apply"]
 _START_EPILOG = """\
 Exit codes:
   0  service is ready (HTTP reachable, or --no-wait and process spawned)
-  1  failed to start (path missing, env error, process exited)
-  2  service was already running (refuse to double-start)
+  1  failed to start (path missing, env error, process exited, port held
+                     by a non-ComfyUI process, or ready-listener check failed)
+  2  service was already running (refuse to double-start; includes adoption
+                     of an externally restarted instance found by port)
 
 Output schema (default human / --json):
   started     (bool)   - whether this invocation launched a new process
   pid         (int)    - PID of the ComfyUI process; null if not launched
   port        (int)    - HTTP port from config
   url         (str)    - http://127.0.0.1:<port>
-  ready       (bool)   - whether /system_stats returned 200 within --timeout
+  ready       (bool)   - /system_stats 200 within --timeout AND the port
+                         listener is the spawned process (an old instance
+                         answering the probe does not count as ready)
   elapsed_sec (float)  - seconds from spawn to ready (or fail)
   log_path    (str)    - path to ComfyUI stdout log; null if unknown
+  error       (str)    - failure reason; only present on failure
+  running_env_id (str) - env id of the running instance; only present when
+                         start is refused because it is already running
 """
 
 _STOP_EPILOG = """\
@@ -80,8 +95,14 @@ Exit codes:
 
 Output schema (default human / --json):
   stopped     (bool)   - whether a process was actually killed
-  pid         (int)    - PID that was stopped; null if nothing to stop
+  pid         (int)    - PID that was stopped (adopted external instance
+                         included); null if nothing to stop
   elapsed_sec (float)  - seconds from request to confirmed stop
+
+Notes: when the pidfile is stale, stop first adopts the externally restarted
+ComfyUI found on the port (find_pids_by_port_safe + is_comfyui_pid identity
+check), then kills it. "Not running" no-op only happens when no
+identity-verified ComfyUI holds the port.
 """
 
 _STATUS_EPILOG = """\
@@ -102,15 +123,24 @@ Output schema (default human / --json):
 
 _RESTART_EPILOG = """\
 Exit codes:
-  0  restarted and service is ready
-  1  failed to restart (start or stop failed)
-  2  service was already running and could not be stopped first
+  0  restarted and service is ready (the newly spawned process must be the
+     one answering on the port; an old instance answering never yields 0)
+  1  failed to restart (start or stop failed, ready-listener check failed,
+     or port held by a non-ComfyUI process)
+  2  swap did not happen: start refused because an instance is already
+     running (usually the stop step could not kill the port holder)
 
 Output schema (default human / --json):
   stopped       (bool)  - whether a previous instance was stopped
+  stopped_pid   (int)   - PID that was stopped; present when a stop target existed
   started       (bool)  - whether a new instance was launched
   ready         (bool)  - whether the new instance reached /system_stats 200
+                          with the spawned process as the port listener
   elapsed_sec   (float) - total seconds (stop + start)
+  pid / port / url / log_path - from the start step
+  error         (str)   - failure reason; only present on failure
+  running_env_id (str)  - env id of the running instance; only present when
+                          start is refused because it is already running
 """
 
 _INFO_EPILOG = """\
@@ -200,9 +230,8 @@ Output schema (default human / --json):
 
 _WEBUI_EPILOG = """\
 Exit codes:
-  0  success
+  0  success (start 时 webui 已在跑也返 0, already_running=true —— 幂等)
   1  general error (path missing / IO / timeout)
-  2  start 拒绝重复 (webui 已在跑)
   3  status 进程未在跑
   6  webui start 时检测到 ComfyUI 未运行 (用了 --with-comfyui)
   7  webui 路径未安装 (用 install 子动作拉)
@@ -255,6 +284,52 @@ Actions:
   install  拉 webui 仓库 + 装依赖 (无 webui 时)
   setup    仅装依赖 (webui 已 clone 但缺包时)
   update   git pull (webui 已装时)
+"""
+
+_SERVICE_EPILOG = """\
+伴生服务（companion services）统一入口。服务是生命周期单元：start/ready/stop
+对外原子，内部几条命令是实现细节。服务 100% 限定在整合包路径（环境 comfyui_root）下。
+
+内置服务（注册表，见 core/companion/spec.py）:
+  webui      WebUI 工作台 —— 名义条目，转发老 webui 子命令实现（行为/退出码一致）
+  openjutsu  openjutsu 视频换角色 —— 走伴生服务新框架（proxy 8189 + app 3000）
+  h3-engine  H3 短剧工作台 —— ComfyUI-Mie-H3-Engine 的 Flask 工作台（app 8200）
+
+Actions:
+  list      注册表总览（每服务 available / running）
+  start     启动服务 (阻塞到全部端口就绪; --no-wait spawn 完即返)
+  stop      停止服务 (幂等, 未跑也返 0; 进程树终止 + 端口复核)
+  status    查询状态 (running=进程层[身份校验过], ready=加端口层)
+  info      当前生效配置 (路径 / 端口 / 依赖 / 安装状态)
+  restart   stop + start
+  update    更新链 (openjutsu: git fetch+reset → npm ci → build → pip --target → patch;
+            h3-engine 引擎本体走「插件管理」，本命令只管工作台服务启停)
+
+--env <ENV_ID> 覆盖本次调用的环境 (start/stop/status/info/update 都支持)。
+  注意 stop 也认 --env: 不带就是「当前激活环境」。
+
+Exit codes (与 webui 子命令同值同义):
+  0  success (start 时已在跑也返 0, already_running=true —— 幂等)
+  1  general error (端口被占 / spawn 失败 / 超时)
+  3  status 进程未在跑
+  6  start 时 requires_comfyui 的服务发现 ComfyUI 未跑 (不强启动; 自动起走 GUI)
+  7  服务未安装 / 当前环境无此服务
+  8  依赖缺失 (openjutsu: node / .proxy-site / node_modules;
+             h3-engine: 入口 / 该环境 python / MieNodes 资产库 / mie_* 依赖)
+
+Output schema (--json, 单行):
+  list:     {action, services: [{id, name, runtime, requires_comfyui,
+             available, running}]}
+  start:    {action, service, ok, exit_code, pids: [{pid, role}],
+             ports: {role: port}, url, already_running, adopted, log_path, error}
+  stop:     {action, service, ok, killed, residual_ports, elapsed_sec}
+  status:   {action, service, running, ready, pids, ports: {role: {port, listening}},
+             url, log_path, since, env_id, health}
+  info:     {action, service, installed, root, ports, deps_ok, deps_missing, ...}
+  update:   {action, service, ok, updated, log, error}
+
+logs 目标: logs openjutsu 读 launcher/openjutsu.log, logs h3-engine 读
+launcher/h3-engine.log (务必 --no-follow).
 """
 
 _PACKAGE_EPILOG = """\
@@ -649,6 +724,59 @@ def build_parser() -> argparse.ArgumentParser:
         default=None,
         metavar="URL",
         help="install 时用这个 git URL 覆盖默认 (https://github.com/MieMieeeee/Comfyui-Workbench-Mie.git)。",
+    )
+
+    # service (伴生服务)
+    try:
+        from core.companion.spec import BUILTIN_SERVICES as _BUILTIN_SERVICES
+        _service_ids_hint = ", ".join(sorted(_BUILTIN_SERVICES))
+    except Exception:
+        _service_ids_hint = "webui, openjutsu"
+    sp = _make_subparser(
+        sub, "service",
+        help="管理伴生服务 (openjutsu 等, 与 ComfyUI 平级)",
+        description="伴生服务统一入口: list / start / stop / status / info / restart / update."
+                    " 服务是生命周期单元, 内部几条命令是实现细节;"
+                    " webui 是名义条目, 转发老 webui 子命令实现。",
+        epilog=_SERVICE_EPILOG,
+        formatter_class=argparse.RawDescriptionHelpFormatter,
+    )
+    sp.add_argument(
+        "service_action",
+        choices=SERVICE_ACTIONS,
+        metavar="ACTION",
+        help="list / start / stop / status / info / restart / update。",
+    )
+    sp.add_argument(
+        "service_id",
+        nargs="?",
+        default=None,
+        metavar="SERVICE",
+        help=f"服务 id (可选: {_service_ids_hint}); list 可省略。",
+    )
+    sp.add_argument(
+        "--env",
+        type=str,
+        default=None,
+        metavar="ENV_ID",
+        help="使用指定的环境（覆盖 config 的 active_env_id）; 不传则用激活环境。",
+    )
+    sp.add_argument(
+        "--no-wait",
+        action="store_true",
+        help="start: spawn 完立即返回, 不等待端口就绪。",
+    )
+    sp.add_argument(
+        "--timeout",
+        type=int,
+        default=120,
+        metavar="SEC",
+        help="start 等待端口就绪的最大秒数（默认 120; openjutsu 首启含 npm build）。",
+    )
+    sp.add_argument(
+        "--force",
+        action="store_true",
+        help="stop 时跳过优雅终止, 直接进程树强杀。",
     )
 
     return p

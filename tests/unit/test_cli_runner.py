@@ -330,6 +330,54 @@ class TestStartService:
         from core.cli.pidfile import default_path
         assert not default_path(tmp_path).exists()
 
+    def test_start_failure_reason_surfaced_to_result(self, tmp_path):
+        """定格失败（on_start_failed 已回调）时原因必须冒到返回值 error 字段。
+
+        2026-11-05 缺陷报告第 4 点：新进程 bind 失败死了，launcher 依然只回
+        started/ready，调用方看不到为什么。"""
+        app = _make_app(tmp_path)
+
+        fake_proc = MagicMock(pid=75820)
+        fake_proc.poll.return_value = None
+
+        def fake_runner_start(a, pm, cmd, env, run_cwd, log_path=None):
+            pm.comfyui_process = fake_proc
+            pm.on_start_failed("端口 8188 未由本进程（pid 75820）监听，当前监听者 pid 44288")
+
+        with patch("core.cli.runner.runner_start", side_effect=fake_runner_start), \
+             patch("core.cli.runner.build_launch_params") as mock_build, \
+             patch("core.cli.runner._resolve_log_path") as mock_log:
+            fake_py = tmp_path / "python.exe"
+            fake_py.write_text("")
+            fake_main = tmp_path / "main.py"
+            fake_main.write_text("")
+            mock_build.return_value = ([], {}, str(tmp_path), fake_py, fake_main)
+            mock_log.return_value = None
+
+            result = start_service(app, no_wait=False, timeout=5)
+
+        assert result["started"] is True
+        assert result["ready"] is False
+        assert "44288" in (result.get("error") or "")
+
+    def test_start_refuses_when_port_held_by_non_comfyui(self, tmp_path):
+        """端口被非 ComfyUI 进程占用 → 直接拒绝，不 spawn 必死的进程。
+
+        收养分支只处理「身份校验过的 ComfyUI」；走到预检还占着端口的是身份
+        不明者，点名拒绝，交给用户处理。"""
+        app = _make_app(tmp_path)
+
+        with patch("core.probe.find_pids_by_port_safe", return_value=[555, 666]), \
+             patch("core.probe.is_comfyui_pid", return_value=False), \
+             patch("core.cli.runner.build_launch_params") as mock_build:
+            result = start_service(app, no_wait=False, timeout=5)
+
+        mock_build.assert_not_called()  # 没有进入启动路径
+        assert result["started"] is False
+        assert result["ready"] is False
+        assert "非 ComfyUI 进程占用" in (result.get("error") or "")
+        assert "555" in (result.get("error") or "") and "666" in (result.get("error") or "")
+
     def test_no_wait_returns_immediately_after_spawn(self, tmp_path):
         """--no-wait 时不等 /system_stats 就绪，立即返回 started=True。"""
         app = _make_app(tmp_path)
@@ -435,6 +483,60 @@ class TestStopService:
         assert mock_stop.call_args is not None
         # 实际是 app._force = True
         assert getattr(app, "_force", False) is True
+
+    # ---- stop 的端口兜底（2026-11-05 缺陷报告第 2 点）----
+
+    def test_stop_adopts_external_when_pidfile_stale(self, tmp_path):
+        """pidfile 失联 + 端口有外部重启出来的 ComfyUI → 先收养再停，不能 no-op。
+
+        事故形态：Manager 网页 Apply/重启的 os.execv 链换 PID 后 pidfile 失明，
+        stop 返回 pid:null 什么都不做，旧实例继续服务旧代码。
+        """
+        from core.cli.pidfile import default_path, read
+        app = _make_app(tmp_path)
+        fake_pid = os.getpid()  # 收养的 stale 校验要求 PID 活着
+
+        with patch("core.probe.find_pids_by_port_safe", return_value=[fake_pid]), \
+             patch("core.probe.is_comfyui_pid", return_value=True), \
+             patch("core.cli.runner.runner_stop", return_value=True) as mock_stop:
+            result = stop_service(app, timeout=5, force=False)
+
+        mock_stop.assert_called_once()          # 停止链真的跑了
+        assert result["stopped"] is True
+        assert result["pid"] == fake_pid        # 报告杀的是谁（收养来的）
+        assert not default_path(tmp_path).exists()  # kill 成功后 pidfile 清掉
+
+    def test_stop_adopts_then_kill_fails_keeps_stopped_false(self, tmp_path):
+        """收养命中但 runner_stop 没杀掉 → stopped=False，且 pidfile 保留（下次可重试）。"""
+        from core.cli.pidfile import default_path, read
+        app = _make_app(tmp_path)
+        fake_pid = os.getpid()
+
+        with patch("core.probe.find_pids_by_port_safe", return_value=[fake_pid]), \
+             patch("core.probe.is_comfyui_pid", return_value=True), \
+             patch("core.cli.runner.runner_stop", return_value=False):
+            result = stop_service(app, timeout=5, force=False)
+
+        assert result["stopped"] is False
+        assert result["pid"] == fake_pid
+        # 杀失败不清 pidfile：收养结果保留，下次 stop 还找得到目标
+        kept = read(default_path(tmp_path))
+        assert kept is not None and kept["pid"] == fake_pid
+
+    def test_stop_no_adoption_when_port_holder_not_comfyui(self, tmp_path):
+        """端口被非 ComfyUI 进程占用 → 不收养不误杀，维持 no-op。"""
+        from core.cli.pidfile import default_path
+        app = _make_app(tmp_path)
+
+        with patch("core.probe.find_pids_by_port_safe", return_value=[os.getpid()]), \
+             patch("core.probe.is_comfyui_pid", return_value=False), \
+             patch("core.cli.runner.runner_stop", return_value=True) as mock_stop:
+            result = stop_service(app, timeout=5, force=False)
+
+        mock_stop.assert_not_called()
+        assert result["stopped"] is False
+        assert result["pid"] is None
+        assert not default_path(tmp_path).exists()
 
 
 # ---------- service_status ----------

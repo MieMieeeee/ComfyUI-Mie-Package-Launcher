@@ -461,6 +461,16 @@ class WebuiProcessManager:
             except Exception:
                 occupy = []
             for opid in occupy:
+                # 身份过滤（2026-11-07 事故）：这条兜底此前对端口占用者无差别
+                # taskkill /F，本机另一个任务的 WebUI 服务（占用 8199 的 pid
+                # 21588）被误杀。只杀 cmdline 特征校验过的 webui 进程；校验
+                # 不过的占用者留给用户处理（与 ComfyUI 侧 / 伴生服务框架的
+                # 「停止清残必须身份过滤」同一原则）。
+                try:
+                    if not _is_webui_pid(opid):
+                        continue
+                except Exception:
+                    continue
                 try:
                     if os.name == "nt":
                         run_hidden(

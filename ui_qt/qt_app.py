@@ -13,7 +13,7 @@ from services.di import ServiceContainer
 from core.version_service import refresh_version_info
 from core.process_manager import ProcessManager
 from core import process_events
-from core.orphan_killer import stop_orphan_webui
+from core.orphan_killer import stop_orphan_webui, stop_orphan_companions
 from core.version_workers import (
     PythonVersionWorker,
     TorchVersionWorker,
@@ -43,9 +43,13 @@ from ui_qt.pages.about_me_page import AboutMePage
 from ui_qt.pages.about_comfyui_page import AboutComfyUIPage
 from ui_qt.pages.about_launcher_page import AboutLauncherPage
 from ui_qt.pages.plugins_page import PluginsPage, PluginController
+from ui_qt.pages.pip_page import PipPage, PipController
 from ui_qt.pages.package_update_page import PackageUpdatePage
 from ui_qt.pages.system_settings_page import SystemSettingsPage
 from ui_qt.pages.webui_page import WebuiPage
+from ui_qt.pages.openjutsu_page import OpenjutsuPage
+from ui_qt.pages.h3_page import H3Page
+from ui_qt.pages.advanced_services_page import AdvancedServicesPage
 from ui_qt.widgets.tray_icon import LauncherTray
 from ui_qt.log_viewer import LogViewerPage
 
@@ -2143,9 +2147,10 @@ class PyQtLauncher(QtWidgets.QMainWindow, process_events.ProcessCallback):
 
         btns = {
             "launch": NavBtn("🚀 启动与更新"),
-            "webui": NavBtn("🧪 WebUI 工作台"),
+            "advanced": NavBtn("🧪 进阶服务"),
             "logs": NavBtn("📋 ComfyUI 实时日志"),
             "plugins": NavBtn("🧩 插件管理"),
+            "pip": NavBtn("🐍 Python 库管理"),
             "version": NavBtn("🧬 内核版本管理"),
             "package": NavBtn("📦 更新中心"),
             "models": NavBtn("📂 外置模型库管理"),
@@ -2159,8 +2164,8 @@ class PyQtLauncher(QtWidgets.QMainWindow, process_events.ProcessCallback):
         # 为导航按钮添加工具提示和存储完整文字
         btns["launch"].setToolTip("启动、停止ComfyUI，查看运行状态")
         btns["launch"].setProperty("full_text", "🚀 启动与更新")
-        btns["webui"].setToolTip("启动 Comfyui-Workbench-Mie 多工作流 WebUI 工作台")
-        btns["webui"].setProperty("full_text", "🧪 WebUI 工作台")
+        btns["advanced"].setToolTip("WebUI 工作台 / openjutsu 等进阶服务（与 ComfyUI 配套的可选服务）")
+        btns["advanced"].setProperty("full_text", "🧪 进阶服务")
         btns["logs"].setToolTip("实时显示 ComfyUI 运行日志")
         btns["logs"].setProperty("full_text", "📋 ComfyUI 实时日志")
         btns["version"].setToolTip("管理ComfyUI内核版本，切换提交")
@@ -2179,6 +2184,8 @@ class PyQtLauncher(QtWidgets.QMainWindow, process_events.ProcessCallback):
         btns["about_launcher"].setProperty("full_text", "🧰 关于启动器")
         btns["plugins"].setToolTip("管理 custom_nodes 插件：列已装、勾选更新")
         btns["plugins"].setProperty("full_text", "🧩 插件管理")
+        btns["pip"].setToolTip("管理当前环境的 Python 库（pip 包）：列已装、安装/升级/卸载、粘贴完整 pip 命令")
+        btns["pip"].setProperty("full_text", "🐍 Python 库管理")
         btns["tasks"].setToolTip("查看后台运行的任务和完成历史")
         btns["tasks"].setProperty("full_text", "📋 后台任务")
         self._nav_buttons = list(btns.values())
@@ -2381,6 +2388,19 @@ class PyQtLauncher(QtWidgets.QMainWindow, process_events.ProcessCallback):
         self._launch_page = page_launch
         page_webui = WebuiPage(app=self, theme_manager=self.theme_manager)
         self._webui_page = page_webui
+        # openjutsu 伴生服务页 (availability 探测是纯文件系统调用, 恒构造)
+        page_openjutsu = OpenjutsuPage(app=self, theme_manager=self.theme_manager)
+        self._openjutsu_page = page_openjutsu
+        # H3 短剧工作台页 (ComfyUI-Mie-H3-Engine 的 Flask 工作台, 8200)
+        page_h3 = H3Page(app=self, theme_manager=self.theme_manager)
+        self._h3_page = page_h3
+        # 进阶服务合并页: 一个侧边栏入口, 内部 QTabWidget (WebUI 工作台 + openjutsu + H3).
+        # openjutsu / H3 的 tab 按环境显隐由容器自己管 (构造时即刷新一次).
+        page_advanced = AdvancedServicesPage(
+            app=self, theme_manager=self.theme_manager,
+            webui_page=page_webui, openjutsu_page=page_openjutsu,
+            h3_page=page_h3)
+        self._advanced_page = page_advanced
         # 日志页:实时 tail ComfyUI 日志
         page_logs = LogViewerPage(theme_manager=self.theme_manager)
         self._log_viewer_page = page_logs  # 保存引用，用于后续更新显示
@@ -2426,6 +2446,8 @@ class PyQtLauncher(QtWidgets.QMainWindow, process_events.ProcessCallback):
         )
         page_plugins = PluginsPage(app=self, theme_manager=self.theme_manager)
         self._plugins_page = page_plugins  # 供 _do_plugin_check_updates 等回推结果用
+        page_pip = PipPage(app=self, theme_manager=self.theme_manager)
+        self._pip_page = page_pip
         page_package = PackageUpdatePage(app=self, theme_manager=self.theme_manager)
         self._package_page = page_package
         # 后台任务页：注册表已在 _setup_ui 侧边栏构造时建好（self._bg_task_registry）
@@ -2440,7 +2462,7 @@ class PyQtLauncher(QtWidgets.QMainWindow, process_events.ProcessCallback):
         # Store references for theme updates
         self._new_pages = {
             "launch": page_launch,
-            "webui": page_webui,
+            "advanced": page_advanced,
             "logs": page_logs,
             "version": page_version,
             "package": page_package,
@@ -2450,6 +2472,7 @@ class PyQtLauncher(QtWidgets.QMainWindow, process_events.ProcessCallback):
             "comfyui": page_about_comfyui,
             "about_launcher": page_about_launcher,
             "plugins": page_plugins,
+            "pip": page_pip,
             "tasks": page_tasks,
         }
 
@@ -2531,9 +2554,12 @@ class PyQtLauncher(QtWidgets.QMainWindow, process_events.ProcessCallback):
             return scroll
 
         content.addWidget(wrap_in_scroll(page_launch))
-        content.addWidget(wrap_in_scroll(page_webui))
+        # 进阶服务容器不外包 scroll: 它的每个 tab 内部自带滚动区
+        # (子页原本靠这层滚动, 塞进 tab 后必须内移, 否则内容截断)
+        content.addWidget(page_advanced)
         content.addWidget(wrap_in_scroll(page_logs))
         content.addWidget(wrap_in_scroll(page_plugins))
+        content.addWidget(wrap_in_scroll(page_pip))
         content.addWidget(wrap_in_scroll(page_version))
         content.addWidget(wrap_in_scroll(page_package))
         content.addWidget(wrap_in_scroll(page_models))
@@ -2545,9 +2571,10 @@ class PyQtLauncher(QtWidgets.QMainWindow, process_events.ProcessCallback):
         # Navigation actions
         pages = {
             "launch": page_launch,
-            "webui": page_webui,
+            "advanced": page_advanced,
             "logs": page_logs,
             "plugins": page_plugins,
+            "pip": page_pip,
             "version": page_version,
             "package": page_package,
             "models": page_models,
@@ -2570,6 +2597,7 @@ class PyQtLauncher(QtWidgets.QMainWindow, process_events.ProcessCallback):
                 content.setCurrentIndex(idx)
             finally:
                 content.setUpdatesEnabled(True)
+            self._current_page_key = name
             for k, b in btns.items():
                 b.setChecked(k == name)
 
@@ -2675,6 +2703,45 @@ class PyQtLauncher(QtWidgets.QMainWindow, process_events.ProcessCallback):
             QtCore.QTimer.singleShot(15000, _plugin_fallback_scan)
         except Exception:
             self._plugin_controller = None
+
+        # Python 库管理页控制器（独立接线，失败不影响插件页；结构与上方插件控制器同款）
+        try:
+            import threading as _threading
+
+            def _bg_logged_pip(fn):
+                """同 _bg_logged：后台 worker 未捕获异常落 launcher.log。"""
+                def _run():
+                    try:
+                        fn()
+                    except Exception:
+                        try:
+                            self.logger.exception("pip 后台任务未捕获异常: %s", getattr(fn, "__name__", fn))
+                        except Exception:
+                            pass
+                return _run
+
+            from utils.net import resolve_pypi_index_url
+            self._pip_controller = PipController(
+                page_pip,
+                self.services.pip,
+                run_in_background=lambda fn: _threading.Thread(
+                    target=_bg_logged_pip(fn), daemon=True).start(),
+                post_to_ui=lambda fn: self._invoker.emit_invoke(fn),
+                registry=self._bg_task_registry,
+                is_comfyui_running=lambda: self._is_comfyui_running(),
+                resolve_index_url=lambda: resolve_pypi_index_url(self),
+            )
+            # 启动后兜底扫描（同插件页：15s 后若用户一直没进过本页则兜底加载一次）
+            def _pip_fallback_scan():
+                try:
+                    loader = getattr(self._pip_controller, "_loader", None)
+                    if loader:
+                        loader.load_if_not_loaded()
+                except Exception:
+                    pass
+            QtCore.QTimer.singleShot(15000, _pip_fallback_scan)
+        except Exception:
+            self._pip_controller = None
 
         # 验证路径（在获取版本信息之前）
         # 标记验证状态，用于后续决定是否提示用户配置
@@ -3359,6 +3426,16 @@ class PyQtLauncher(QtWidgets.QMainWindow, process_events.ProcessCallback):
         except Exception:
             pass
 
+        # 4b. Python 库管理页：换环境后 python 不同，已装 pip 包列表要重扫
+        try:
+            ctrl = getattr(self, "_pip_controller", None)
+            if ctrl is not None:
+                loader = getattr(ctrl, "_loader", None)
+                if loader is not None:
+                    loader.load()
+        except Exception:
+            pass
+
         # 5. 日志页：重定向 tailer 到新环境的 comfyui.log
         try:
             page_logs = pages.get("logs")
@@ -3374,11 +3451,12 @@ class PyQtLauncher(QtWidgets.QMainWindow, process_events.ProcessCallback):
         except Exception:
             pass
 
-        # 6. WebUI 页面: 重探 webui_path + 重新计算状态 (env_id 换了 path 也跟着切)
+        # 6. 进阶服务页 (容器): 转发给 WebUI 工作台 + openjutsu 子页, 并重算
+        #    openjutsu tab 显隐 (服务是环境资产, 换 env 可能出现/消失)
         try:
-            webui_page = pages.get("webui")
-            if webui_page is not None and hasattr(webui_page, "refresh_after_env_switch"):
-                webui_page.refresh_after_env_switch()
+            advanced_page = pages.get("advanced")
+            if advanced_page is not None and hasattr(advanced_page, "refresh_after_env_switch"):
+                advanced_page.refresh_after_env_switch()
         except Exception:
             pass
 
@@ -4241,13 +4319,47 @@ class PyQtLauncher(QtWidgets.QMainWindow, process_events.ProcessCallback):
                 pass
             return False
 
+    def _stop_companion_services_sync(self) -> bool:
+        """同步停止伴生服务 (openjutsu 等, 新框架侧). 幂等: 没在跑返 True.
+
+        退出停服链的第一环: openjutsu → webui → ComfyUI (依赖方先走).
+        对老用户 (无 openjutsu 的环境) 是纯 no-op —— CompanionServiceManager
+        构造 + is_running 读 pidstore (文件不存在即返), 无端口扫描无进程探测.
+        """
+        try:
+            from core.companion.spec import BUILTIN_SERVICES
+            from core.companion.manager import CompanionServiceManager
+            for spec in BUILTIN_SERVICES.values():
+                if spec.runtime == "webui-legacy":
+                    continue
+                try:
+                    m = CompanionServiceManager(self, spec.id)
+                    if m.is_running():
+                        m.stop()
+                except Exception as e:
+                    try:
+                        if self.logger:
+                            self.logger.warning("退出时停止伴生服务 %s 失败: %s", spec.id, e)
+                    except Exception:
+                        pass
+            return True
+        except Exception as e:
+            try:
+                if self.logger:
+                    self.logger.warning("退出时停止伴生服务失败: %s", e)
+            except Exception:
+                pass
+            return False
+
     def _stop_comfyui_and_webui_on_exit(self) -> None:
-        """关闭启动器时同步停止 ComfyUI + WebUI 工作台.
+        """关闭启动器时同步停止 ComfyUI + 伴生服务 + WebUI 工作台.
 
         "停止 ComfyUI 并退出" 语义 (托盘菜单 / 主窗口 X 选"停止并退出") 的统一入口:
-        先停工作台 (依赖方), 再停 ComfyUI (被依赖方), 顺序避免工作台在 ComfyUI
-        已死后还尝试通信. 两者都幂等, 任一失败不阻断退出.
+        先停依赖方 (openjutsu → webui), 再停 ComfyUI (被依赖方), 顺序避免
+        依赖方在 ComfyUI 已死后还尝试通信. 全部幂等, 任一失败不阻断退出.
         """
+        # 0. 先停伴生服务 (openjutsu, 依赖 ComfyUI + webui 平级)
+        self._stop_companion_services_sync()
         # 1. 先停工作台 (它依赖 ComfyUI, 先停依赖方)
         self._stop_webui_sync()
         # （2026-10 优化：不再刷新工作台页状态——两个调用方都是退出路径，
@@ -4470,6 +4582,11 @@ class PyQtLauncher(QtWidgets.QMainWindow, process_events.ProcessCallback):
                 stop_orphan_webui(self)
             except Exception:
                 pass
+            # requires_comfyui 的伴生服务 (openjutsu) 同理: ComfyUI 没跑就是孤儿.
+            try:
+                stop_orphan_companions(self)
+            except Exception:
+                pass
             self._perform_shutdown(event)
             return
 
@@ -4531,6 +4648,11 @@ class PyQtLauncher(QtWidgets.QMainWindow, process_events.ProcessCallback):
                     # 需要自动关掉避免僵尸. 如果 ComfyUI 在跑, 保留 WebUI (用户明确选了保留).
                     try:
                         stop_orphan_webui(self)
+                    except Exception:
+                        pass
+                    # 伴生服务 (openjutsu) 同语义: ComfyUI 未跑 → 孤儿, 自动关.
+                    try:
+                        stop_orphan_companions(self)
                     except Exception:
                         pass
         except Exception:
@@ -4921,6 +5043,37 @@ class PyQtLauncher(QtWidgets.QMainWindow, process_events.ProcessCallback):
             except Exception:
                 pass
 
+    def _show_plugin_error(self, title, message, detail=""):
+        """插件操作失败弹窗：带 cm-cli 原始输出详情（issue #111）。
+
+        之前只有一句「cm-cli update 退出码 1」，用户/开发者都看不到真正原因
+        （traceback 在 cm-cli 输出尾部）。现在把 service 返回的 error_detail
+        （cm-cli 输出尾部）摊在弹窗里，并提供「复制详情」。
+
+        detail 为空时退化成普通 show_error。
+        """
+        detail = detail or ""
+        try:
+            if detail:
+                DialogHelper.show_error_with_detail(self, title, message, detail)
+            else:
+                DialogHelper.show_error(self, title, message)
+        except Exception:
+            try:
+                DialogHelper.show_error(self, title, message)
+            except Exception:
+                pass
+
+    @staticmethod
+    def _controller_error_detail(ctrl) -> str:
+        """从 controller 取最近一次失败的 cm-cli 原始输出尾部（空串 = 无）。"""
+        try:
+            if ctrl is not None and hasattr(ctrl, "last_error_detail"):
+                return ctrl.last_error_detail() or ""
+        except Exception:
+            pass
+        return ""
+
     def _do_plugin_update_all(self):
         """更新全部：带脉冲进度 + 取消 + 后台运行（注册到后台任务注册表，可找回）。
         cm-cli update all 无中间进度，用脉冲。"""
@@ -4987,10 +5140,8 @@ class PyQtLauncher(QtWidgets.QMainWindow, process_events.ProcessCallback):
                         registry.update(task_id, status=done_msg)
                     # 失败且非取消 → 额外弹错误对话框（取消是用户主动行为，不弹）
                     if not success and not pd.is_cancelled():
-                        try:
-                            DialogHelper.show_error(self, "更新全部", done_msg)
-                        except Exception:
-                            pass
+                        self._show_plugin_error(
+                            "更新全部", done_msg, self._controller_error_detail(ctrl))
                     if pd.is_cancelled():
                         try:
                             pd.close()
@@ -5006,6 +5157,9 @@ class PyQtLauncher(QtWidgets.QMainWindow, process_events.ProcessCallback):
                         # _plugin_force_context_msg——强制更新收尾时合并汇报，否则
                         # 最终结论只剩「强制更新完成 N 个」，普通更新的成果没有记录。
                         self._plugin_force_context_msg = done_msg
+                        # 注：cm-cli 原始输出详情不用再暂存 —— 失败时上面的
+                        # _show_plugin_error 已经带详情弹过一次了（issue #111），
+                        # 这里再存一份会让强制更新收尾时弹第二次（重复打扰）。
                         try:
                             pd.close()
                         except Exception:
@@ -5098,10 +5252,8 @@ class PyQtLauncher(QtWidgets.QMainWindow, process_events.ProcessCallback):
                         registry.update(task_id, status=done_msg)
                     # 失败且非取消 → 额外弹错误对话框（取消是用户主动行为，不弹）
                     if not success and not pd.is_cancelled():
-                        try:
-                            DialogHelper.show_error(self, "更新选中", done_msg)
-                        except Exception:
-                            pass
+                        self._show_plugin_error(
+                            "更新选中", done_msg, self._controller_error_detail(ctrl))
                     if pd.is_cancelled():
                         try:
                             pd.close()
@@ -5113,6 +5265,9 @@ class PyQtLauncher(QtWidgets.QMainWindow, process_events.ProcessCallback):
                         # 避免与「正在强制更新」弹窗叠加矛盾（issue #107 收尾）。
                         # 普通更新结论同样暂存，由强制更新收尾合并汇报。
                         self._plugin_force_context_msg = done_msg
+                        # 注：cm-cli 原始输出详情不用再暂存 —— 失败时上面的
+                        # _show_plugin_error 已经带详情弹过一次了（issue #111），
+                        # 这里再存一份会让强制更新收尾时弹第二次（重复打扰）。
                         try:
                             pd.close()
                         except Exception:
@@ -5198,7 +5353,7 @@ class PyQtLauncher(QtWidgets.QMainWindow, process_events.ProcessCallback):
     # 仿 _do_plugin_update_selected，但 on_done 带结果 (success, message)，
     # 据此弹成功/失败提示（旧路径丢弃 service 返回值 → 完全无反馈）。
     def _plugin_op_with_progress(self, *, title, task_title, status_init, run_fn,
-                                 cancel_event=None):
+                                 cancel_event=None, detail_mode="none"):
         """install/uninstall/disable/enable 共用的进度弹窗 + 后台任务编排。
 
         run_fn(on_status, on_done, on_progress, cancel_event) 由调用方提供，内部调
@@ -5206,6 +5361,10 @@ class PyQtLauncher(QtWidgets.QMainWindow, process_events.ProcessCallback):
         on_progress 与 on_status 同款处理（更新 registry + set_status），install 用它接收
         cm-cli 流式阶段文案，其他操作忽略。cancel_event（threading.Event）仅 install 传：
         用户点取消时 set，service 层 kill cm-cli 进程；其他操作不传（run_hidden 不可取消）。
+
+        detail_mode：失败弹窗里附带的 cm-cli 原始输出来源（issue #111）
+          "none"      —— 不带（默认；uninstall/disable/enable/强制更新 无 cm-cli 输出）
+          "controller"—— 取 controller 本次操作捕获的详情（install 用）
         """
         try:
             from ui_qt.widgets.progress_dialog import ProgressDialog
@@ -5244,11 +5403,16 @@ class PyQtLauncher(QtWidgets.QMainWindow, process_events.ProcessCallback):
                         registry.complete(task_id, error=not success)
                         registry.update(task_id, status=message)
                     # 失败且非取消 → 额外弹错误对话框（取消是用户主动行为，不弹错误）
-                    if not success and not pd.is_cancelled():
-                        try:
-                            DialogHelper.show_error(self, title, message)
-                        except Exception:
-                            pass
+                    # 详情来源按操作类型取（issue #111）：
+                    #   controller —— 本次操作自己的 cm-cli 详情（install 用）
+                    # 不从 controller 无条件取：那是「最近一次失败」的槽位，会把
+                    # 上一次更新的报错挂到本次无关的失败上。
+                    detail = ""
+                    if detail_mode == "controller":
+                        detail = self._controller_error_detail(
+                            getattr(self, "_plugin_controller", None))
+                    if (detail or not success) and not pd.is_cancelled():
+                        self._show_plugin_error(title, message, detail)
                     if pd.is_cancelled():
                         try:
                             pd.close()
@@ -5292,6 +5456,7 @@ class PyQtLauncher(QtWidgets.QMainWindow, process_events.ProcessCallback):
             task_title=f"安装 {short}",
             status_init=f"正在安装 {short}（cm-cli install，可能需要几分钟）...",
             cancel_event=cancel_event,
+            detail_mode="controller",
             run_fn=lambda on_status, on_done, on_progress, ce: ctrl.run_install(
                 spec, on_status=on_status, on_done=on_done,
                 on_progress=on_progress, cancel_event=ce),

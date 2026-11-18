@@ -109,13 +109,18 @@ class TestMainCLISubprocess(unittest.TestCase):
             pass
 
     def _run(self, *args, timeout=15):
-        # 用绝对路径调 __main__.py，cwd 设为临时目录（让 config 能找到）
+        # 用绝对路径调 __main__.py，cwd 设为临时目录（让 config 能找到）。
+        # COMFYUI_LAUNCHER_KEEP_CWD=1（2026-10-31）：__main__ 默认会 chdir 回启动器
+        # 自身目录再找 launcher/config.json —— 不设这个时子进程读的一直是 **repo
+        # 的真实 config**（tmp config 从未生效），探测 8188 撞上本机常驻 ComfyUI
+        # 就假绿 (rc=0≠3 flake)。设了它 tmp config 才真正被加载 (free_port 生效)。
         proj = Path(__file__).parent.parent.parent
         return subprocess.run(
             [sys.executable, str(proj / "__main__.py"), *args],
             cwd=self.tmp_dir,
             capture_output=True, text=True, timeout=timeout,
-            env={**__import__("os").environ, "PYTHONPATH": str(proj)},
+            env={**__import__("os").environ, "PYTHONPATH": str(proj),
+                 "COMFYUI_LAUNCHER_KEEP_CWD": "1"},
         )
 
     def test_top_level_help(self):

@@ -2,9 +2,8 @@
 
 8 个 action: start / stop / status / info / restart / install / setup / update.
 每个有不同 exit code 语义:
-  0  success
+  0  success (start 已在跑也返 0, already_running —— 幂等)
   1  general error
-  2  start 拒绝重复 (已在跑)
   3  status 未在跑
   6  start --with-comfyui 时 ComfyUI 未跑
   7  WebUI 路径未安装
@@ -52,6 +51,19 @@ def _make_app(config=None, **extra):
     for k, v in extra.items():
         setattr(app, k, v)
     return app
+
+
+@pytest.fixture(autouse=True)
+def _no_real_port_scan(monkeypatch):
+    """隔离真实端口：本文件默认端口扫描返回空。
+
+    2026-11-07 事故实录：test_do_stop_when_not_running 裸跑 _do_stop，webui
+    pidfile 不存在 → stop_webui 第 3 步「按端口杀」兜底对真实 8199 端口上的
+    监听者直接 taskkill /F（该链无身份校验），把本机另一个任务的 H3 WebUI
+    服务（pid 21588）误杀了。测试进程绝不允许对真实端口发起杀伤——默认扫描
+    返回空，需要扫描语义的用例在各自 with patch 里覆盖。
+    """
+    monkeypatch.setattr("core.probe.find_pids_by_port_safe", lambda port: [])
 
 
 # === _do_info ===
@@ -258,6 +270,44 @@ def test_do_stop_when_not_running(tmp_path):
     assert res["killed"] is False
     assert res["pid"] is None
     assert res["exit_code"] == 0
+
+
+def test_do_stop_port_fallback_spares_non_webui_holder(tmp_path):
+    """pidfile 失效 + 端口被**非 webui** 进程占用 → 不杀（2026-11-07 误杀事故）。
+
+    stop_webui 第 3 步兜底此前对 8199 占用者无差别 taskkill /F，把本机 H3
+    任务的 WebUI 服务（pid 21588）误杀。现在必须过 _is_webui_pid 身份门。"""
+    from core.cli import cmd_webui
+    app = _make_app()
+    app._cwd = str(Path(str(tmp_path)).resolve())
+    args = _Args(force=False)
+    with patch("core.probe.find_pids_by_port_safe", return_value=[21588]), \
+         patch("core.webui_process_manager._is_webui_pid", return_value=False), \
+         patch("core.webui_process_manager.run_hidden") as mock_run:
+        res = cmd_webui._do_stop(app, args)
+    assert res["killed"] is False
+    for c in mock_run.call_args_list:
+        joined = " ".join(map(str, c.args[0])) if c.args else ""
+        assert "taskkill" not in joined, "身份校验不过的占用者绝不允许 taskkill"
+
+
+def test_do_stop_port_fallback_kills_verified_webui_holder(tmp_path):
+    """占用者通过身份校验（cmdline 含 flask_app）→ 兜底照常杀。"""
+    from types import SimpleNamespace
+    from core.cli import cmd_webui
+    app = _make_app()
+    app._cwd = str(Path(str(tmp_path)).resolve())
+    args = _Args(force=False)
+    with patch("core.probe.find_pids_by_port_safe", return_value=[21588]), \
+         patch("core.webui_process_manager._is_webui_pid", return_value=True), \
+         patch("core.webui_process_manager.run_hidden",
+               return_value=SimpleNamespace(returncode=0)) as mock_run:
+        res = cmd_webui._do_stop(app, args)
+    assert res["killed"] is True
+    assert any(
+        "taskkill" in " ".join(map(str, c.args[0]))
+        for c in mock_run.call_args_list if c.args
+    )
 
 
 def test_do_stop_with_force_flag(tmp_path):

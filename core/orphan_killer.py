@@ -109,3 +109,58 @@ def stop_orphan_webui(
         pass
     return True
 
+
+# ---------------- 伴生服务泛化 (v1.1.0) ----------------
+# 与 stop_orphan_webui 同语义, 但作用于新框架 (core.companion) 的
+# requires_comfyui 伴生服务 (当前只有 openjutsu). webui 本期仍走老函数
+# (strangler, 见 docs/companion-services-design.md §11).
+
+def stop_orphan_companions(
+    app: Any,
+    *,
+    stop_companion_fn: Optional[Callable[[str], Any]] = None,
+    is_comfyui_running_fn: Optional[Callable[[Any], Optional[bool]]] = None,
+    logger: Optional[Any] = None,
+) -> bool:
+    """ComfyUI 明确未跑时, 停掉 requires_comfyui 的伴生服务 (幂等, 不阻断退出).
+
+    判定语义与 should_stop_orphan_webui 一致: ComfyUI 探测不可信 (None) 保守不动;
+    单个服务的探测/停止异常吞掉, 不影响其他服务, 不冒泡到 closeEvent.
+
+    stop_companion_fn(service_id) 可注入 stub (测试); 默认走
+    CompanionServiceManager(app, service_id).stop().
+    返回: 是否停掉了至少一个服务.
+    """
+    log = logger or getattr(app, "logger", None)
+    comfyui_running = (is_comfyui_running_fn(app) if is_comfyui_running_fn is not None
+                       else _is_comfyui_running(app))
+    if comfyui_running is not False:
+        return False
+    stopped = False
+    try:
+        from core.companion.spec import BUILTIN_SERVICES
+        from core.companion.manager import CompanionServiceManager
+    except Exception:
+        return False
+    for spec in BUILTIN_SERVICES.values():
+        if not spec.requires_comfyui or spec.runtime == "webui-legacy":
+            continue
+        try:
+            if stop_companion_fn is not None:
+                stop_companion_fn(spec.id)
+                stopped = True
+            else:
+                m = CompanionServiceManager(app, spec.id)
+                if m.is_running():
+                    m.stop()
+                    stopped = True
+        except Exception:
+            continue
+    if stopped:
+        try:
+            if log:
+                log.info("退出 launcher: ComfyUI 未运行, 已自动关闭 requires_comfyui 伴生服务")
+        except Exception:
+            pass
+    return stopped
+

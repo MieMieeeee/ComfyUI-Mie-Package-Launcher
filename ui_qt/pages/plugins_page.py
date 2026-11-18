@@ -1769,6 +1769,10 @@ class PluginController:
         # 强制更新后复用普通更新的「同步依赖库」流程；qt_app 注入（按 auto_update_deps_var
         # 网关调 update_service.sync_requirements_files）。None 则跳过。
         self._sync_deps = sync_deps
+        # 最近一次失败的「原始输出详情」（cm-cli 的 stdout/stderr 尾部，含 traceback）。
+        # issue #111：失败弹窗原本只有一句「cm-cli update 退出码 1」，看不到原因。
+        # 每次操作开始时清空，失败时写入，由 qt_app 读走弹「带详情」对话框。
+        self._last_error_detail = ""
         # 列表加载走通用 BackgroundLoader：后台跑 list_installed → post 回 UI 填充，
         # 内置防重入 + loaded_once + 加载态回调（页面据此显隐「获取中」占位）。
         from ui_qt.background_loader import BackgroundLoader
@@ -1791,6 +1795,26 @@ class PluginController:
     def _on_refresh(self):
         self._loader.load()
 
+    # ---- 失败详情（issue #111）----
+    def last_error_detail(self) -> str:
+        """最近一次插件操作失败的原始输出详情（cm-cli 输出尾部，含 traceback）。
+
+        空串 = 上次操作没有可展示的详情（成功 / 服务层没带 error_detail）。
+        """
+        return self._last_error_detail or ""
+
+    def _clear_error_detail(self):
+        """新操作开始时清掉上一次的详情，避免旧详情挂到新失败上。"""
+        self._last_error_detail = ""
+
+    def _capture_error_detail(self, res):
+        """从 service 返回值里取 error_detail 存起来（非 dict / 无字段时忽略）。"""
+        if not isinstance(res, dict):
+            return
+        detail = res.get("error_detail")
+        if detail:
+            self._last_error_detail = str(detail)
+
     def _on_update_all(self):
         self._run_in_background(self._update_all_work)
 
@@ -1804,6 +1828,7 @@ class PluginController:
             failed = []
             all_names = []
             force_hint = None  # 失败兜底：把这些插件标为可更新
+            self._clear_error_detail()
             try:
                 if on_status:
                     self._post_to_ui(lambda: on_status("正在更新全部插件（含 pip 依赖修复）..."))
@@ -1828,6 +1853,7 @@ class PluginController:
                     failed = list(names)  # 什么都没升成功，全量保留 🔄
                     force_hint = list(names)
                     msg = f"更新全部失败：{res.get('error')}"
+                    self._capture_error_detail(res)
                 else:
                     failed = self.svc.outdated_plugins(names)
                     if failed:
@@ -1905,6 +1931,7 @@ class PluginController:
             msg = f"选中插件更新完成 ({len(names)} 个)，重启 ComfyUI 后生效"
             ok = True
             updated_ok = set(names)  # 默认全算已处理；post-check 会把仍落后的挪进 failed
+            self._clear_error_detail()
             try:
                 if on_status:
                     label = f"正在更新选中插件 ({len(names)} 个)"
@@ -1922,6 +1949,7 @@ class PluginController:
                     ok = False
                     updated_ok = set()
                     msg = f"更新选中失败：{res.get('error')}"
+                    self._capture_error_detail(res)
                     # 全量保留 🔄（什么都没升成功）；force_hint 兜住「本次之前没检查过」
                     # 的场景——那时 _outdated_dir_names 是空的，不显式标记的话
                     # repopulate 会退化成全清空，用户看不到任何失败痕迹。
@@ -2037,6 +2065,7 @@ class PluginController:
         """
         def work():
             res = {"ok": False, "error": "未执行", "log": ""}
+            self._clear_error_detail()
             try:
                 if on_status:
                     self._post_to_ui(lambda: on_status(f"正在安装 {spec}（cm-cli install，可能需要几分钟）..."))
@@ -2047,6 +2076,8 @@ class PluginController:
 
                 res = self.svc.install_streaming(spec, on_stage=_on_stage,
                                                  cancel_event=cancel_event)
+                if isinstance(res, dict) and res.get("error"):
+                    self._capture_error_detail(res)
             except Exception as e:
                 res = {"ok": False, "error": str(e), "log": ""}
             finally:
@@ -2090,6 +2121,7 @@ class PluginController:
         """uninstall/disable/enable 共用：逐项执行 service.<op> + 逐项进度 + 结果汇总。"""
         def work():
             results = []
+            self._clear_error_detail()
             try:
                 for i, dn in enumerate(dir_names, 1):
                     if on_status:

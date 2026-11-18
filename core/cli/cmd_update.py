@@ -25,12 +25,14 @@ def _do_update(app, target: str) -> dict:
                 "up_to_date": bool(res.get("up_to_date")),
                 "version": None,
                 "log": res.get("log") or "",
+                # cm-cli 输出尾部（含 traceback）：失败时 agent 直接看这个定位
+                "error_detail": res.get("error_detail") or "",
                 "error": res.get("error"),
             }
         except Exception as e:
             return {
                 "updated": False, "up_to_date": False, "version": None,
-                "log": "", "error": str(e),
+                "log": "", "error_detail": "", "error": str(e),
             }
 
     if target != "comfyui":
@@ -121,12 +123,16 @@ def run(args, app) -> int:
             "from_version": result.get("from_version"),
             "to_version": result.get("to_version"),
             "log": result.get("log") or "",
+            "error_detail": result.get("error_detail") or "",
             "error": result["error"],
         }
         if as_json:
             print(format_json(data))
         else:
             print(f"update failed: {result['error']}")
+            detail = result.get("error_detail")
+            if detail:
+                print(detail)
         return EXIT_ERROR
 
     if result.get("up_to_date"):

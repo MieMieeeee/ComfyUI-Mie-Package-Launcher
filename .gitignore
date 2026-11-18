@@ -88,3 +88,12 @@ status_out.txt
 $
 _test_combo.py
 MagicMock/
+
+# pytest 的临时目录 —— 每跑一次测试就新建一批 (.pytest_tmp_xxx);
+# tests/.pytest_tmp 目录权限已坏 (Permission denied, git 连列都列不出来).
+# 不入库: 否则 git add -A 会把它们全带进来.
+.pytest_tmp*/
+.pytest_cache/
+
+# 手工导出 ComfyUI 节点 schema 时留下的文件
+_oi.json

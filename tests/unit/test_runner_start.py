@@ -39,6 +39,10 @@ class TestStartFunction:
 
         monkeypatch.setattr(_rs, "time", _FastTime)
         monkeypatch.setattr(_rs, "_check_system_stats", lambda *a, **k: True)
+        # 就绪校验（2026-11-05）默认「扫不到监听者 → 无法证伪 → 放行」，
+        # 既有成功路径用例语义不变；校验用例在各自 with patch 里覆盖。
+        import core.probe as _probe
+        monkeypatch.setattr(_probe, "find_pids_by_port_safe", lambda port: [])
 
     @pytest.fixture
     def mock_app(self):
@@ -298,6 +302,151 @@ class TestStartFunction:
         worker_func()
 
         assert mock_pm.comfyui_process is not None
+
+
+class TestReadyListenerVerification:
+    """就绪校验（2026-11-05 缺陷报告）：探针命中 ≠ 我拉起的进程在服务。
+
+    /system_stats 是端口级探针，旧实例占着端口时新进程 bind 失败秒死，
+    探针却永远命中旧进程——restart 因此假成功。worker 必须在报成功前
+    验证「端口监听者 == 本进程 pid」。
+    """
+
+    @pytest.fixture(autouse=True)
+    def _fast_worker_env(self, monkeypatch):
+        """同步跑 worker：不真睡、探针固定命中（校验用例自行覆盖监听扫描）。"""
+        import time as _real_time
+
+        import core.runner_start as _rs
+        import core.probe as _probe
+
+        class _FastTime:
+            @staticmethod
+            def sleep(_seconds):
+                return None
+
+            @staticmethod
+            def time():
+                return _real_time.time()
+
+        monkeypatch.setattr(_rs, "time", _FastTime)
+        monkeypatch.setattr(_rs, "_check_system_stats", lambda *a, **k: True)
+        monkeypatch.setattr(_probe, "find_pids_by_port_safe", lambda port: [])
+
+    def _run_worker(self, mock_app, mock_pm, mock_popen, mock_thread):
+        """同步执行 worker，返回 ui_post 收到的回调（调用方决定要不要执行它）。"""
+        worker_func = mock_thread.call_args[1]["target"]
+        worker_func()
+        mock_app.ui_post.assert_called_once()
+        return mock_app.ui_post.call_args[0][0]
+
+    @pytest.fixture
+    def mock_app(self):
+        app = MagicMock()
+        app.big_btn = MagicMock()
+        app._launching = False
+        app.logger = MagicMock()
+        return app
+
+    @pytest.fixture
+    def mock_pm(self):
+        pm = MagicMock()
+        pm.comfyui_process = None
+        return pm
+
+    @pytest.fixture
+    def mock_popen(self):
+        with patch("core.runner_start.subprocess.Popen") as mock:
+            yield mock
+
+    @pytest.fixture
+    def mock_thread(self):
+        with patch("core.runner_start.threading.Thread") as mock:
+            yield mock
+
+    def test_ready_fails_when_port_held_by_other_pid(
+        self, mock_app, mock_pm, mock_popen, mock_thread, monkeypatch
+    ):
+        """探针命中但监听者是别的 pid → on_start_failed，点名占用者（restart 假成功根因）。"""
+        monkeypatch.setattr(os, "name", "posix")
+        mock_process = MagicMock()
+        mock_process.pid = 75820
+        mock_process.poll.return_value = None
+        mock_popen.return_value = mock_process
+
+        from core.runner_start import start
+
+        with patch("core.probe.find_pids_by_port_safe", return_value=[44288]):
+            start(mock_app, mock_pm, ["cmd"], {}, "/cwd")
+            callback = self._run_worker(mock_app, mock_pm, mock_popen, mock_thread)
+
+        callback()
+        mock_pm.on_start_failed.assert_called_once()
+        reason = mock_pm.on_start_failed.call_args[0][0]
+        assert "44288" in reason and "75820" in reason
+        assert "未由本进程" in reason
+        mock_pm.on_start_success.assert_not_called()
+
+    def test_ready_passes_when_listener_is_spawned_pid(
+        self, mock_app, mock_pm, mock_popen, mock_thread, monkeypatch
+    ):
+        """监听者就是本进程 pid → 正常 on_start_success。"""
+        monkeypatch.setattr(os, "name", "posix")
+        mock_process = MagicMock()
+        mock_process.pid = 75820
+        mock_process.poll.return_value = None
+        mock_popen.return_value = mock_process
+
+        from core.runner_start import start
+
+        with patch("core.probe.find_pids_by_port_safe", return_value=[75820]):
+            start(mock_app, mock_pm, ["cmd"], {}, "/cwd")
+            callback = self._run_worker(mock_app, mock_pm, mock_popen, mock_thread)
+
+        assert callback == mock_pm.on_start_success
+        mock_pm.on_start_failed.assert_not_called()
+
+    def test_ready_passes_when_scan_unavailable(
+        self, mock_app, mock_pm, mock_popen, mock_thread, monkeypatch
+    ):
+        """端口扫描拿不到监听者（psutil/netstat 均不可用）→ 无法证伪，放行。
+
+        校验链自身故障不能误杀正常启动。"""
+        monkeypatch.setattr(os, "name", "posix")
+        mock_process = MagicMock()
+        mock_process.pid = 123
+        mock_process.poll.return_value = None
+        mock_popen.return_value = mock_process
+
+        from core.runner_start import start
+
+        with patch("core.probe.find_pids_by_port_safe", return_value=[]):
+            start(mock_app, mock_pm, ["cmd"], {}, "/cwd")
+            callback = self._run_worker(mock_app, mock_pm, mock_popen, mock_thread)
+
+        assert callback == mock_pm.on_start_success
+
+    def test_ready_fails_when_process_died_after_probe(
+        self, mock_app, mock_pm, mock_popen, mock_thread, monkeypatch
+    ):
+        """探针命中后、校验时进程已退出（bind 失败秒死落在 sleep 窗口内）→ 失败。
+
+        报告实录：新进程 3 秒内死于端口占用，探针应答的是旧进程。"""
+        monkeypatch.setattr(os, "name", "posix")
+        mock_process = MagicMock()
+        mock_process.pid = 75820
+        # 循环顶 poll 活着 → 探针命中 → 校验时再 poll 已死
+        mock_process.poll.side_effect = [None, 1]
+        mock_popen.return_value = mock_process
+
+        from core.runner_start import start
+
+        start(mock_app, mock_pm, ["cmd"], {}, "/cwd")
+        callback = self._run_worker(mock_app, mock_pm, mock_popen, mock_thread)
+
+        callback()
+        mock_pm.on_start_failed.assert_called_once_with("进程意外退出")
+        mock_pm.on_start_success.assert_not_called()
 
 
 class TestSpawnProcessLogRedirect:
