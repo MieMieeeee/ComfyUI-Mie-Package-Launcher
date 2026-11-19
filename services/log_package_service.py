@@ -16,10 +16,13 @@ from utils import paths as PATHS
 
 
 _SOURCES: List[Tuple[str, str]] = [
-    # (label, "comfyui" | "launcher" | "config")
+    # (label, "comfyui" | "launcher" | "config" | "stall")
     ("comfyui.log", "comfyui"),
     ("launcher.log", "launcher"),
     ("config.json", "config"),
+    # UI 卡顿探针：主线程卡顿时 dump 的所有线程栈（切页偶发卡顿定位用，
+    # 见 utils/ui_stall_probe.py）。没有卡顿就不会有这个文件 —— 属正常。
+    ("stall_probe.log", "stall"),
 ]
 
 
@@ -43,6 +46,16 @@ def _resolve_launcher_log(app) -> Optional[Path]:
             if cand.exists():
                 return cand
         return None
+    except Exception:
+        return None
+
+
+def _resolve_stall_probe_log(app) -> Optional[Path]:
+    """UI 卡顿探针的输出（launcher/stall_probe.log）。没有卡顿就没有这个文件。"""
+    try:
+        from utils.paths import resolve_runtime_root
+        p = Path(resolve_runtime_root()) / "launcher" / "stall_probe.log"
+        return p if p.exists() else None
     except Exception:
         return None
 
@@ -79,6 +92,7 @@ _RESOLVERS = {
     "comfyui": _resolve_comfyui_log,
     "launcher": _resolve_launcher_log,
     "config": _resolve_config,
+    "stall": _resolve_stall_probe_log,
 }
 
 

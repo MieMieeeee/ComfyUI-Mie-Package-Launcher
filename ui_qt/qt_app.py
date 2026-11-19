@@ -5563,6 +5563,12 @@ class PyQtLauncher(QtWidgets.QMainWindow, process_events.ProcessCallback):
           (历史上的绿/黄/红 三色灯逻辑已移除、过于花式)。
 
         只在用户不在日志页时提示;到了日志页(showEvent)即清零。
+
+        幂等:只有按钮文字**真的需要变**时才 setText。原来每行日志都 emit 一次
+        "__new__" → 每行都 setText 一次 → 每次都触发 QSS 重新计算 + 重绘。高频
+        日志(tqdm 每秒几十行)下这是持续的 UI 线程开销,表现为「切页要卡一下才
+        响应」(点击事件排在重绘队列后面)。信号频率保持不变(测试锁住),只把
+        重复的 setText 去掉。
         """
         try:
             btn_map = getattr(self, "_nav_btn_map", None) or {}
@@ -5570,10 +5576,11 @@ class PyQtLauncher(QtWidgets.QMainWindow, process_events.ProcessCallback):
             if btn is None:
                 return
             base = "📋 ComfyUI 实时日志"
+            from ui_qt.nav_badge import set_nav_text
             if marker in ("__viewed__", "__cleared__"):
-                btn.setText(base)
+                set_nav_text(btn, base)
                 return
-            btn.setText("* " + base)
+            set_nav_text(btn, "* " + base)
         except Exception:
             pass
 
@@ -5846,6 +5853,16 @@ class PyQtLauncher(QtWidgets.QMainWindow, process_events.ProcessCallback):
         except Exception:
             pass
         self.show()
+
+        # UI 主线程卡顿探针（issue: 切页偶发卡一下才响应）。
+        # 卡顿时把主线程栈 dump 到 launcher/stall_probe.log —— 概率性卡顿光读代码
+        # 定不了论，只能在卡顿当场抓栈。开销：正常时每 200ms 一次时间戳比较。
+        # 阈值可用环境变量 COMFYUI_LAUNCHER_STALL_MS 覆盖（设 0 关闭）。
+        try:
+            from utils.ui_stall_probe import install_ui_stall_probe
+            install_ui_stall_probe(self)
+        except Exception:
+            pass
 
         # 外置模型库漂移提示：extra_model_paths.yaml 被整合包更新/手动编辑改过，
         # 与「模型」页里配置的库不一致时 ComfyUI 会静默少加载路径。问用户要不要
