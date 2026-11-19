@@ -15,7 +15,11 @@
     "use_new_manager": false,
     "show_console": false,
     "gpu_device": -1,
-    "env_vars": ""
+    "env_vars": "",
+    "disable_dynamic_vram": false,
+    "fast_disk": false,
+    "disable_pinned_memory": false,
+    "enable_assets": false
   },
   "ui_settings": {
     "window_width": 800,
@@ -25,9 +29,15 @@
     "log_max_lines": 1000,
     "window_size": "500x650",
     "sidebar_collapsed": false,
-    "ui_scale": 0.8,
+    "ui_scale": 1.0,
     "minimize_to_tray_on_close": false,
-    "minimize_to_tray_ask_every_time": false
+    "minimize_to_tray_ask_every_time": false,
+    "render_mode": "auto",
+    "window_w": 1350,
+    "window_h": 960,
+    "window_x": null,
+    "window_y": null,
+    "window_state": "normal"
   },
   "paths": {
     "comfyui_root": "E:/FF/ComfyUI_Mie_2026_V8.0",
@@ -49,7 +59,9 @@
     "pypi_proxy_mode": "huaweicloud",
     "pypi_proxy_url": "https://repo.huaweicloud.com/repository/pypi/simple/",
     "hf_mirror_url": "https://hf-mirror.com",
-    "hf_mirror_mode": "hf-mirror"
+    "hf_mirror_mode": "hf-mirror",
+    "local_proxy_enabled": false,
+    "local_proxy_url": "http://127.0.0.1:7777"
   },
   "announcement": {
     "enabled": true,
@@ -109,6 +121,14 @@
     "display_host": "127.0.0.1",
     "auto_open_browser": false,
     "extra_args": "",
-    "download_url": "https://github.com/MieMieeeee/Comfyui-Workbench-Mie.git"
+    "download_url": "https://github.com/MieMieeeee/Comfyui-Workbench-Mie.git",
+    "listen_lan": true
+  },
+  "package_update": {
+    "respect_frozen_pkgs": true,
+    "cache_dir": "launcher/manifests/cache/",
+    "runs_dir": "launcher/manifests/runs/",
+    "cache_ttl_days": 3,
+    "runs_ttl_days": 30
   }
 }

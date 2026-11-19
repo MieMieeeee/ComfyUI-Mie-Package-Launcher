@@ -481,7 +481,50 @@ class H3Page(BasePage):
     def _poll_status(self):
         if self._is_busy():
             return
-        self._refresh_state()
+        # 状态探测会一路走到 core/probe.py::find_pids_by_port_safe → Windows 上
+        # 可能 spawn `netstat -ano` 并**同步等待**（几百 ms）。在 UI 主线程做这件事
+        # = 每 5 秒把主线程堵一次 → 点别的页面时点击事件排在队列后面，体感就是
+        # 「切换要卡一下才响应」（证据：launcher/stall_probe.log 里主线程栈顶是
+        # probe.find_pids_by_port_safe → subprocess.run）。
+        # 所以：后台线程探测 → 算好状态 → invokeMethod 回主线程应用。
+        if getattr(self, "_poll_inflight", False):
+            return
+        self._poll_inflight = True
+
+        def _worker():
+            try:
+                state = self._detect_state()
+            except Exception:
+                return
+            finally:
+                try:
+                    self._poll_inflight = False
+                except Exception:
+                    pass
+            try:
+                QtCore.QMetaObject.invokeMethod(
+                    self, "_apply_polled_state",
+                    QtCore.Qt.QueuedConnection,
+                    QtCore.Q_ARG(str, state),
+                )
+            except Exception:
+                pass
+
+        try:
+            import threading
+            threading.Thread(target=_worker, daemon=True).start()
+        except Exception:
+            self._poll_inflight = False
+
+    @QtCore.pyqtSlot(str)
+    def _apply_polled_state(self, state: str):
+        """后台探测算出的状态 → 回主线程应用（等价原来的 _refresh_state）。"""
+        try:
+            if self._is_busy():
+                return
+            self._set_state(state)
+        except Exception:
+            pass
 
     def _update_ui_for_state(self):
         avail = self._availability()

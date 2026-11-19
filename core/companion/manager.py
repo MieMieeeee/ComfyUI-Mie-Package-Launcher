@@ -69,6 +69,8 @@ class CompanionServiceManager:
                 "请用 WebuiProcessManager 或 webui 子命令")
         self.env_id = env_id
         self._procs: Dict[str, Dict[str, Any]] = {}  # role -> {"proc": Popen, "thread": Thread}
+        # 收养失败后的退避截止时间戳（time.monotonic）。见 _try_adopt 的说明。
+        self._adopt_cooldown_until = 0.0
 
     # ---------------- 路径 / 端口 ----------------
 
@@ -179,7 +181,22 @@ class CompanionServiceManager:
         与 ComfyUI 的 adopt_external_service 同思路 (只收养身份校验过的 PID);
         要求**每个**绑定端口都有命中身份的占用者, 任一端口是无关节程 → 不收养
         (走正常的端口占用报错路径).
+
+        退避: 收养要扫端口(Windows 上 netstat 子进程, 几百 ms)。**服务没跑**是
+        常态 → pidstore 一直为空 → 每次状态查询都会重跑一遍完整扫描。页面的
+        5 秒轮询定时器于是把 UI 线程每 5 秒堵一次(实测: 切页要卡一下才响应,
+        launcher/stall_probe.log 主线程栈顶 = probe.find_pids_by_port_safe →
+        subprocess.run)。所以失败后退避一小段时间, 别再每 5 秒重扫。
+        退避只影响长驻进程内的重复调用; CLI 每次是新进程, 语义不变。
         """
+        try:
+            import time as _time
+            now = _time.monotonic()
+            if now < self._adopt_cooldown_until:
+                return False
+        except Exception:
+            now = None
+
         raw = self._raw_store() or {}
         if raw.get("env_id") and raw["env_id"] != self._effective_env_id():
             return False
@@ -192,9 +209,9 @@ class CompanionServiceManager:
             try:
                 listener = owned(self._paths(), ports)
             except Exception:
-                return False
+                return self._adopt_failed(now)
             if listener is None:
-                return False
+                return self._adopt_failed(now)
             processes.append({"pid": listener[0].pid, "role": "app"})
         for binding in (() if owned else self.spec.ports):
             port = ports.get(binding.role, binding.default_port)
@@ -211,11 +228,11 @@ class CompanionServiceManager:
                     matched = opid
                     break
             if matched is None:
-                return False
+                return self._adopt_failed(now)
             seen.add(matched)
             processes.append({"pid": matched, "role": binding.role})
         if not processes:
-            return False
+            return self._adopt_failed(now)
         try:
             pidstore.write(self._pidfile_path(), self.spec.id, processes, ports,
                            self._log_path(), env_id=self._effective_env_id())
@@ -226,8 +243,26 @@ class CompanionServiceManager:
             except Exception:
                 pass
         except Exception:
-            return False
+            return self._adopt_failed(now)
+        # 收养成功 → 解除退避
+        try:
+            self._adopt_cooldown_until = 0.0
+        except Exception:
+            pass
         return True
+
+    # 收养失败后的退避时长（秒）。5 秒轮询 × 退避 → 端口扫描频率降到 ~1/4。
+    _ADOPT_COOLDOWN_SEC = 20.0
+
+    def _adopt_failed(self, now: Optional[float] = None) -> bool:
+        """收养失败 → 进入退避窗口，返回 False（语义与原来一致）。"""
+        try:
+            import time as _time
+            base = now if now is not None else _time.monotonic()
+            self._adopt_cooldown_until = base + self._ADOPT_COOLDOWN_SEC
+        except Exception:
+            pass
+        return False
 
     def _effective_env_id(self) -> Optional[str]:
         try:

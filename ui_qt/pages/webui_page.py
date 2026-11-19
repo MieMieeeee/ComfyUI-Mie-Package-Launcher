@@ -884,11 +884,52 @@ class WebuiPage(BasePage):
         self._update_ui_for_state()
 
     def _poll_status(self):
-        """定时器: running 状态会变, 勤跑探测. 中间态跳过 (防覆盖, 见 _refresh_state)."""
+        """定时器: running 状态会变, 勤跑探测. 中间态跳过 (防覆盖, 见 _refresh_state).
+
+        探测在**后台线程**做: 状态查询会一路走到
+        core/probe.py::find_pids_by_port_safe → Windows 上可能 spawn
+        `netstat -ano` 并同步等待(几百 ms)。放在 UI 主线程 = 每 5 秒把主线程
+        堵一次 → 点别的页面时点击事件排在队列后面，体感「切换要卡一下才响应」
+        (证据: launcher/stall_probe.log 主线程栈顶就是 probe.find_pids_by_port_safe
+        → subprocess.run)。算好状态后 invokeMethod 回主线程应用。
+        """
         if self._is_busy():
             return
+        if getattr(self, "_poll_inflight", False):
+            return
+        self._poll_inflight = True
+
+        def _worker():
+            try:
+                new_state = self._detect_state()
+            except Exception:
+                return
+            finally:
+                try:
+                    self._poll_inflight = False
+                except Exception:
+                    pass
+            try:
+                QtCore.QMetaObject.invokeMethod(
+                    self, "_apply_polled_state",
+                    QtCore.Qt.QueuedConnection,
+                    QtCore.Q_ARG(str, new_state),
+                )
+            except Exception:
+                pass
+
         try:
-            new_state = self._detect_state()
+            import threading
+            threading.Thread(target=_worker, daemon=True).start()
+        except Exception:
+            self._poll_inflight = False
+
+    @QtCore.pyqtSlot(str)
+    def _apply_polled_state(self, new_state: str):
+        """后台探测算出的状态 → 回主线程应用（状态变了才刷 UI）。"""
+        try:
+            if self._is_busy():
+                return
             if new_state != self._state:
                 self._state = new_state
                 self._update_ui_for_state()

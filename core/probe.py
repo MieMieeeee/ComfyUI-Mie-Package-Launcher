@@ -2,6 +2,7 @@ import os
 import locale
 import shutil
 import re
+import time
 from pathlib import Path
 from utils.common import run_hidden
 from urllib.request import urlopen, Request, build_opener, ProxyHandler
@@ -14,15 +15,62 @@ except ImportError:
 # is_http_reachable 用的绕代理 opener（懒初始化）
 _NO_PROXY_OPENER = None
 
+# 端口 → 占用 pid 的短缓存。Windows 上没有 psutil（或 net_connections 因权限
+# 失败）时会退到 spawn `netstat -ano` —— 那是几百毫秒的同步子进程。一次状态
+# 查询里常常要查好几个端口/好几次（收养 + 端口就绪复核），同端口短时间内的
+# 结果直接复用，别把 netstat 跑成串。
+_PORT_PID_CACHE: dict = {}
+_PORT_PID_CACHE_TTL = 3.0
+
+
+def _port_cache_get(port: str):
+    try:
+        hit = _PORT_PID_CACHE.get(str(port))
+        if not hit:
+            return None
+        ts, pids = hit
+        if (time.monotonic() - ts) > _PORT_PID_CACHE_TTL:
+            _PORT_PID_CACHE.pop(str(port), None)
+            return None
+        return list(pids)
+    except Exception:
+        return None
+
+
+def _port_cache_put(port: str, pids):
+    try:
+        _PORT_PID_CACHE[str(port)] = (time.monotonic(), list(pids or []))
+    except Exception:
+        pass
+
+
+def clear_port_pid_cache():
+    """清空端口→pid 缓存（测试隔离 / 端口状态剧变时用）。"""
+    try:
+        _PORT_PID_CACHE.clear()
+    except Exception:
+        pass
+
+
 def find_pids_by_port_safe(port: str):
+    cached = _port_cache_get(port)
+    if cached is not None:
+        return cached
+    result = _find_pids_by_port_safe_uncached(port)
+    _port_cache_put(port, result)
+    return result
+
+
+def _find_pids_by_port_safe_uncached(port: str):
     try:
         port_int = int(port)
     except (TypeError, ValueError):
         port_int = None
     if psutil and port_int is not None:
-        # 快路径：net_connections 一次拿全系统连接表（Windows 上无需管理员即可
-        # 拿到 pid）。旧实现逐进程 p.connections()，上千个进程要好几秒且跑在
-        # UI 线程（toggle_comfyui 启动前检测），表现为点「一键启动」后按钮卡住。
+        # 快路径：net_connections 一次拿全系统连接表。**Windows 上非管理员进程
+        # 会抛 AccessDenied**（psutil 需要 SeDebugPrivilege 才能列出全部连接的
+        # 归属进程）—— 这时不要急着退到「逐进程 p.connections() 扫几千个进程」
+        # （最慢的一条路，实测几秒），而是先走下面的 netstat（一次拿全表）。
         try:
             pids = set()
             for conn in psutil.net_connections(kind="inet"):
@@ -34,7 +82,35 @@ def find_pids_by_port_safe(port: str):
                 return list(pids)
         except Exception:
             pass
-        # 兜底：逐进程扫描（部分平台 net_connections 不可用/缺权限时）
+    # 第二快：netstat 一次拿全表（不依赖 psutil 权限）。比「逐进程扫几千个
+    # p.connections()」快一个数量级 —— 非管理员环境下 psutil.net_connections
+    # 抛 AccessDenied 时，这里是首选兜底（2026-11-19 实测：Win11 24H2 非管理员
+    # 走 netstat 是几百 ms，走逐进程扫描是几秒）。
+    try:
+        cmd = ["netstat", "-ano"]
+        preferred_enc = locale.getpreferredencoding(False) or "utf-8"
+        # timeout 兜底: netstat 在连接表极大时可能慢, 别让调用方无限期等
+        r = run_hidden(cmd, capture_output=True, text=True, encoding=preferred_enc,
+                      errors="ignore", timeout=10)
+        if r.returncode == 0 and r.stdout:
+            pids = set()
+            # 只查找 LISTENING 状态的进程，避免误杀连接到该端口的浏览器
+            pattern_tcp = re.compile(rf"^\s*TCP\s+\S+:{port}\s+\S+:\S+\s+LISTENING\s+(\d+)\s*$", re.IGNORECASE)
+            for line in r.stdout.splitlines():
+                m = pattern_tcp.match(line)
+                if m:
+                    try:
+                        pid_val = int(m.group(1))
+                        if pid_val > 0:
+                            pids.add(pid_val)
+                    except Exception:
+                        pass
+            return list(pids)
+    except Exception:
+        pass
+    # 最慢兜底：逐进程扫 p.connections()（上千个进程，每个都要枚举自己的
+    # 连接表）—— 只在上面两条都拿不到时用。实测几秒级。
+    if psutil and port_int is not None:
         try:
             pids = set()
             for p in psutil.process_iter(attrs=["pid"]):
@@ -56,26 +132,6 @@ def find_pids_by_port_safe(port: str):
                 return list(pids)
         except Exception:
             pass
-    try:
-        cmd = ["netstat", "-ano"]
-        preferred_enc = locale.getpreferredencoding(False) or "utf-8"
-        r = run_hidden(cmd, capture_output=True, text=True, encoding=preferred_enc, errors="ignore")
-        if r.returncode == 0 and r.stdout:
-            pids = set()
-            # 只查找 LISTENING 状态的进程，避免误杀连接到该端口的浏览器
-            pattern_tcp = re.compile(rf"^\s*TCP\s+\S+:{port}\s+\S+:\S+\s+LISTENING\s+(\d+)\s*$", re.IGNORECASE)
-            for line in r.stdout.splitlines():
-                m = pattern_tcp.match(line)
-                if m:
-                    try:
-                        pid_val = int(m.group(1))
-                        if pid_val > 0:
-                            pids.add(pid_val)
-                    except Exception:
-                        pass
-            return list(pids)
-    except Exception:
-        pass
     return []
 
 def _cmdline_via_windows_query(app, pid: int) -> str:
