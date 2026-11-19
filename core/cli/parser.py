@@ -11,7 +11,7 @@
     status      打印运行状态
     restart     stop + start
     info        打印当前生效配置
-    logs        tail 日志（launcher / comfyui 二选一）
+    logs        tail 日志（launcher / comfyui / webui / openjutsu / h3-engine 五选一）
     update      更新组件（comfyui 内核 / plugins 全部插件）
     plugins     管理 custom_nodes 插件（list/install/uninstall/disable/enable/check-updates/force-update）
     webui       管理 WebUI 工作台（老命令，契约不变）
@@ -536,7 +536,7 @@ def build_parser() -> argparse.ArgumentParser:
     # logs (有子目标)
     sp = _make_subparser(
         sub, "logs",
-        help="tail 日志文件（launcher / comfyui 二选一）",
+        help="tail 日志文件（launcher / comfyui / webui / openjutsu / h3-engine 五选一）",
         description="打印最近 N 行日志，-f 持续跟踪。",
         epilog=_LOGS_EPILOG,
         formatter_class=argparse.RawDescriptionHelpFormatter,

@@ -35,7 +35,7 @@ python __main__.py <command> [--json] [-v]
 | 停止 | `stop` | 幂等，未跑也退 `0`；加 `--force` 直接 `taskkill /F` |
 | 重启 | `restart` | stop 旧 + start 新 |
 | 看配置 | `info --json` | `.comfyui_path` `.python_path` `.port` `.launcher_version` `.environments` `.active_env_id` |
-| 看日志 | `logs comfyui -n 100 --no-follow` | `comfyui` / `launcher` / `webui` / `openjutsu` 四选一；**务必带 `--no-follow`** |
+| 看日志 | `logs comfyui -n 100 --no-follow` | `comfyui` / `launcher` / `webui` / `openjutsu` / `h3-engine` 五选一；**务必带 `--no-follow`** |
 | 更新内核 | `update comfyui --dry-run` 然后 `update comfyui` | 先 dry-run 看会做什么 |
 | webui 工作台（非核心，可选服务） | `webui status` / `webui start` / `webui info` | 与 ComfyUI 平级的服务；退出码多了 `6`(ComfyUI 未跑) / `7`(未安装) / `8`(依赖缺失)；详见 `webui --help` |
 | 伴生服务（v1.1.0+，openjutsu 等） | `service list` → `service start openjutsu` / `service status openjutsu` | 服务生命周期单元（内部多命令是实现细节）；退出码与 webui 同值同义（6/7/8）；`service ... webui` 转发老 `webui` 实现；openjutsu `requires_comfyui`（未跑退 6，不强启动）；`logs openjutsu` 读 `launcher/openjutsu.log` |
