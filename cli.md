@@ -361,7 +361,9 @@ comfyui-launcher service <ACTION> <SERVICE_ID> [flags]
 
 openjutsu（`requires_comfyui`）：`start` 前 ComfyUI 必须在跑，否则退 6（不强启动，自动起走 GUI 一键启动）；三进程链 `npm build → proxy(8197) → app(8198)`，pidfile 是 v2 多进程格式（`launcher/openjutsu.pid`），日志三路合一（`launcher/openjutsu.log`，`[build]/[proxy]/[app]` 前缀）。
 
-h3-engine（H3 短剧工作台）：ComfyUI-Mie-H3-Engine 自带的 Flask 工作台，单进程（`<环境 python> -u <插件根>/webapp/__main__.py`），端口 8200（覆盖键 `services.h3-engine.port`）。**不要求 ComfyUI 在跑**（工作台离线也能管资产/剧本，只有提交渲染才需要 ComfyUI），所以 `requires_comfyui=false`、也不会被 `stop_orphan_companions` 顺手停掉。就绪判据比端口更严：`GET /api/health` 要回 `status=ok` 且 `app=comfyui-mie-web`。日志直写文件（`launcher/h3-engine.log`），CLI 起完退出后服务照样能写日志。安装链与 WebUI 工作台同构：`install` = clone 引擎（目录已有内容则跳过，**不删用户数据**）；`setup` = 把引擎的 `requirements.txt` 装进该环境的 embedded python；`update` = `git fetch + reset --hard`（**用户的资产库与密钥不会被覆盖**：引擎仓库 .gitignore 已排除它们，更新前还会再体检一次）。
+h3-engine（H3 短剧工作台，**Beta**）：ComfyUI-Mie-H3-Engine 自带的 Flask 工作台，单进程（`<环境 python> -u <插件根>/webapp/__main__.py`），端口 8200（覆盖键 `services.h3-engine.port`）。**不要求 ComfyUI 在跑**（工作台离线也能管资产/剧本，只有提交渲染才需要 ComfyUI），所以 `requires_comfyui=false`、也不会被 `stop_orphan_companions` 顺手停掉。就绪判据比端口更严：`GET /api/health` 要回 `status=ok` 且 `app=comfyui-mie-web`。日志直写文件（`launcher/h3-engine.log`），CLI 起完退出后服务照样能写日志。安装链与 WebUI 工作台同构：`install` = clone 引擎（目录已有内容则跳过，**不删用户数据**）；`setup` = 把引擎的 `requirements.txt` 装进该环境的 embedded python；`update` = `git fetch + reset --hard`（**用户的资产库与密钥不会被覆盖**：引擎仓库 .gitignore 已排除它们，更新前还会再体检一次）。
+
+> ⚠️ **Beta 状态**（2026-11-19 起）：工作台还在持续完善，功能与交互可能变化；GUI 里 tab 标题带 `(Beta)` 标识。SERVICE_ID 与输出字段不变。
 
 | flag | 默认 | 说明 |
 |---|---|---|

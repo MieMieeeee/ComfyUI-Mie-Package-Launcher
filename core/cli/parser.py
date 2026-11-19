@@ -294,7 +294,7 @@ _SERVICE_EPILOG = """\
 内置服务（注册表，见 core/companion/spec.py）:
   webui      WebUI 工作台 —— 名义条目，转发老 webui 子命令实现（行为/退出码一致）
   openjutsu  openjutsu 视频换角色 —— 走伴生服务新框架（proxy 8189 + app 3000）
-  h3-engine  H3 短剧工作台 —— ComfyUI-Mie-H3-Engine 的 Flask 工作台（app 8200）
+  h3-engine  H3 短剧工作台（Beta）—— ComfyUI-Mie-H3-Engine 的 Flask 工作台（app 8200）
 
 Actions:
   list      注册表总览（每服务 available / running）

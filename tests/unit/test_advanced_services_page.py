@@ -229,10 +229,13 @@ def test_h3_tab_switches_with_installable_environment(qt_app, tmp_path):
 
 
 def test_h3_tab_title_present(qt_app):
-    """H3 tab 标题固定 (代理 grep tab 文案)."""
+    """H3 tab 标题固定 (代理 grep tab 文案).
+
+    带 (Beta) 标识: 工作台还在持续打磨, 明确标出来 (2026-11-19 用户拍板).
+    """
     page = _make_page(qt_app)
     idx = page._tabs.indexOf(page._h3_scroll)
-    assert page._tabs.tabText(idx) == "🎭 H3 短剧工作台"
+    assert page._tabs.tabText(idx) == "🎭 H3 短剧工作台 (Beta)"
 
 
 # ---------------------------------------------------------------------------

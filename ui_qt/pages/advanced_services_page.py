@@ -59,10 +59,12 @@ class AdvancedServicesPage(BasePage):
         self._tabs.addTab(self._openjutsu_scroll, "🎬 openjutsu")
         # H3 短剧工作台 (ComfyUI-Mie-H3-Engine 的 Flask 工作台, 8200).
         # 显隐按 availability —— 没装 H3 引擎的环境不显示这个 tab.
+        # 标题带 (Beta): 工作台还在持续打磨, 明确标出来避免用户当稳定功能用
+        # (2026-11-19 用户拍板: h3 标 beta 先合进 main, 工作台继续迭代).
         self._h3_scroll = None
         if h3_page is not None:
             self._h3_scroll = self._wrap_in_scroll(h3_page)
-            self._tabs.addTab(self._h3_scroll, "🎭 H3 短剧工作台")
+            self._tabs.addTab(self._h3_scroll, "🎭 H3 短剧工作台 (Beta)")
         # 多 tab 设计 (2026-11-10, 用户报告「WebUI 工作台」尾字被切):
         #   - tab 宽度 hint 必须来自 API 字体 (见 _apply_tab_style 内注释);
         #   - tab 多到放不下时: 压缩 + ElideRight 省略号 + 出现 ◀▶ 滚动箭头

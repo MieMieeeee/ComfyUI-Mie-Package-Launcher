@@ -342,6 +342,13 @@ class H3Page(BasePage):
         card_layout.addWidget(self._settings_item)
         info_layout.addWidget(self._info_card, 1)
 
+        beta_hint = QtWidgets.QLabel(
+            "Beta：H3 短剧工作台还在持续完善，功能与交互可能变化；"
+            "遇到问题欢迎反馈（附日志更好定位）。")
+        beta_hint.setStyleSheet(f'color: {self._c("warning", "#D97706")};')
+        beta_hint.setWordWrap(True)
+        info_layout.addWidget(beta_hint)
+
         hint = QtWidgets.QLabel("提示：H3 引擎本体是 ComfyUI 自定义节点，升级请到「插件管理」")
         hint.setStyleSheet(f'color: {self._c("label_dim", "#6B7280")};')
         hint.setWordWrap(True)
