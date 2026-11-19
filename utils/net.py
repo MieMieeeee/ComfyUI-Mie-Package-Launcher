@@ -265,6 +265,52 @@ _GIT_PROXY_ORIG_PREFIXES = (
     'https://gitlab.com/',
 )
 
+
+def apply_git_exec_env(env: dict, git_path: str | None) -> dict:
+    """把 git 可执行文件告诉子进程（GitPython + 裸 git 调用都能找到它）。
+
+    为什么必须有：启动器解析出来的 git 可能是**整合包自带的 PortableGit**
+    （``app.git_path``，见 ``services/git_service.py``），它**不在系统 PATH 里**。
+    ComfyUI 子进程早就因此注入过（``core/launcher_cmd.py``），但 **cm-cli 子进程
+    没有** → cm-cli 里的 ``import git``（GitPython）在**导入阶段**就炸：
+
+        ImportError: Bad git executable.
+        ... manager_core.py line 17 → import git
+
+    → cm-cli 直接退出码 1，插件更新/安装全挂，而启动器只报一句「退出码 1」
+    （issue #111 的真根因）。
+
+    两个机制都设（缺一不可）：
+    - ``GIT_PYTHON_GIT_EXECUTABLE``：GitPython 认它；找不到时它直接 raise
+      ImportError（错误信息里也是让设这个变量）。
+    - ``PATH`` 前置 git 所在目录：裸 ``git`` 调用（Manager 的 git_helper、
+      pip 的 vcs 安装等）靠 PATH 找。
+    """
+    if not env or not git_path:
+        return env
+    try:
+        git_cmd = str(git_path)
+    except Exception:
+        return env
+    if not git_cmd or git_cmd == "git":
+        return env
+    # 路径不存在就别注入（陈旧的 app.git_path 会让 GitPython 指向不存在的文件）
+    try:
+        if not Path(git_cmd).exists():
+            return env
+    except Exception:
+        return env
+    env["GIT_PYTHON_GIT_EXECUTABLE"] = git_cmd
+    try:
+        git_bin = str(Path(git_cmd).resolve().parent)
+        current = env.get("PATH", "")
+        if git_bin and git_bin not in current.split(os.pathsep):
+            env["PATH"] = git_bin + os.pathsep + current
+    except Exception:
+        pass
+    return env
+
+
 # 走代理的 git 子命令。只有这些会真的访问网络, 才值得注入 -c insteadOf;
 # rev-parse / log / describe / status 等本地只读命令加了纯属噪音。
 GIT_NETWORK_SUBCOMMANDS = frozenset({'fetch', 'pull', 'ls-remote', 'clone'})

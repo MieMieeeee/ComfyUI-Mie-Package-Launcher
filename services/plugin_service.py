@@ -1146,6 +1146,24 @@ class PluginService:
         if cfg is not None:
             env["GIT_CONFIG_GLOBAL"] = str(cfg)
 
+    def _apply_git_exec_env(self, env):
+        """把启动器解析出来的 git 可执行文件告诉 cm-cli 子进程。
+
+        issue #111 真根因：整合包自带 PortableGit（``app.git_path``），**不在系统
+        PATH 里**。ComfyUI 子进程有注入（``core/launcher_cmd.py``），cm-cli 子进程
+        原本没有 → cm-cli 里 ``import git``（GitPython）在**导入阶段**就
+        ``ImportError: Bad git executable.`` → cm-cli 直接退出码 1，插件更新/安装
+        全挂，启动器只报一句「cm-cli update 退出码 1」。
+
+        与 ComfyUI 子进程用同一个 helper（``utils.net.apply_git_exec_env``），
+        两边必须一致。
+        """
+        try:
+            from utils.net import apply_git_exec_env
+            apply_git_exec_env(env, self._git_exec())
+        except Exception:
+            logger.debug("cmcli: 注入 git 可执行文件失败", exc_info=True)
+
     # ---- 通用 cm-cli 执行器 ----
     def _run_cmcli(self, args: list[str], timeout: int = _DEFAULT_TIMEOUT) -> dict[str, Any]:
         """跑一个 cm-cli 子命令（优先 cm_fast 包装器）。返回 {returncode, stdout, stderr, error}。"""
@@ -1175,6 +1193,7 @@ class PluginService:
         if script != cm:
             env["CM_FAST_MANAGER_DIR"] = str(cm.parent)
         self._apply_git_proxy_env(env)
+        self._apply_git_exec_env(env)
         try:
             r = run_hidden(
                 cmd,
@@ -1282,6 +1301,7 @@ class PluginService:
         if script != cm:
             env["CM_FAST_MANAGER_DIR"] = str(cm.parent)
         self._apply_git_proxy_env(env)
+        self._apply_git_exec_env(env)
         # 强制 cm-cli（python 子进程）stdout 无缓冲：默认非 tty(PIPE) 下 Python 是
         # 块缓冲，print 会积压到进程结束才 flush，导致流式阶段进度读不到（全程无更新）。
         env["PYTHONUNBUFFERED"] = "1"

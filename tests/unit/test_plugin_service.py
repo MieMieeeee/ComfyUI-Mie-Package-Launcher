@@ -2166,3 +2166,87 @@ def test_update_selected_without_progress_uses_plain_run(tmp_path):
     cmcli.assert_called_once()
     stream.assert_not_called()
     assert res["updated"] is True
+
+
+# ---- issue #111 根因：cm-cli 子进程必须知道 git 可执行文件在哪 ----
+# 整合包自带 PortableGit（app.git_path），不在系统 PATH 里。cm-cli 里
+# `import git`（GitPython）在导入阶段就 ImportError: Bad git executable.
+# → cm-cli 退出码 1 → 插件更新全挂。ComfyUI 子进程早就注入了，cm-cli 之前漏了。
+
+def _dummy_git(tmp_path):
+    """造一个真实存在的假 git.exe（PortableGit 的目录布局）。"""
+    git_exe = tmp_path / "tools" / "PortableGit" / "bin" / "git.exe"
+    git_exe.parent.mkdir(parents=True, exist_ok=True)
+    git_exe.write_text("fake", encoding="utf-8")
+    return git_exe
+
+
+def test_run_cmcli_injects_git_executable_into_env(tmp_path):
+    """cm-cli 子进程 env 必须带 GIT_PYTHON_GIT_EXECUTABLE + git 目录进 PATH。"""
+    import os
+
+    svc = PluginService(_app())
+    git_exe = _dummy_git(tmp_path)
+    svc.app.git_path = str(git_exe)
+
+    captured = {}
+
+    def fake_run_hidden(cmd, **kwargs):
+        captured["env"] = kwargs.get("env")
+        r = MagicMock()
+        r.returncode = 0
+        r.stdout = "done"
+        r.stderr = ""
+        return r
+
+    with patch.object(svc, "_python_exec", return_value="/py/python.exe"),          patch.object(svc, "_cm_cli_path", return_value=Path("/mgr/ComfyUI-Manager/cm-cli.py")),          patch.object(svc, "_comfyui_dir", return_value=Path("/comfy/ComfyUI")),          patch.object(svc, "_materialize_cm_fast", return_value=None),          patch("pathlib.Path.exists", return_value=True),          patch("services.plugin_service.run_hidden", side_effect=fake_run_hidden):
+        svc._run_cmcli(["update", "all"])
+
+    env = captured["env"]
+    assert env["GIT_PYTHON_GIT_EXECUTABLE"] == str(git_exe)
+    git_bin = str(git_exe.resolve().parent)
+    assert env["PATH"].split(os.pathsep)[0] == git_bin, "git 所在目录必须排到 PATH 最前"
+
+
+def test_run_cmcli_streaming_injects_git_executable_into_env(tmp_path):
+    """流式路径（GUI 的「更新选中/全部」走这条）同样要注入。"""
+    svc = PluginService(_app())
+    git_exe = _dummy_git(tmp_path)
+    svc.app.git_path = str(git_exe)
+
+    captured = {}
+
+    def fake_popen(cmd, **kwargs):
+        captured["env"] = kwargs.get("env")
+        proc = MagicMock()
+        proc.stdout = iter(["done\n"])
+        proc.returncode = 0
+        proc.pid = 1234
+        proc.poll.return_value = 0
+        proc.wait.return_value = 0
+        return proc
+
+    with patch.object(svc, "_python_exec", return_value="/py/python.exe"),          patch.object(svc, "_cm_cli_path", return_value=Path("/mgr/ComfyUI-Manager/cm-cli.py")),          patch.object(svc, "_comfyui_dir", return_value=Path("/comfy/ComfyUI")),          patch.object(svc, "_materialize_cm_fast", return_value=None),          patch("pathlib.Path.exists", return_value=True),          patch("services.plugin_service.subprocess.Popen", side_effect=fake_popen):
+        svc._run_cmcli_streaming(["update", "all"])
+
+    env = captured["env"]
+    assert env["GIT_PYTHON_GIT_EXECUTABLE"] == str(git_exe)
+
+
+def test_run_cmcli_skips_git_injection_when_system_git():
+    """app.git_path == "git"（用系统 git）时不动 env。"""
+    svc = PluginService(_app())
+    svc.app.git_path = "git"
+    env = {"PATH": "C:\Windows"}
+    svc._apply_git_exec_env(env)
+    assert "GIT_PYTHON_GIT_EXECUTABLE" not in env
+    assert env["PATH"] == "C:\Windows"
+
+
+def test_run_cmcli_skips_git_injection_when_path_missing(tmp_path):
+    """app.git_path 指向不存在的文件时不注入（陈旧路径会让 GitPython 指空）。"""
+    svc = PluginService(_app())
+    svc.app.git_path = str(tmp_path / "nope" / "git.exe")
+    env = {"PATH": "C:\Windows"}
+    svc._apply_git_exec_env(env)
+    assert "GIT_PYTHON_GIT_EXECUTABLE" not in env

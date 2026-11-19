@@ -256,12 +256,20 @@ def build_launch_params(app, env_id=None):
             except Exception:
                 git_cmd = None
         if git_cmd and git_cmd != 'git':
-            env["GIT_PYTHON_GIT_EXECUTABLE"] = str(git_cmd)
+            # 统一走 utils.net.apply_git_exec_env —— cm-cli 子进程也用同一个
+            # （plugin_service._apply_git_exec_env）。两边必须一致：否则 ComfyUI
+            # 里 Manager 能 import git，cm-cli 里 import git 直接 ImportError
+            # （issue #111 的根因：cm-cli 退出码 1，插件更新全挂）。
             try:
-                git_bin = str(Path(git_cmd).resolve().parent)
-                env["PATH"] = git_bin + os.pathsep + env.get("PATH", "")
+                from utils.net import apply_git_exec_env
+                apply_git_exec_env(env, git_cmd)
             except Exception:
-                pass
+                env["GIT_PYTHON_GIT_EXECUTABLE"] = str(git_cmd)
+                try:
+                    git_bin = str(Path(git_cmd).resolve().parent)
+                    env["PATH"] = git_bin + os.pathsep + env.get("PATH", "")
+                except Exception:
+                    pass
     except Exception:
         pass
     # 用户自定义环境变量（启动页「启动环境变量」input 配置）
